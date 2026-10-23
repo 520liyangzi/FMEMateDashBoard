@@ -93,6 +93,7 @@ export async function downloadOfflineReport(snapshot: unknown, lang: Language): 
     copy.state.failureNotes = {};
     copy.state.aiReports = [];
     copy.state.aiReportsTotal = 0;
+    copy.state.dailySummaries = [];
   } else {
     const feedback = Array.isArray(copy.state?.feedback) ? copy.state.feedback : [];
     const loaded = new Map<string, Promise<string>>();

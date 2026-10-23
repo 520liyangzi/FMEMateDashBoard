@@ -729,3 +729,19 @@
     font-size: 7pt;
   }
 }
+
+@media print {
+  /* A saved narrative carries its own date and title, without dashboard chrome. */
+  main[data-report-tab="daily"] > .page-heading { display: none !important; }
+  .daily-summary-reader-top { padding-bottom: 3mm; }
+  .daily-summary-reader-top .daily-summary-kicker { display: none; }
+  .daily-summary-report-date { margin-bottom: 1mm; }
+  .daily-summary-reader-top h2 { font-size: 16pt; }
+  .daily-summary-reader-top p { font-size: 7pt; margin-top: 2mm; }
+  .daily-summary-print-language { padding-top: 2mm; font-size: 8pt; }
+  .daily-summary-prose { padding: 3mm 0; font-size: 10pt; line-height: 1.65; }
+  .daily-summary-prose h3 { margin: 3mm 0 1.5mm; font-size: 11pt; }
+  .daily-summary-prose h3:first-child { margin: 0 0 3mm; padding-bottom: 3mm; font-size: 14pt; }
+  .daily-summary-prose p { margin-bottom: 2.5mm; }
+  .daily-summary-prose ul, .daily-summary-prose ol { margin-bottom: 2mm; }
+}

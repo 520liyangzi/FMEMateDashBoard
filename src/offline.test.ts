@@ -82,28 +82,35 @@ test('missing feedback screenshots stop the download instead of producing an inc
   });
 });
 
-test('real failure causes and AI reports remain offline while demo export strips private content', async () => {
+test('real failure causes, AI reports and full daily archives remain offline while demo export strips private content', async () => {
   await browserMock(async context => {
     context.setFetch((async (input:RequestInfo|URL)=>{
       assert.equal(String(input),'/api/offline-assets');
       return Response.json({js:'console.log(1)',css:'body{}'});
     }) as typeof fetch);
-    const live={demo:false,state:{feedback:[],failureNotes:{task1:'Saved cause: upstream timeout'},aiReports:[{id:'r1',zh:'已保存的汇报',en:'Saved AI update'}],aiReportsTotal:1}};
+    const dailySummaries=Array.from({length:25},(_,i)=>({date:`2026-10-${String(i+1).padStart(2,'0')}`,title:'Daily archive',zh:'已保存的每日总结',en:`Saved daily update ${i}`}));
+    const live={demo:false,tab:'daily',state:{feedback:[],failureNotes:{task1:'Saved cause: upstream timeout'},aiReports:[{id:'r1',zh:'已保存的汇报',en:'Saved AI update'}],aiReportsTotal:1,dailySummaries}};
     await downloadOfflineReport(live,'en');
     let html=await context.generated()!.text();
     assert.ok(html.includes('Saved cause: upstream timeout'));
     assert.ok(html.includes('Saved AI update'));
-    const demo={demo:true,state:{feedback:[{imageUrl:'/uploads/production.png'}],failureNotes:{task1:'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE'},aiReports:[{id:'r2',en:'PRIVATE_AI_REPORT_ONLY_IN_LIVE_STATE'}],aiReportsTotal:1}};
+    const realExported=JSON.parse(html.match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.deepEqual(realExported.state.dailySummaries,dailySummaries);
+    assert.equal(realExported.tab,'daily');
+    const demo={demo:true,state:{feedback:[{imageUrl:'/uploads/production.png'}],failureNotes:{task1:'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE'},aiReports:[{id:'r2',en:'PRIVATE_AI_REPORT_ONLY_IN_LIVE_STATE'}],aiReportsTotal:1,dailySummaries:[{date:'2026-10-23',en:'PRIVATE_DAILY_SUMMARY_ONLY_IN_LIVE_STATE'}]}};
     await downloadOfflineReport(demo,'zh');
     html=await context.generated()!.text();
     assert.ok(!html.includes('PRIVATE_CAUSE_ONLY_IN_LIVE_STATE'));
     assert.ok(!html.includes('PRIVATE_AI_REPORT_ONLY_IN_LIVE_STATE'));
+    assert.ok(!html.includes('PRIVATE_DAILY_SUMMARY_ONLY_IN_LIVE_STATE'));
     const exported=JSON.parse(html.match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
     assert.deepEqual(exported.state.failureNotes,{});
     assert.deepEqual(exported.state.feedback,[]);
     assert.deepEqual(exported.state.aiReports,[]);
     assert.equal(exported.state.aiReportsTotal,0);
+    assert.deepEqual(exported.state.dailySummaries,[]);
     assert.equal(demo.state.failureNotes.task1,'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE');
     assert.equal(demo.state.aiReportsTotal,1);
+    assert.equal(demo.state.dailySummaries.length,1);
   });
 });

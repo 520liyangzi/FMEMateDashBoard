@@ -14,7 +14,7 @@ import tempfile
 import threading
 import uuid
 import zipfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS groups (date TEXT PRIMARY KEY, count INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY, date TEXT NOT NULL, author TEXT NOT NULL, text TEXT NOT NULL, image TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS failure_notes (taskId TEXT PRIMARY KEY, reason TEXT NOT NULL, updatedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_reports (id TEXT PRIMARY KEY, createdAt TEXT NOT NULL, dateFrom TEXT NOT NULL, dateTo TEXT NOT NULL, scene TEXT NOT NULL, model TEXT NOT NULL, demo INTEGER NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS daily_summaries (date TEXT PRIMARY KEY, title TEXT NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0);
 """
 
@@ -172,7 +173,74 @@ class Store:
                     'failureNotes': {r['taskId']: r['reason'] for r in db.execute('SELECT taskId,reason FROM failure_notes')},
                     'aiReports': [self.ai_report_row(r) for r in db.execute('SELECT * FROM ai_reports ORDER BY createdAt DESC,rowid DESC LIMIT 20')],
                     'aiReportsTotal': db.execute('SELECT count(*) FROM ai_reports').fetchone()[0],
+                    'dailySummaries': [dict(r) for r in db.execute('SELECT date,title,zh,en,createdAt,updatedAt FROM daily_summaries ORDER BY date DESC')],
                     'total': db.execute('SELECT count(*) FROM logs').fetchone()[0]}
+
+    @staticmethod
+    def validate_daily_summary(row):
+        day = require_date(row.get('date'))
+        title = require_string(row.get('title', ''), 'daily summary title', 200).strip()
+        zh = require_string(row.get('zh', ''), 'Chinese daily summary', 100000).strip()
+        en = require_string(row.get('en', ''), 'English daily summary', 100000).strip()
+        if not zh and not en:
+            raise ApiError(400, 'Enter a Chinese or English daily summary before saving.')
+        clean = {'date': day, 'title': title, 'zh': zh, 'en': en}
+        stamps = []
+        for field in ('createdAt', 'updatedAt'):
+            value = require_string(row.get(field), 'daily summary ' + field, 100, True)
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                raise ApiError(400, 'Invalid daily summary timestamp.')
+            if parsed.tzinfo is None:
+                raise ApiError(400, 'Daily summary timestamps must include a timezone.')
+            clean[field] = value
+            stamps.append(parsed)
+        if stamps[0] > stamps[1]:
+            raise ApiError(400, 'Daily summary update time precedes its creation time.')
+        return clean
+
+    def save_daily_summary(self, payload):
+        if not isinstance(payload, dict):
+            raise ApiError(400, 'Daily summary must be an object.')
+        if 'expectedUpdatedAt' not in payload:
+            raise ApiError(400, 'Include expectedUpdatedAt: null for a new date, or the saved timestamp when updating.')
+        expected = payload['expectedUpdatedAt']
+        if expected is not None:
+            require_string(expected, 'expected daily summary timestamp', 100, True)
+        stamp = datetime.now(timezone.utc).isoformat()
+        clean = self.validate_daily_summary({**payload, 'createdAt': stamp, 'updatedAt': stamp})
+        with self.lock, self.connect() as db:
+            existing = db.execute('SELECT createdAt,updatedAt FROM daily_summaries WHERE date=?', (clean['date'],)).fetchone()
+            if expected is None and existing:
+                raise ApiError(409, 'A daily summary already exists for this date. Reload it before editing.')
+            if expected is not None and existing is None:
+                raise ApiError(404, 'The daily summary no longer exists. Reload the archive before saving.')
+            if existing and existing['updatedAt'] != expected:
+                raise ApiError(409, 'This daily summary changed in another window. Reload it before saving your changes.')
+            if existing:
+                clean['createdAt'] = existing['createdAt']
+                # Keep the edit token monotonic even when the system clock moves backwards.
+                now = datetime.now(timezone.utc)
+                previous = datetime.fromisoformat(existing['updatedAt'])
+                if now <= previous:
+                    now = previous + timedelta(microseconds=1)
+                clean['updatedAt'] = now.isoformat()
+            db.execute('INSERT INTO daily_summaries(date,title,zh,en,createdAt,updatedAt) VALUES(?,?,?,?,?,?) ON CONFLICT(date) DO UPDATE SET title=excluded.title,zh=excluded.zh,en=excluded.en,updatedAt=excluded.updatedAt',
+                       tuple(clean[field] for field in ('date', 'title', 'zh', 'en', 'createdAt', 'updatedAt')))
+        return {'summary': clean}
+
+    def delete_daily_summary(self, day, expected):
+        require_date(day)
+        require_string(expected, 'expected daily summary timestamp', 100, True)
+        with self.lock, self.connect() as db:
+            existing = db.execute('SELECT updatedAt FROM daily_summaries WHERE date=?', (day,)).fetchone()
+            if existing is None:
+                raise ApiError(404, 'The daily summary no longer exists.')
+            if existing['updatedAt'] != expected:
+                raise ApiError(409, 'This daily summary changed in another window. Reload it before deleting.')
+            db.execute('DELETE FROM daily_summaries WHERE date=?', (day,))
+        return {'ok': True, 'date': day}
 
     @staticmethod
     def ai_report_row(row):
@@ -342,16 +410,23 @@ class Store:
                 required_tables = {'logs', 'settings', 'groups', 'feedback', 'history'}
                 tables = {r['name'] for r in schema if r['type'] == 'table'}
                 # Legacy backups may omit either of the subsequently added tables.
-                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
+                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
                     raise ApiError(400, 'Backup database contains unsupported schema objects.')
                 if 'failure_notes' in tables and {r['name'] for r in source.execute('PRAGMA table_info(failure_notes)')} != {'taskId', 'reason', 'updatedAt'}:
                     raise ApiError(400, 'Backup failure reason columns are invalid.')
                 if 'ai_reports' in tables and {r['name'] for r in source.execute('PRAGMA table_info(ai_reports)')} != {'id', 'createdAt', 'dateFrom', 'dateTo', 'scene', 'model', 'demo', 'zh', 'en'}:
                     raise ApiError(400, 'Backup AI report columns are invalid.')
+                if 'daily_summaries' in tables and {r['name'] for r in source.execute('PRAGMA table_info(daily_summaries)')} != {'date', 'title', 'zh', 'en', 'createdAt', 'updatedAt'}:
+                    raise ApiError(400, 'Backup daily summary columns are invalid.')
                 if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ApiError(400, 'Backup database integrity check failed.')
                 with self.connect(new_db) as dest:
                     dest.executescript(SCHEMA)
+                    if 'daily_summaries' in tables:
+                        for row in source.execute('SELECT date,title,zh,en,createdAt,updatedAt FROM daily_summaries'):
+                            clean = self.validate_daily_summary(dict(row))
+                            dest.execute('INSERT INTO daily_summaries(date,title,zh,en,createdAt,updatedAt) VALUES(?,?,?,?,?,?)',
+                                         tuple(clean[field] for field in ('date', 'title', 'zh', 'en', 'createdAt', 'updatedAt')))
                     if 'ai_reports' in tables:
                         for row in source.execute('SELECT id,createdAt,dateFrom,dateTo,scene,model,demo,zh,en FROM ai_reports'):
                             values = self.validate_ai_report(dict(row))
@@ -588,6 +663,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(store.validate_ai_request(self.json_body()))
             if path == '/api/ai/generate':
                 return self.json(store.generate_ai_report(self.json_body()))
+            if path == '/api/daily-summaries':
+                return self.json(store.save_daily_summary(self.json_body()))
             if path == '/api/import':
                 return self.json(store.import_logs(self.json_body()))
             if path == '/api/failure-notes':
@@ -631,6 +708,8 @@ class Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             params = parse_qs(url.query)
             store = self.server.store
+            if url.path == '/api/daily-summaries':
+                return self.json(store.delete_daily_summary(params.get('date', [''])[0], params.get('expectedUpdatedAt', [''])[0]))
             if url.path == '/api/groups':
                 day = require_date(params.get('date', [''])[0])
                 with store.lock, store.connect() as db:

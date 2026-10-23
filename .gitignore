@@ -24,6 +24,7 @@ coverage/
 .DS_Store
 # dist is intentionally versioned for Python-only startup.
 
-# Locally generated Claude report material (may contain private log evidence)
+# Locally generated AI report material (may contain private log evidence)
 reports/
 FMEMate_Claude_Report_Prompt*.md
+FMEMate_AI_Report_Prompt*.md

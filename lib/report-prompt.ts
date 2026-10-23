@@ -22,12 +22,12 @@ function stylePreference(value: string): string {
   return value.slice(0, end);
 }
 
-export function claudePromptFilename(facts: AiFacts): string {
-  return `FMEMate_Claude_Report_Prompt_${safeDate(facts.range.from)}_${safeDate(facts.range.to)}.md`;
+export function aiPromptFilename(facts: AiFacts): string {
+  return `FMEMate_AI_Report_Prompt_${safeDate(facts.range.from)}_${safeDate(facts.range.to)}.md`;
 }
 
-/** A portable, self-contained task for Claude opened at the dashboard project root. */
-export function buildClaudeReportPrompt(facts: AiFacts, instructions = ''): string {
+/** A portable, self-contained task for a local AI writing assistant at the project root. */
+export function buildAiReportPrompt(facts: AiFacts, instructions = ''): string {
   const from = safeDate(facts.range.from);
   const to = safeDate(facts.range.to);
   const daily = facts.range.days === 1 && facts.range.from === facts.range.to;
@@ -38,7 +38,7 @@ export function buildClaudeReportPrompt(facts: AiFacts, instructions = ''): stri
     ? `${fenced(preference, 'text')}\n${instructions.trim().length > STYLE_LIMIT ? '（排版偏好超过 4,000 字符，已截断；仅以上内容有效。）' : ''}`.trimEnd()
     : '无额外偏好。';
 
-  return `你是 FMEMate 项目进展汇报编辑。你正在本项目根目录中使用本地 Claude。请直接根据下面已经计算好的事实，生成一版中文、一版英文的进展汇报，供我核对后复制到工作群。无需配置或调用任何 API。
+  return `你是在本项目根目录工作的本地 AI 写作助手，负责编辑 FMEMate 项目进展汇报。请直接根据下面已经计算好的事实，生成一版中文、一版英文的进展汇报，供我核对后复制到工作群。无需配置或调用任何 API。
 
 ## 本次交付
 
