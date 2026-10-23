@@ -1,0 +1,24 @@
+# Dependencies and local tools
+node_modules/
+.sites-runtime/
+.openai/
+.codex/
+# Private application data and backups
+data/
+data-*/
+uploads/
+backups/
+*.db
+*.db-*
+*.sqlite*
+*.zip
+.env*
+.dev.vars*
+*.pem
+# Disposable files
+__pycache__/
+*.pyc
+coverage/
+*.tsbuildinfo
+.DS_Store
+# dist is intentionally versioned for Python-only startup.
