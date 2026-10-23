@@ -160,7 +160,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.1.0。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.1.1。
 
 ## 从 GitHub 获取
 
@@ -173,3 +173,9 @@ python server.py
 仓库包含可直接运行的 `dist/`，克隆后无需安装 Node.js 或 npm 依赖即可启动。个人日志、数据库、截图和备份不纳入 Git 版本管理。
 
 Failure causes are stored by Task Id and included in full backups. Existing databases upgrade automatically; backups from older versions without causes remain supported. Line group entries are date-specific **total member counts**; saving the same date replaces that total. Saving real group data exits demo mode and expands the visible date range to include the new record.
+
+## 用户人数展示口径
+
+概览和用户分析固定展示“人数统计说明”，Top 用户排行旁也说明 `browser` 未计入人数。日志缺陷会把不同用户统一记为 `browser`，无法区分真实人数；因此页面和 Excel 使用“可识别活跃用户”命名，相关使用次数仍计入总量。例如当前只有 `browser` 和 `yangzi` 时，可识别账号数为 1，实际使用总人数无法从这些日志确定，不能理解为只有 1 人使用。中英文页面、离线报表、PDF 打印和 Excel 均采用相同展示口径。
+
+Overview and User analytics always explain the user-count methodology. A logging bug merges multiple users into `browser`; that ID is excluded from people counts and rankings while its interactions stay in usage totals. The displayed **identifiable active users** count is not the actual total number of users. The explanation is also included in Excel and offline reports.
