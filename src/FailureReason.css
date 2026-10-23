@@ -15,5 +15,5 @@
 .failure-reason-print{display:none}
 .failure-reason-spinner{animation:failure-reason-spin 1s linear infinite}
 @keyframes failure-reason-spin{to{transform:rotate(360deg)}}
-@media(max-width:720px){.failure-reason{min-width:220px}.failure-reason textarea{font-size:10px}.failure-reason-actions{gap:7px}}
+@media screen and (max-width:720px){.failure-reason{min-width:220px}.failure-reason textarea{font-size:10px}.failure-reason-actions{gap:7px}}
 @media print{.failure-reason{min-width:120px;max-width:none}.failure-reason-editor{display:none!important}.failure-reason-print{display:block;min-width:0;max-width:none;font-size:9px;line-height:1.6}.failure-reason-readonly{min-width:0;max-width:none;font-size:9px;padding:0}}

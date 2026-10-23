@@ -106,26 +106,31 @@ python server.py --host 0.0.0.0 --port 8000
 
 离线 HTML 的内容固定在导出时刻，后续导入的数据不会自动出现在已发出的文件中；更新后重新导出即可。它包含完整导出快照中的原始问题、回答与截图，文件大小会随日志及截图数量增加。导出时请确认选择了正式数据还是带有“演示数据”标识的示例数据。
 
-## AI 进展汇报
+## 本地 Claude 汇报提示词
 
-新增 **AI 进展汇报 / AI progress report** Tab。先导入日志、更新群人数和反馈、保存已知失败原因，再进入此页：
+**Claude 汇报提示词 / Claude report prompt** Tab 无需配置 API 地址、模型或 Key。网页先按当前筛选范围生成一份完整提示词，再由你本地的 Claude 生成中英文汇报：
 
-1. 展开接口配置，填写 **Base URL、API Key、模型名称**，选择 `Chat Completions` 或 `Responses`，点击“测试连接并保存”。系统先向当前填写的接口、Key 和模型发起一条简短测试请求，收到有效回复后才保存，并显示测试耗时。测试不会发送日志，也不会新增汇报。失败会显示原因，保留原来的配置和 Key；修改后可以重试，原配置未改也可重新测试。OpenAI 的 Base URL 是 `https://api.openai.com/v1`；兼容接口填写服务商的 API 基础地址，不要再拼接 `/chat/completions` 或 `/responses`。模型名称按服务商提供的可用名称填写。
-2. 使用页面日期和场景筛选，或者点击“最新日志日”生成最近一天的日报。多日范围会生成明确标注起止日期的阶段汇报。
-3. 可补充汇报风格要求，并预览实际提示词与发送的数据摘要。点击“一键生成中英文”，服务会一次生成中文和英文两版自然语言汇报，按使用情况、客户需求、失败排查、群运营和下一步组织内容。
-4. 两版汇报均可复制、下载文字或 Markdown，也可通过浏览器打印保存 PDF。生成结果自动保存，历史记录可再次查看；离线 HTML 包含最近 20 份已保存汇报，支持只读查看和复制。
+1. 导入日志，更新 Line group 人数与反馈，保存已知失败原因。
+2. 打开“Claude 汇报提示词”，选择日期和 Scene；点击“仅看最近有日志的一天”可生成日报范围。多日范围会要求输出阶段汇报。
+3. 可补充汇报风格要求，点击“生成 Claude 提示词”。提示词包含当前统计汇总、问题排行、自主提问、有限的失败上下文与已填原因、群人数及文字反馈。截图不会发送；示例上限和截断情况会保留。
+4. 点击复制直接交给 Claude，或者下载 `.md` 放到项目根目录。在项目根目录打开 Claude，粘贴页面提供的“请读取 …，按要求生成中英文汇报”指令。
+5. Claude 按提示词生成 `reports/FMEMate_Progress_起始日期_结束日期_zh.md` 和对应 `_en.md`，按使用情况、客户需求、失败排查、群运营、下一步组织自然语言汇报。核对后即可复制到群里。
 
-AI 使用与页面相同的统计结果。发送内容是当前筛选范围的完整汇总指标，以及有数量和长度上限的用户排行、问题、失败上下文、已填原因、群人数和文字反馈；示例的上限与覆盖情况会在摘要中标注。不会把整张 Excel 或反馈截图发给模型。群运营数据按日期筛选，不跟随日志 Scene 筛选。示例数据始终标为演示，不能作为正式项目进展。
+生成提示词的过程完全在浏览器本地完成，不调用模型接口、不读取 Key、不自动启动 Claude，也不自动发消息。离线 HTML 也可以根据其数据快照生成提示词。修改筛选范围或补充要求后请重新生成；已下载的文件是当时的固定快照。
 
-提示词明确要求：`browser` 的实际人数未知，不得把可识别账号数写成真实总人数；MML 不算自主提问，空回答正常；没有 `Sorry` 不代表业务成功；没有已填写原因的失败应写为待排查；没有可比人数记录时不编造增长；不能从尚未读取的截图推断点赞或好评。AI 输出是草稿，可核对、编辑后发群，网页不会自动发送消息。
+提示词沿用页面口径：`browser` 的实际人数未知；MML 不计自主提问且空返回正常；没有 `Sorry` 不代表业务成功；未保存原因的失败应写为待排查；没有可比群人数时不编造增长；不能从截图存在标识推断好评。模型只使用附带的事实数据，不重算数据库、不修改源码或 Git、不读取密钥配置、不额外调用接口。模型输出仍需人工核对。
 
-API Key 只保存在本地服务的数据目录 `ai-config.json` 中，不回显，不写入浏览器存储、数据库备份、离线报表或 Git 仓库。留空保存会保留已有 Key，勾选清除后保存可移除 Key；清除操作不进行连接测试，即使服务商暂时不可用也能清除。完整数据备份含 AI 汇报历史，不含接口配置；迁移后需要重新配置接口。自定义 `--data-dir` 时配置跟随该目录。模型请求由 Python 后端发起，客户端不用直接连接模型接口；如使用代理，按 Python 标准 `HTTPS_PROXY` / `HTTP_PROXY` 环境变量配置。API 调用是否可用及费用以你配置的服务商为准。
+下载的提示词和生成的 `reports/` 可能包含日志证据，已加入 `.gitignore`。上一版已经保存的汇报保留，可在历史草稿中查看、复制和下载；完整备份及离线 HTML 继续包含已保存汇报。旧的本地 API 配置文件不会被删除，新流程无需使用它。
 
-部署前已用本地模拟接口验证生成和异常处理；项目不附带真实 API Key，未执行付费模型请求。输出上限和超时可在界面调整；如果接口提示输出被截断，可以提高上限后重试。已有旧数据库与旧版备份会自动兼容升级。
+The **Claude report prompt** tab creates a self-contained prompt locally from the current dates, scene and calculated metrics. No API URL or key is needed in the dashboard. Copy the prompt into your local Claude, or download the Markdown file into the project root, open Claude there and use the displayed read-file instruction. Claude writes separate Chinese and English reports to `reports/`, with dated headings and concise paragraphs for usage, needs, failure investigation, community progress and next actions. The prompt includes bounded textual evidence and reporting rules; screenshots are excluded. Offline snapshots support the same local prompt flow. Regenerate after changing filters. Existing saved report drafts remain available. Downloaded prompt files and generated reports are ignored by Git; review the model's wording before sharing.
 
-AI progress report creates both Chinese and English narrative updates from the selected date range and scene. Configure your provider Base URL, API key, model, and Chat Completions or Responses format, then click **Test & save**. A short request checks the current endpoint, key and model before saving; no log data is sent and no report is created. Successful tests show latency. Failed tests preserve the prior configuration and key. An unchanged connection can also be retested. Clearing a key saves without calling the provider, so it works even if the provider is down. After a successful test, generate your report. You can preview the prompt, add style instructions, copy each language, download text/Markdown, and reopen saved reports. The server sends aggregate metrics and bounded textual evidence, including saved failure causes; screenshots and the complete workbook are not sent. Community metrics use the date range independently of the log scene filter. Reports preserve the browser/MML/failure methodology and label missing evidence and demo data. Keys stay in the local server's `ai-config.json`, excluded from backups, offline exports, browser storage and Git. Offline HTML includes the latest 20 saved reports for read-only viewing. No messages are sent automatically. Test coverage uses a local mock provider; configure your own credentials for live generation.
+## 打印与 PDF
 
-API formats follow the official [Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) and [Responses guide](https://developers.openai.com/api/docs/guides/migrate-to-responses).
+点击打印会导出**当前 Tab、当前筛选结果、当前表格页**，不会自动合并其他 Tab 或所有表格页。默认使用 A4 横向；浏览器打印窗口中选择“另存为 PDF”即可。打印版会显示日期、Scene、搜索条件以及表格页码和行范围。完整记录仍请导出 Excel 或离线 HTML。
+
+Overview 与 Line group 使用单独的固定坐标矢量图打印，避免屏幕图表在纸面重新测量后变形。问题排行等表格使用打印列宽、自动换行和重复表头；普通行避免在两页之间拆开，内容较长时会继续分页。Custom / Failure 打印完整 Answer 和已保存失败原因。网页交互控件不会出现在打印结果里。
+
+Print / Save PDF covers the current tab, filters and visible table page. It defaults to A4 landscape and includes static filter and row-range context. Charts use stable vector geometry, tables wrap and repeat headers across pages, and saved failure causes and full answers are retained. Use Excel or offline HTML for the complete dataset.
 
 ## 修改前端源码
 
@@ -182,7 +187,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.2.1。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.3.0。
 
 ## 从 GitHub 获取
 
