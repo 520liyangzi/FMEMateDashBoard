@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
+from ai_service import AiError, AiService, make_prompt
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS groups (date TEXT PRIMARY KEY, count INTEGER NOT NULL CHECK(count>=0));
 CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY, date TEXT NOT NULL, author TEXT NOT NULL, text TEXT NOT NULL, image TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS failure_notes (taskId TEXT PRIMARY KEY, reason TEXT NOT NULL, updatedAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ai_reports (id TEXT PRIMARY KEY, createdAt TEXT NOT NULL, dateFrom TEXT NOT NULL, dateTo TEXT NOT NULL, scene TEXT NOT NULL, model TEXT NOT NULL, demo INTEGER NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0);
 """
 
@@ -146,6 +148,7 @@ class Store:
         self.uploads.mkdir(exist_ok=True)
         self.db_path = self.root / 'report.db'
         self.lock = threading.RLock()
+        self.ai = AiService(self.root)
         with self.connect() as db:
             db.executescript(SCHEMA)
             db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)', ('presets', json.dumps(DEFAULT_PRESETS)))
@@ -167,7 +170,55 @@ class Store:
                     'feedback': [self.feedback_row(r) for r in db.execute('SELECT * FROM feedback ORDER BY date DESC,rowid DESC')],
                     'history': [dict(r) for r in db.execute('SELECT * FROM history ORDER BY createdAt DESC,rowid DESC')],
                     'failureNotes': {r['taskId']: r['reason'] for r in db.execute('SELECT taskId,reason FROM failure_notes')},
+                    'aiReports': [self.ai_report_row(r) for r in db.execute('SELECT * FROM ai_reports ORDER BY createdAt DESC,rowid DESC LIMIT 20')],
+                    'aiReportsTotal': db.execute('SELECT count(*) FROM ai_reports').fetchone()[0],
                     'total': db.execute('SELECT count(*) FROM logs').fetchone()[0]}
+
+    @staticmethod
+    def ai_report_row(row):
+        return {'id': row['id'], 'createdAt': row['createdAt'], 'from': row['dateFrom'], 'to': row['dateTo'],
+                'scene': row['scene'], 'model': row['model'], 'demo': bool(row['demo']), 'zh': row['zh'], 'en': row['en']}
+
+    @staticmethod
+    def validate_ai_report(row):
+        for field, limit in [('id', 1000), ('createdAt', 100), ('dateFrom', 10), ('dateTo', 10), ('model', 200), ('zh', 60000), ('en', 60000)]:
+            require_string(row[field], 'AI report ' + field, limit, True)
+        require_string(row['scene'], 'AI report scene', 1000)
+        require_date(row['dateFrom'])
+        require_date(row['dateTo'])
+        if row['dateFrom'] > row['dateTo'] or type(row['demo']) is not int or row['demo'] not in (0, 1):
+            raise ApiError(400, 'Invalid AI report range or demo flag.')
+        datetime.fromisoformat(row['createdAt'])
+        return tuple(row[key] for key in ('id', 'createdAt', 'dateFrom', 'dateTo', 'scene', 'model', 'demo', 'zh', 'en'))
+
+    def get_ai_reports(self, offset=0, limit=20):
+        with self.lock, self.connect() as db:
+            return {'reports': [self.ai_report_row(r) for r in db.execute('SELECT * FROM ai_reports ORDER BY createdAt DESC,rowid DESC LIMIT ? OFFSET ?', (limit, offset))],
+                    'total': db.execute('SELECT count(*) FROM ai_reports').fetchone()[0]}
+
+    @staticmethod
+    def validate_ai_request(payload):
+        prompt = make_prompt(payload)
+        scope = payload['facts']['range']
+        start, end = require_date(scope.get('from')), require_date(scope.get('to'))
+        if start > end:
+            raise ApiError(400, 'The AI report start date must not be later than its end date.')
+        require_string(scope.get('scene', ''), 'AI report scene', 1000)
+        if type(payload['facts'].get('demo')) is not bool:
+            raise ApiError(400, 'The AI report demo flag must be a boolean.')
+        return prompt
+
+    def generate_ai_report(self, payload):
+        self.validate_ai_request(payload)
+        result = self.ai.generate(payload)
+        scope = payload['facts']['range']
+        row = {'id': uuid.uuid4().hex, 'createdAt': datetime.now(timezone.utc).isoformat(),
+               'dateFrom': scope['from'], 'dateTo': scope['to'], 'scene': scope.get('scene', ''),
+               'model': result['model'], 'demo': int(payload['facts']['demo']), 'zh': result['zh'], 'en': result['en']}
+        values = self.validate_ai_report(row)
+        with self.lock, self.connect() as db:
+            db.execute('INSERT INTO ai_reports(id,createdAt,dateFrom,dateTo,scene,model,demo,zh,en) VALUES(?,?,?,?,?,?,?,?,?)', values)
+        return {'report': self.ai_report_row(row)}
 
     @staticmethod
     def feedback_row(r):
@@ -290,15 +341,21 @@ class Store:
                 schema = source.execute("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
                 required_tables = {'logs', 'settings', 'groups', 'feedback', 'history'}
                 tables = {r['name'] for r in schema if r['type'] == 'table'}
-                # Backups made before failure annotations have no failure_notes table.
-                if tables not in (required_tables, required_tables | {'failure_notes'}) or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
+                # Legacy backups may omit either of the subsequently added tables.
+                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
                     raise ApiError(400, 'Backup database contains unsupported schema objects.')
                 if 'failure_notes' in tables and {r['name'] for r in source.execute('PRAGMA table_info(failure_notes)')} != {'taskId', 'reason', 'updatedAt'}:
                     raise ApiError(400, 'Backup failure reason columns are invalid.')
+                if 'ai_reports' in tables and {r['name'] for r in source.execute('PRAGMA table_info(ai_reports)')} != {'id', 'createdAt', 'dateFrom', 'dateTo', 'scene', 'model', 'demo', 'zh', 'en'}:
+                    raise ApiError(400, 'Backup AI report columns are invalid.')
                 if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ApiError(400, 'Backup database integrity check failed.')
                 with self.connect(new_db) as dest:
                     dest.executescript(SCHEMA)
+                    if 'ai_reports' in tables:
+                        for row in source.execute('SELECT id,createdAt,dateFrom,dateTo,scene,model,demo,zh,en FROM ai_reports'):
+                            values = self.validate_ai_report(dict(row))
+                            dest.execute('INSERT INTO ai_reports(id,createdAt,dateFrom,dateTo,scene,model,demo,zh,en) VALUES(?,?,?,?,?,?,?,?,?)', values)
                     for row in source.execute('SELECT taskId,clientId,question,time,date,answer,scene FROM logs'):
                         clean = validate_log(dict(row))
                         dest.execute('INSERT INTO logs VALUES(?,?,?,?,?,?,?)', tuple(clean[f] for f in LOG_FIELDS))
@@ -450,7 +507,7 @@ class Handler(BaseHTTPRequestHandler):
         return result
 
     def handle_error(self, exc):
-        if isinstance(exc, ApiError):
+        if isinstance(exc, (ApiError, AiError)):
             self.json({'error': exc.message}, exc.status)
         elif isinstance(exc, (BrokenPipeError, ConnectionResetError)):
             pass
@@ -468,6 +525,17 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(url.query)
             if path == '/api/state':
                 return self.json(self.server.store.state())
+            if path == '/api/ai/config':
+                return self.json(self.server.store.ai.get_config())
+            if path == '/api/ai/reports':
+                try:
+                    offset = int(params.get('offset', ['0'])[0])
+                    limit = int(params.get('limit', ['20'])[0])
+                except ValueError:
+                    raise ApiError(400, 'Invalid AI report pagination.')
+                if offset < 0 or not 1 <= limit <= 100:
+                    raise ApiError(400, 'AI report limit must be between 1 and 100.')
+                return self.json(self.server.store.get_ai_reports(offset, limit))
             if path == '/api/logs':
                 try:
                     offset = int(params.get('offset', ['0'])[0])
@@ -514,6 +582,12 @@ class Handler(BaseHTTPRequestHandler):
             self.check_origin()
             path = urlsplit(self.path).path
             store = self.server.store
+            if path == '/api/ai/config':
+                return self.json(store.ai.save_config(self.json_body()))
+            if path == '/api/ai/preview':
+                return self.json(store.validate_ai_request(self.json_body()))
+            if path == '/api/ai/generate':
+                return self.json(store.generate_ai_report(self.json_body()))
             if path == '/api/import':
                 return self.json(store.import_logs(self.json_body()))
             if path == '/api/failure-notes':

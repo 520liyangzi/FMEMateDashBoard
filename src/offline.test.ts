@@ -82,23 +82,28 @@ test('missing feedback screenshots stop the download instead of producing an inc
   });
 });
 
-test('real failure causes remain in offline snapshots while demo export strips production annotations', async () => {
+test('real failure causes and AI reports remain offline while demo export strips private content', async () => {
   await browserMock(async context => {
     context.setFetch((async (input:RequestInfo|URL)=>{
       assert.equal(String(input),'/api/offline-assets');
       return Response.json({js:'console.log(1)',css:'body{}'});
     }) as typeof fetch);
-    const live={demo:false,state:{feedback:[],failureNotes:{task1:'Saved cause: upstream timeout'}}};
+    const live={demo:false,state:{feedback:[],failureNotes:{task1:'Saved cause: upstream timeout'},aiReports:[{id:'r1',zh:'已保存的汇报',en:'Saved AI update'}],aiReportsTotal:1}};
     await downloadOfflineReport(live,'en');
     let html=await context.generated()!.text();
     assert.ok(html.includes('Saved cause: upstream timeout'));
-    const demo={demo:true,state:{feedback:[{imageUrl:'/uploads/production.png'}],failureNotes:{task1:'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE'}}};
+    assert.ok(html.includes('Saved AI update'));
+    const demo={demo:true,state:{feedback:[{imageUrl:'/uploads/production.png'}],failureNotes:{task1:'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE'},aiReports:[{id:'r2',en:'PRIVATE_AI_REPORT_ONLY_IN_LIVE_STATE'}],aiReportsTotal:1}};
     await downloadOfflineReport(demo,'zh');
     html=await context.generated()!.text();
     assert.ok(!html.includes('PRIVATE_CAUSE_ONLY_IN_LIVE_STATE'));
+    assert.ok(!html.includes('PRIVATE_AI_REPORT_ONLY_IN_LIVE_STATE'));
     const exported=JSON.parse(html.match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
     assert.deepEqual(exported.state.failureNotes,{});
     assert.deepEqual(exported.state.feedback,[]);
+    assert.deepEqual(exported.state.aiReports,[]);
+    assert.equal(exported.state.aiReportsTotal,0);
     assert.equal(demo.state.failureNotes.task1,'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE');
+    assert.equal(demo.state.aiReportsTotal,1);
   });
 });

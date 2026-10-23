@@ -12,6 +12,7 @@ backups/
 *.db-*
 *.sqlite*
 *.zip
+ai-config.json
 .env*
 .dev.vars*
 *.pem

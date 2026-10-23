@@ -91,6 +91,8 @@ export async function downloadOfflineReport(snapshot: unknown, lang: Language): 
     // A synthetic preview must never carry production screenshots into a file.
     copy.state.feedback = [];
     copy.state.failureNotes = {};
+    copy.state.aiReports = [];
+    copy.state.aiReportsTotal = 0;
   } else {
     const feedback = Array.isArray(copy.state?.feedback) ? copy.state.feedback : [];
     const loaded = new Map<string, Promise<string>>();
