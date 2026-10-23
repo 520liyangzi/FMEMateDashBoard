@@ -8,6 +8,8 @@ type AiConfig = {
   baseUrl: string; apiFormat: 'chat_completions' | 'responses'; model: string;
   maxOutputTokens: number; timeoutSeconds: number; hasApiKey: boolean; configured: boolean;
 };
+type ConnectionTest = { status: 'passed'; latencyMs: number; testedAt: string; model: string }
+  | { status: 'skipped'; reason: 'api_key_cleared' };
 export type AiReportTabProps = {
   lang: Language; facts: AiFacts; readOnly: boolean; savedReports: AiReport[]; savedReportsTotal: number;
   onReportSaved: (report: AiReport) => void; notify: (message: string) => void; onLatestDay: () => void;
@@ -89,6 +91,8 @@ export default function AiReportTab({ lang, facts, readOnly, savedReports = [], 
   const [configOpen, setConfigOpen] = useState(false);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [configError, setConfigError] = useState('');
+  const [configErrorSource, setConfigErrorSource] = useState<'load' | 'save'>('load');
+  const [connectionTest, setConnectionTest] = useState<ConnectionTest | null>(null);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState('');
@@ -117,7 +121,7 @@ export default function AiReportTab({ lang, facts, readOnly, savedReports = [], 
     request('/api/ai/config').then(result => {
       if (cancelled) return;
       const next = { ...emptyConfig, ...result }; setConfig(next); setDraftConfig(next); setConfigLoaded(true); setConfigOpen(!next.configured); setConfigError('');
-    }).catch(error => { if (!cancelled) { setConfigLoaded(true); setConfigOpen(true); setConfigError(errorText(error)); } });
+    }).catch(error => { if (!cancelled) { setConfigLoaded(true); setConfigOpen(true); setConfigErrorSource('load'); setConfigError(errorText(error)); } });
     return () => { cancelled = true; };
   }, [readOnly]);
   // A preview must always correspond to the current filters and editor contents.
@@ -130,15 +134,31 @@ export default function AiReportTab({ lang, facts, readOnly, savedReports = [], 
   const disabled = saving || generating;
   const configDirty = draftConfig.baseUrl !== config.baseUrl || draftConfig.apiFormat !== config.apiFormat || draftConfig.model !== config.model || draftConfig.maxOutputTokens !== config.maxOutputTokens || draftConfig.timeoutSeconds !== config.timeoutSeconds || !!apiKey || clearApiKey;
 
+  function editConfig(fields: Partial<AiConfig>) {
+    setDraftConfig(value => ({ ...value, ...fields })); setConnectionTest(null); setConfigError('');
+  }
+  function editKey(value: string) {
+    setApiKey(value); if (value) setClearApiKey(false); setConnectionTest(null); setConfigError('');
+  }
+  function editClearKey(value: boolean) {
+    setClearApiKey(value); if (value) setApiKey(''); setConnectionTest(null); setConfigError('');
+  }
+
   async function saveConfig(event: React.FormEvent) {
     event.preventDefault();
-    if (readOnly || saveInFlight.current || generating) return;
-    saveInFlight.current = true; setSaving(true); setConfigError('');
+    if (readOnly || saveInFlight.current || inFlight.current) return;
+    saveInFlight.current = true; setSaving(true); setConfigError(''); setConnectionTest(null);
     try {
       const result = await request('/api/ai/config', { baseUrl: draftConfig.baseUrl.trim(), apiFormat: draftConfig.apiFormat, model: draftConfig.model.trim(), maxOutputTokens: Number(draftConfig.maxOutputTokens), timeoutSeconds: Number(draftConfig.timeoutSeconds), apiKey, clearApiKey });
       const next = { ...emptyConfig, ...result }; setConfig(next); setDraftConfig(next); setApiKey(''); setClearApiKey(false);
-      notify(t('AI 接口配置已保存。', 'AI connection saved.'));
-    } catch (error) { setConfigError(errorText(error)); }
+      if (result.connectionTest?.status === 'passed') {
+        setConnectionTest({ status: 'passed', latencyMs: result.connectionTest.latencyMs, testedAt: result.connectionTest.testedAt, model: next.model });
+        notify(t('连接测试通过，AI 接口配置已保存。', 'Connection test passed. AI connection saved.'));
+      } else if (result.connectionTest?.status === 'skipped' && result.connectionTest.reason === 'api_key_cleared') {
+        setConnectionTest({ status: 'skipped', reason: 'api_key_cleared' });
+        notify(t('API Key 已清除，未进行连接测试。', 'API key cleared. No connection test was run.'));
+      }
+    } catch (error) { setConfigErrorSource('save'); setConfigError(errorText(error)); }
     finally { saveInFlight.current = false; if (alive.current) setSaving(false); }
   }
   async function previewPrompt() {
@@ -152,7 +172,7 @@ export default function AiReportTab({ lang, facts, readOnly, savedReports = [], 
     finally { if (alive.current && requestId === previewRequest.current) setPreviewPending(false); }
   }
   async function generate() {
-    if (readOnly || !config.configured || configDirty || inFlight.current) return;
+    if (readOnly || !config.configured || configDirty || inFlight.current || saveInFlight.current) return;
     inFlight.current = true; setGenerating(true); setGenerationError('');
     try {
       const result = await request('/api/ai/generate', { facts, instructions });
@@ -206,18 +226,21 @@ export default function AiReportTab({ lang, facts, readOnly, savedReports = [], 
         <summary><Settings2 size={16}/><strong>{t('AI 接口配置', 'AI connection')}</strong><span className={config.configured ? 'ai-config-status ready' : 'ai-config-status'}>{!configLoaded ? t('读取中…', 'Loading…') : config.configured ? t('已配置', 'Configured') : t('待配置', 'Not configured')}</span><ChevronDown size={15}/></summary>
         <form onSubmit={saveConfig}>
           <fieldset disabled={disabled || !configLoaded} className="ai-config-fields">
-            <label className="ai-field ai-wide-field"><span>API Base URL</span><input aria-label="AI API Base URL" type="url" value={draftConfig.baseUrl} onChange={event => setDraftConfig(value => ({ ...value, baseUrl: event.target.value }))} required placeholder="https://api.openai.com/v1" autoComplete="off" spellCheck={false}/><small>{t('填写基础地址（如以 /v1 结尾）；系统会自动追加对应 API 路径。', 'Enter the base URL (for example, ending in /v1). The API path is added automatically.')}</small></label>
-            <label className="ai-field"><span>{t('API 格式', 'API format')}</span><select aria-label={t('AI API 格式', 'AI API format')} value={draftConfig.apiFormat} onChange={event => setDraftConfig(value => ({ ...value, apiFormat: event.target.value as AiConfig['apiFormat'] }))}><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label>
-            <label className="ai-field"><span>{t('模型名称', 'Model name')}</span><input aria-label={t('AI 模型名称', 'AI model name')} value={draftConfig.model} onChange={event => setDraftConfig(value => ({ ...value, model: event.target.value }))} required placeholder={t('填写接口支持的模型 ID', 'Enter a supported model ID')} maxLength={200} autoComplete="off" spellCheck={false}/></label>
-            <label className="ai-field ai-wide-field"><span>API Key <em>{config.hasApiKey ? t('已保存在本地服务，留空保留', 'Saved on the local server; leave blank to keep') : t('由你配置', 'Configure your key')}</em></span><input aria-label="AI API Key" type="password" value={apiKey} onChange={event => { setApiKey(event.target.value); if (event.target.value) setClearApiKey(false); }} placeholder={config.hasApiKey ? t('输入新 Key 可替换已保存的 Key', 'Enter a new key to replace the saved key') : t('输入 API Key', 'Enter API Key')} autoComplete="new-password" spellCheck={false}/></label>
-            <label className="ai-field"><span>{t('最大输出 Token 数', 'Maximum output tokens')}</span><input aria-label={t('AI 最大输出 Token 数', 'AI maximum output tokens')} type="number" min="256" max="65536" step="1" required value={draftConfig.maxOutputTokens} onChange={event => setDraftConfig(value => ({ ...value, maxOutputTokens: Number(event.target.value) }))}/></label>
-            <label className="ai-field"><span>{t('请求超时（秒）', 'Timeout (seconds)')}</span><input aria-label={t('AI 请求超时', 'AI request timeout')} type="number" min="30" max="300" step="1" required value={draftConfig.timeoutSeconds} onChange={event => setDraftConfig(value => ({ ...value, timeoutSeconds: Number(event.target.value) }))}/></label>
-            {config.hasApiKey && <label className="ai-clear-key ai-wide-field"><input type="checkbox" checked={clearApiKey} onChange={event => { setClearApiKey(event.target.checked); if (event.target.checked) setApiKey(''); }}/>{t('保存时清除已保存的 API Key', 'Remove the saved API key when saving')}</label>}
+            <label className="ai-field ai-wide-field"><span>API Base URL</span><input aria-label="AI API Base URL" type="url" value={draftConfig.baseUrl} onChange={event => editConfig({ baseUrl: event.target.value })} required placeholder="https://api.openai.com/v1" autoComplete="off" spellCheck={false}/><small>{t('填写基础地址（如以 /v1 结尾）；系统会自动追加对应 API 路径。', 'Enter the base URL (for example, ending in /v1). The API path is added automatically.')}</small></label>
+            <label className="ai-field"><span>{t('API 格式', 'API format')}</span><select aria-label={t('AI API 格式', 'AI API format')} value={draftConfig.apiFormat} onChange={event => editConfig({ apiFormat: event.target.value as AiConfig['apiFormat'] })}><option value="chat_completions">Chat Completions</option><option value="responses">Responses</option></select></label>
+            <label className="ai-field"><span>{t('模型名称', 'Model name')}</span><input aria-label={t('AI 模型名称', 'AI model name')} value={draftConfig.model} onChange={event => editConfig({ model: event.target.value })} required placeholder={t('填写接口支持的模型 ID', 'Enter a supported model ID')} maxLength={200} autoComplete="off" spellCheck={false}/></label>
+            <label className="ai-field ai-wide-field"><span>API Key <em>{config.hasApiKey ? t('已保存在本地服务，留空保留', 'Saved on the local server; leave blank to keep') : t('由你配置', 'Configure your key')}</em></span><input aria-label="AI API Key" type="password" value={apiKey} onChange={event => editKey(event.target.value)} placeholder={config.hasApiKey ? t('输入新 Key 可替换已保存的 Key', 'Enter a new key to replace the saved key') : t('输入 API Key', 'Enter API Key')} autoComplete="new-password" spellCheck={false}/></label>
+            <label className="ai-field"><span>{t('最大输出 Token 数', 'Maximum output tokens')}</span><input aria-label={t('AI 最大输出 Token 数', 'AI maximum output tokens')} type="number" min="256" max="65536" step="1" required value={draftConfig.maxOutputTokens} onChange={event => editConfig({ maxOutputTokens: Number(event.target.value) })}/></label>
+            <label className="ai-field"><span>{t('请求超时（秒）', 'Timeout (seconds)')}</span><input aria-label={t('AI 请求超时', 'AI request timeout')} type="number" min="30" max="300" step="1" required value={draftConfig.timeoutSeconds} onChange={event => editConfig({ timeoutSeconds: Number(event.target.value) })}/></label>
+            {config.hasApiKey && <label className="ai-clear-key ai-wide-field"><input type="checkbox" checked={clearApiKey} onChange={event => editClearKey(event.target.checked)}/>{t('保存时清除已保存的 API Key', 'Remove the saved API key when saving')}</label>}
           </fieldset>
-          <div className="ai-config-foot"><p>{t('Key 仅保存在运行服务的电脑，不写入浏览器存储、报表或备份。', 'The key stays on the server computer, outside browser storage, reports and backups.')}</p><button className="btn" type="submit" disabled={disabled || !configLoaded || !configDirty}>{saving ? <LoaderCircle size={14} className="spin"/> : <Check size={14}/>} {t('保存配置', 'Save connection')}</button></div>
+          <div className="ai-config-test-note"><Info size={14}/><p>{clearApiKey ? t('清除 Key 时不调用 AI 接口。', 'Clearing the key does not call the AI endpoint.') : t('点击后仅向所选模型发送一条简短测试文本，不发送日志；通过后保存，失败保留原配置。', 'This sends one short test message to the selected model, without logs. The connection is saved only after the test passes; a failed test keeps your previous configuration.')}</p></div>
+          <div className="ai-config-foot"><p>{t('Key 仅保存在运行服务的电脑，不写入浏览器存储、报表或备份。', 'The key stays on the server computer, outside browser storage, reports and backups.')}</p><button className="btn" type="submit" disabled={disabled || !configLoaded}>{saving ? <LoaderCircle size={14} className="spin"/> : <Check size={14}/>} {saving ? clearApiKey ? t('正在清除 Key…', 'Clearing key…') : t('正在测试连接…', 'Testing connection…') : clearApiKey ? t('清除 Key 并保存', 'Clear key & save') : t('测试连接并保存', 'Test & save')}</button></div>
         </form>
       </details>
-      {configError && <p className="ai-error" role="alert">{t('配置读取或保存失败：', 'Could not read or save the connection: ')}{configError}</p>}
+      {connectionTest?.status === 'passed' && <div className="ai-connection-result passed" role="status"><Check size={15}/><div><strong>{t('连接测试通过，配置已保存。', 'Connection test passed. Configuration saved.')}</strong><p>{connectionTest.model} · {Number(connectionTest.latencyMs).toLocaleString()} ms · {displayCreated(connectionTest.testedAt)}</p></div></div>}
+      {connectionTest?.status === 'skipped' && <div className="ai-connection-result" role="status"><Info size={15}/><div><strong>{t('API Key 已清除，未进行连接测试。', 'API key cleared. No connection test was run.')}</strong></div></div>}
+      {configError && <div className="ai-error" role="alert"><strong>{configErrorSource === 'save' ? t('连接测试或保存失败', 'Connection test or save failed') : t('无法读取接口配置', 'Could not read the connection')}</strong><p>{configError}</p>{configErrorSource === 'save' && <small>{t('原配置已保留，请检查后重试。', 'Your previous configuration is preserved. Check the settings and try again.')}</small>}</div>}
       <details className="ai-instructions"><summary><FileText size={15}/>{t('补充汇报要求与查看提示词', 'Writing preferences and prompt preview')}</summary><label className="ai-field"><span>{t('补充要求（可选）', 'Additional instructions (optional)')}</span><textarea aria-label={t('AI 汇报补充要求', 'AI report additional instructions')} value={instructions} disabled={generating} onChange={event => setInstructions(event.target.value)} maxLength={4000} rows={3} placeholder={t('例如：控制在 3 分钟可读完，重点介绍客户自主提问和下一步改进。', 'For example: keep it brief and focus on custom questions and next actions.')}/></label><div className="ai-preview-actions"><p>{t('提示词会统一约束统计口径，不编造收益或失败原因。预览不调用模型。', 'The prompt enforces consistent metrics and avoids invented benefits or failure causes. Preview does not call the model.')}</p><button className="btn" type="button" disabled={previewPending || generating} onClick={previewPrompt}>{previewPending && <LoaderCircle size={13} className="spin"/>}{t('预览完整提示词', 'Preview full prompt')}</button></div>{previewError && <p className="ai-error" role="alert">{previewError}</p>}{preview && <div className="ai-prompt-preview"><h3>SYSTEM</h3><pre>{preview.system}</pre><h3>USER · {t('汇报要求与数据', 'Report request and data')}</h3><pre>{preview.user}</pre></div>}</details>
       <div className="ai-generate-row"><p aria-live="polite">{generating ? t('AI 正在分析并生成两版汇报，请稍候…', 'AI is analysing the data and writing both versions…') : configDirty ? t('配置有修改，请先保存后再生成。', 'Save your connection changes before generating.') : !config.configured ? t('先配置 API 地址、模型和 Key，即可生成汇报。', 'Configure the API URL, model and key to generate a report.') : t('点击后，将以上范围的数据发送到你配置的 AI 接口。', 'Click to send data for the scope above to your configured AI endpoint.')}</p><button className="btn primary ai-generate" type="button" disabled={!configLoaded || !config.configured || configDirty || disabled} onClick={generate}>{generating ? <LoaderCircle size={16} className="spin"/> : <Sparkles size={16}/>} {generating ? t('正在生成…', 'Generating…') : t('生成中英文汇报', 'Generate Chinese & English')}</button></div>
       {generationError && <div className="ai-error" role="alert"><strong>{t('生成失败', 'Generation failed')}</strong><p>{generationError}</p><small>{t('之前的汇报已保留，可检查配置后重试。', 'Your previous report is preserved. Check the connection and try again.')}</small></div>}

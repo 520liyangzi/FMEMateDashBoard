@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -32,6 +33,10 @@ class MockProvider(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.server.calls.append({'path': self.path, 'authorization': self.headers.get('Authorization'), 'body': body})
+        probe = body.get('input') == 'Reply only with OK.' or body.get('messages', [{}])[-1].get('content') == 'Reply only with OK.'
+        if body.get('model') == 'slow-candidate':
+            self.server.probe_started.set()
+            self.server.release_probe.wait(timeout=5)
         mode = self.server.mode
         if mode == 'redirect':
             self.send_response(307)
@@ -46,11 +51,23 @@ class MockProvider(BaseHTTPRequestHandler):
             status, result = 200, {'choices': [{'message': {'content': json.dumps(REPORTS)}, 'finish_reason': 'length'}]}
         elif mode == 'incomplete':
             status, result = 200, {'status': 'incomplete', 'output': [], 'incomplete_details': {'reason': 'max_output_tokens'}}
+        elif mode == 'no_output':
+            status, result = 200, {'choices': [{'message': {'content': ''}, 'finish_reason': 'stop'}]}
+        elif mode == 'refusal':
+            status, result = 200, {'choices': [{'message': {'refusal': 'No'}, 'finish_reason': 'stop'}]}
+        elif mode == 'non_json_api':
+            raw = ('not-json: ' + FAKE_KEY).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         else:
             generated = dict(REPORTS)
             if mode == 'echo_key':
                 generated['en'] += ' ' + FAKE_KEY
-            content = json.dumps(generated, ensure_ascii=False)
+            content = 'OK' if probe else json.dumps(generated, ensure_ascii=False)
             if mode == 'fenced':
                 content = '```json\n' + content + '\n```'
             if self.path.endswith('/responses'):
@@ -74,6 +91,8 @@ class AiBackendTests(unittest.TestCase):
         self.provider = ThreadingHTTPServer(('127.0.0.1', 0), MockProvider)
         self.provider.calls = []
         self.provider.mode = 'ok'
+        self.provider.probe_started = threading.Event()
+        self.provider.release_probe = threading.Event()
         self.provider.base = f'http://127.0.0.1:{self.provider.server_port}'
         self.provider_thread = threading.Thread(target=self.provider.serve_forever, daemon=True)
         self.provider_thread.start()
@@ -102,10 +121,13 @@ class AiBackendTests(unittest.TestCase):
             return response.status, json.loads(response.read())
 
     def configure(self, api_format='chat_completions'):
+        self.provider.mode = 'ok'
         status, result = self.request('/api/ai/config', {'baseUrl': self.provider.base + '/v1', 'apiFormat': api_format,
                                        'model': 'local-test-model', 'apiKey': FAKE_KEY, 'maxOutputTokens': 4096, 'timeoutSeconds': 30})
         self.assertEqual(status, 200)
         self.assertTrue(result['configured'])
+        self.assertEqual(result['connectionTest']['status'], 'passed')
+        self.provider.calls.clear()
         return result
 
     def test_config_is_server_only_persistent_and_blank_preserves_key(self):
@@ -123,6 +145,104 @@ class AiBackendTests(unittest.TestCase):
         status, result = self.request('/api/ai/config', {'clearApiKey': True})
         self.assertFalse(result['hasApiKey'])
         self.assertEqual(self.store.ai.load()['apiKey'], '')
+
+    def test_config_probe_uses_candidate_and_plain_ok_without_history(self):
+        self.configure()
+        status, result = self.request('/api/ai/config', {'baseUrl': self.provider.base + '/candidate', 'apiFormat': 'responses',
+                                       'model': 'candidate-model', 'apiKey': 'candidate-local-key', 'maxOutputTokens': 65536})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(len(self.provider.calls), 1)
+        call = self.provider.calls[0]
+        self.assertEqual(call['path'], '/candidate/responses')
+        self.assertEqual(call['authorization'], 'Bearer candidate-local-key')
+        self.assertEqual(call['body']['model'], 'candidate-model')
+        self.assertEqual(call['body']['max_output_tokens'], 4096)
+        self.assertEqual(call['body']['input'], 'Reply only with OK.')
+        self.assertFalse(call['body']['store'])
+        self.assertNotIn('facts', json.dumps(call['body']))
+        self.assertEqual(result['connectionTest']['status'], 'passed')
+        self.assertGreaterEqual(result['connectionTest']['latencyMs'], 0)
+        datetime.fromisoformat(result['connectionTest']['testedAt'])
+        self.assertNotIn('candidate-local-key', json.dumps(result))
+        self.assertEqual(self.store.ai.load()['apiKey'], 'candidate-local-key')
+        self.assertEqual(self.store.get_ai_reports()['total'], 0)
+        # Chat Completions probes use the candidate token setting when it is below the cap.
+        self.provider.calls.clear()
+        status, result = self.request('/api/ai/config', {'apiFormat': 'chat_completions', 'maxOutputTokens': 512, 'apiKey': ''})
+        self.assertEqual(status, 200, result)
+        call = self.provider.calls[0]
+        self.assertEqual(call['path'], '/candidate/chat/completions')
+        self.assertEqual(call['body']['max_completion_tokens'], 512)
+        self.assertEqual(call['body']['messages'][-1]['content'], 'Reply only with OK.')
+
+    def test_failed_connection_probe_preserves_saved_bytes_or_absence(self):
+        candidate = {'baseUrl': self.provider.base + '/v1', 'model': 'candidate-model', 'apiKey': FAKE_KEY}
+        for saved in (False, True):
+            if saved:
+                self.configure()
+            original = self.store.ai.path.read_bytes() if self.store.ai.path.exists() else None
+            for mode in ('auth_error', 'redirect', 'truncated', 'incomplete', 'no_output', 'refusal', 'non_json_api'):
+                self.provider.mode = mode
+                self.provider.calls.clear()
+                api_format = 'responses' if mode == 'incomplete' else 'chat_completions'
+                status, result = self.request('/api/ai/config', {**candidate, 'apiFormat': api_format})
+                self.assertEqual(status, 502, (saved, mode, result))
+                self.assertEqual(len(self.provider.calls), 1)
+                self.assertNotIn(FAKE_KEY, json.dumps(result))
+                self.assertNotIn('provider private raw data', json.dumps(result))
+                self.assertEqual(self.store.ai.path.read_bytes() if self.store.ai.path.exists() else None, original)
+            self.assertEqual(self.store.get_ai_reports()['total'], 0)
+
+    def test_probe_missing_configuration_and_timeout_preserve_old_config(self):
+        for payload in ({'baseUrl': self.provider.base + '/v1', 'model': '', 'apiKey': FAKE_KEY},
+                        {'baseUrl': self.provider.base + '/v1', 'model': 'test-model', 'apiKey': ''}):
+            self.assertEqual(self.request('/api/ai/config', payload)[0], 400)
+        self.assertFalse(self.store.ai.path.exists())
+        self.assertEqual(self.provider.calls, [])
+        self.configure()
+        original = self.store.ai.path.read_bytes()
+        with patch('ai_service.build_opener') as opener:
+            opener.return_value.open.side_effect = URLError(TimeoutError())
+            with self.assertRaises(AiError) as caught:
+                self.store.ai.save_config({'model': 'timeout-candidate'})
+        self.assertEqual(caught.exception.status, 504)
+        self.assertEqual(self.store.ai.path.read_bytes(), original)
+        self.assertEqual(self.store.get_ai_reports()['total'], 0)
+
+    def test_blank_key_reuses_saved_key_and_clearing_skips_failed_provider(self):
+        self.configure()
+        status, result = self.request('/api/ai/config', {'model': 'reuse-key-model', 'apiKey': ''})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.provider.calls[-1]['authorization'], 'Bearer ' + FAKE_KEY)
+        self.assertTrue(result['hasApiKey'])
+        self.provider.mode = 'auth_error'
+        self.provider.calls.clear()
+        status, result = self.request('/api/ai/config', {'clearApiKey': True})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result['connectionTest'], {'status': 'skipped', 'reason': 'api_key_cleared'})
+        self.assertFalse(result['configured'])
+        self.assertFalse(result['hasApiKey'])
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.store.ai.load()['apiKey'], '')
+
+    def test_concurrent_save_rejects_stale_test_without_holding_lock(self):
+        self.configure()
+        outcome = []
+        slow = threading.Thread(target=lambda: outcome.append(self.request('/api/ai/config', {'model': 'slow-candidate'})))
+        slow.start()
+        try:
+            self.assertTrue(self.provider.probe_started.wait(timeout=2))
+            # The second request can finish while the first provider response is blocked.
+            status, result = self.request('/api/ai/config', {'model': 'newer-candidate'})
+            self.assertEqual(status, 200, result)
+            self.assertEqual(self.store.ai.load()['model'], 'newer-candidate')
+        finally:
+            self.provider.release_probe.set()
+            slow.join(timeout=5)
+        self.assertFalse(slow.is_alive())
+        self.assertEqual(outcome[0][0], 409, outcome)
+        self.assertEqual(self.store.ai.load()['model'], 'newer-candidate')
+        self.assertEqual(self.store.get_ai_reports()['total'], 0)
 
     def test_preview_requires_no_key_and_enforces_data_methodology(self):
         status, result = self.request('/api/ai/preview', PAYLOAD)
@@ -213,7 +333,7 @@ class AiBackendTests(unittest.TestCase):
             self.assertNotIn('ai-config.json', archive.namelist())
             self.assertNotIn(FAKE_KEY.encode(), archive.read('report.db'))
         other = Store(Path(self.tmp.name) / 'other')
-        other.ai.save_config({'apiKey': 'other-local-key', 'model': 'other-model'})
+        other.ai.save_config({'baseUrl': self.provider.base + '/v1', 'apiKey': 'other-local-key', 'model': 'other-model'})
         other.restore(backup)
         self.assertEqual(other.get_ai_reports()['reports'][0]['zh'], REPORTS['zh'])
         self.assertEqual(other.ai.load()['apiKey'], 'other-local-key')

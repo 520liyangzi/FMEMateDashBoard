@@ -110,7 +110,7 @@ python server.py --host 0.0.0.0 --port 8000
 
 新增 **AI 进展汇报 / AI progress report** Tab。先导入日志、更新群人数和反馈、保存已知失败原因，再进入此页：
 
-1. 展开接口配置，填写 **Base URL、API Key、模型名称**，选择 `Chat Completions` 或 `Responses`，点击保存。OpenAI 的 Base URL 是 `https://api.openai.com/v1`；兼容接口填写服务商的 API 基础地址，不要再拼接 `/chat/completions` 或 `/responses`。模型名称按服务商提供的可用名称填写。
+1. 展开接口配置，填写 **Base URL、API Key、模型名称**，选择 `Chat Completions` 或 `Responses`，点击“测试连接并保存”。系统先向当前填写的接口、Key 和模型发起一条简短测试请求，收到有效回复后才保存，并显示测试耗时。测试不会发送日志，也不会新增汇报。失败会显示原因，保留原来的配置和 Key；修改后可以重试，原配置未改也可重新测试。OpenAI 的 Base URL 是 `https://api.openai.com/v1`；兼容接口填写服务商的 API 基础地址，不要再拼接 `/chat/completions` 或 `/responses`。模型名称按服务商提供的可用名称填写。
 2. 使用页面日期和场景筛选，或者点击“最新日志日”生成最近一天的日报。多日范围会生成明确标注起止日期的阶段汇报。
 3. 可补充汇报风格要求，并预览实际提示词与发送的数据摘要。点击“一键生成中英文”，服务会一次生成中文和英文两版自然语言汇报，按使用情况、客户需求、失败排查、群运营和下一步组织内容。
 4. 两版汇报均可复制、下载文字或 Markdown，也可通过浏览器打印保存 PDF。生成结果自动保存，历史记录可再次查看；离线 HTML 包含最近 20 份已保存汇报，支持只读查看和复制。
@@ -119,11 +119,11 @@ AI 使用与页面相同的统计结果。发送内容是当前筛选范围的�
 
 提示词明确要求：`browser` 的实际人数未知，不得把可识别账号数写成真实总人数；MML 不算自主提问，空回答正常；没有 `Sorry` 不代表业务成功；没有已填写原因的失败应写为待排查；没有可比人数记录时不编造增长；不能从尚未读取的截图推断点赞或好评。AI 输出是草稿，可核对、编辑后发群，网页不会自动发送消息。
 
-API Key 只保存在本地服务的数据目录 `ai-config.json` 中，不回显，不写入浏览器存储、数据库备份、离线报表或 Git 仓库。留空保存会保留已有 Key，清除按钮可移除 Key。完整数据备份含 AI 汇报历史，不含接口配置；迁移后需要重新配置接口。自定义 `--data-dir` 时配置跟随该目录。模型请求由 Python 后端发起，客户端不用直接连接模型接口；如使用代理，按 Python 标准 `HTTPS_PROXY` / `HTTP_PROXY` 环境变量配置。API 调用是否可用及费用以你配置的服务商为准。
+API Key 只保存在本地服务的数据目录 `ai-config.json` 中，不回显，不写入浏览器存储、数据库备份、离线报表或 Git 仓库。留空保存会保留已有 Key，勾选清除后保存可移除 Key；清除操作不进行连接测试，即使服务商暂时不可用也能清除。完整数据备份含 AI 汇报历史，不含接口配置；迁移后需要重新配置接口。自定义 `--data-dir` 时配置跟随该目录。模型请求由 Python 后端发起，客户端不用直接连接模型接口；如使用代理，按 Python 标准 `HTTPS_PROXY` / `HTTP_PROXY` 环境变量配置。API 调用是否可用及费用以你配置的服务商为准。
 
 部署前已用本地模拟接口验证生成和异常处理；项目不附带真实 API Key，未执行付费模型请求。输出上限和超时可在界面调整；如果接口提示输出被截断，可以提高上限后重试。已有旧数据库与旧版备份会自动兼容升级。
 
-AI progress report creates both Chinese and English narrative updates from the selected date range and scene. Configure your provider Base URL, API key, model, and Chat Completions or Responses format, save, then generate. You can preview the prompt, add style instructions, copy each language, download text/Markdown, and reopen saved reports. The server sends aggregate metrics and bounded textual evidence, including saved failure causes; screenshots and the complete workbook are not sent. Community metrics use the date range independently of the log scene filter. Reports preserve the browser/MML/failure methodology and label missing evidence and demo data. Keys stay in the local server's `ai-config.json`, excluded from backups, offline exports, browser storage and Git. Offline HTML includes the latest 20 saved reports for read-only viewing. No messages are sent automatically. Test coverage uses a local mock provider; configure your own credentials for live generation.
+AI progress report creates both Chinese and English narrative updates from the selected date range and scene. Configure your provider Base URL, API key, model, and Chat Completions or Responses format, then click **Test & save**. A short request checks the current endpoint, key and model before saving; no log data is sent and no report is created. Successful tests show latency. Failed tests preserve the prior configuration and key. An unchanged connection can also be retested. Clearing a key saves without calling the provider, so it works even if the provider is down. After a successful test, generate your report. You can preview the prompt, add style instructions, copy each language, download text/Markdown, and reopen saved reports. The server sends aggregate metrics and bounded textual evidence, including saved failure causes; screenshots and the complete workbook are not sent. Community metrics use the date range independently of the log scene filter. Reports preserve the browser/MML/failure methodology and label missing evidence and demo data. Keys stay in the local server's `ai-config.json`, excluded from backups, offline exports, browser storage and Git. Offline HTML includes the latest 20 saved reports for read-only viewing. No messages are sent automatically. Test coverage uses a local mock provider; configure your own credentials for live generation.
 
 API formats follow the official [Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) and [Responses guide](https://developers.openai.com/api/docs/guides/migrate-to-responses).
 
@@ -182,7 +182,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.2.0。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.2.1。
 
 ## 从 GitHub 获取
 

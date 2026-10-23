@@ -7,6 +7,8 @@ import re
 import socket
 import tempfile
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -106,6 +108,7 @@ class AiService:
     def __init__(self, data_dir):
         self.path = Path(data_dir) / 'ai-config.json'
         self.lock = threading.RLock()
+        self.revision = 0
 
     def load(self):
         with self.lock:
@@ -151,38 +154,75 @@ class AiService:
 
     def save_config(self, payload):
         with self.lock:
+            original = self._config_bytes()
+            revision = self.revision
             # A broken file can be replaced through the UI without echoing its contents.
             try:
                 previous = self.load()
             except AiError:
                 previous = dict(DEFAULT_CONFIG)
             config = self.validate(payload, previous)
-            descriptor, temporary = tempfile.mkstemp(prefix='.ai-config-', dir=self.path.parent)
-            try:
-                with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
-                    os.chmod(temporary, 0o600)
-                    json.dump(config, handle, ensure_ascii=False)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(temporary, self.path)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
-            return self.public(config)
+            if payload.get('clearApiKey') is True:
+                self._write_config(config)
+                return {**self.public(config), 'connectionTest': {'status': 'skipped', 'reason': 'api_key_cleared'}}
+            if not config['apiKey'] or not config['model']:
+                raise AiError(400, 'Enter the AI model and API key before testing and saving the configuration.')
+        # Probe the candidate, without holding the configuration lock or sending report data.
+        started = time.perf_counter()
+        self.request_text(config, {'system': 'You are testing an API connection. Reply only with OK.',
+                                  'user': 'Reply only with OK.'}, min(config['maxOutputTokens'], 4096), require_completed=True)
+        connection_test = {'status': 'passed', 'latencyMs': round((time.perf_counter() - started) * 1000),
+                           'testedAt': datetime.now(timezone.utc).isoformat()}
+        with self.lock:
+            if self.revision != revision or self._config_bytes() != original:
+                raise AiError(409, 'The AI configuration changed while this connection test was running. Reload the saved configuration and try again.')
+            self._write_config(config)
+        return {**self.public(config), 'connectionTest': connection_test}
+
+    def _config_bytes(self):
+        try:
+            return self.path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise AiError(503, 'The local AI configuration cannot be read. Check file permissions and try again.')
+
+    def _write_config(self, config):
+        """Caller holds self.lock. Never write an untested candidate here except explicit key clearing."""
+        descriptor, temporary = tempfile.mkstemp(prefix='.ai-config-', dir=self.path.parent)
+        try:
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+                os.chmod(temporary, 0o600)
+                json.dump(config, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            self.revision += 1
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def generate(self, payload):
         prompt = make_prompt(payload)
         config = self.load()  # No disk/database lock is held during a remote request.
         if not config['apiKey'] or not config['model']:
             raise AiError(400, 'Configure the AI Base URL, model and API key before generating a report.')
+        content = self.request_text(config, prompt, config['maxOutputTokens'])
+        reports = parse_reports(content)
+        # A provider should never echo the Authorization secret into generated text.
+        reports = {k: v.replace(config['apiKey'], '[REDACTED]') for k, v in reports.items()}
+        return {**reports, 'model': config['model']}
+
+    @staticmethod
+    def request_text(config, prompt, max_output_tokens, require_completed=False):
         if config['apiFormat'] == 'responses':
             endpoint = '/responses'
             body = {'model': config['model'], 'instructions': prompt['system'], 'input': prompt['user'],
-                    'max_output_tokens': config['maxOutputTokens'], 'store': False}
+                    'max_output_tokens': max_output_tokens, 'store': False}
         else:
             endpoint = '/chat/completions'
             body = {'model': config['model'], 'messages': [{'role': 'system', 'content': prompt['system']},
-                    {'role': 'user', 'content': prompt['user']}], 'max_completion_tokens': config['maxOutputTokens'], 'store': False}
+                    {'role': 'user', 'content': prompt['user']}], 'max_completion_tokens': max_output_tokens, 'store': False}
         request = Request(config['baseUrl'] + endpoint, data=json.dumps(body, ensure_ascii=False).encode('utf-8'),
                           headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + config['apiKey']}, method='POST')
         try:
@@ -191,7 +231,7 @@ class AiService:
         except HTTPError as exc:
             # Provider bodies can contain credentials, prompts and raw data. Never return them.
             messages = {400: 'The AI provider rejected the request. Check the API format, model and output token limit.',
-                        401: 'The AI provider rejected the API key. Check the saved key.',
+                        401: 'The AI provider rejected the API key. Check the API key.',
                         403: 'The AI provider denied access. Check model and project permissions.',
                         404: 'The AI endpoint or model was not found. Check the Base URL, API format and model.',
                         429: 'The AI provider is rate limited or out of quota. Check the provider account and try again later.'}
@@ -213,20 +253,16 @@ class AiService:
             raise AiError(502, 'The AI provider response is too large.')
         try:
             response = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError):
             raise AiError(502, 'The AI provider did not return a JSON API response. Check the API format and Base URL.')
-        content = extract_content(response, config['apiFormat'])
-        reports = parse_reports(content)
-        # A provider should never echo the Authorization secret into generated text.
-        reports = {k: v.replace(config['apiKey'], '[REDACTED]') for k, v in reports.items()}
-        return {**reports, 'model': config['model']}
+        return extract_content(response, config['apiFormat'], require_completed=require_completed)
 
 
-def extract_content(response, api_format):
+def extract_content(response, api_format, require_completed=False):
     if not isinstance(response, dict):
         raise AiError(502, 'The AI provider response has an unsupported format.')
     if api_format == 'responses':
-        if response.get('status') not in (None, 'completed'):
+        if response.get('status') not in (('completed',) if require_completed else (None, 'completed')):
             raise AiError(502, 'The AI report was incomplete or failed. Increase the output token limit or retry.')
         pieces = []
         for item in response.get('output', []) if isinstance(response.get('output'), list) else []:
@@ -242,7 +278,7 @@ def extract_content(response, api_format):
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise AiError(502, 'The AI provider returned no report. Check the selected API format.')
         choice = choices[0]
-        if choice.get('finish_reason') not in (None, 'stop'):
+        if choice.get('finish_reason') not in (('stop',) if require_completed else (None, 'stop')):
             raise AiError(502, 'The AI report was incomplete or blocked. Increase the output token limit or retry.')
         message = choice.get('message')
         if not isinstance(message, dict):
@@ -251,6 +287,8 @@ def extract_content(response, api_format):
             raise AiError(502, 'The AI provider declined to generate this report.')
         content = message.get('content')
         if isinstance(content, list):
+            if any(isinstance(block, dict) and block.get('type') == 'refusal' for block in content):
+                raise AiError(502, 'The AI provider declined to generate this report.')
             content = ''.join(block.get('text', '') for block in content if isinstance(block, dict) and block.get('type') in ('text', 'output_text') and isinstance(block.get('text'), str))
     if not isinstance(content, str) or not content.strip():
         raise AiError(502, 'The AI provider returned no report text. Try a higher output token limit or another model.')
