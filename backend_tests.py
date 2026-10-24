@@ -1,5 +1,6 @@
 """Integration tests: python backend_tests.py. Uses a temporary database only."""
 import base64
+from contextlib import redirect_stdout
 import io
 import json
 import sqlite3
@@ -10,7 +11,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from server import Store, ReportServer
+from server import Handler, Store, ReportServer
 
 PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR1kAAAAASUVORK5CYII=')
 
@@ -102,6 +103,35 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.store.state()['total'], 0)
         self.assertEqual(len(self.store.state()['groups']), 1)
         self.assertEqual(self.store.state()['presets'], ['A?', 'B!'])
+
+    def test_group_historical_backfill_and_update_persist_in_date_order(self):
+        self.assertEqual(self.request('/api/groups', {'date': '2026-10-23', 'count': 85})[0], 200)
+        self.assertEqual(self.request('/api/groups', {'date': '2026-10-21', 'count': 36})[0], 200)
+        self.assertEqual(self.request('/api/groups', {'date': '2026-10-21', 'count': 40})[0], 200)
+        expected = [{'date': '2026-10-21', 'count': 40}, {'date': '2026-10-23', 'count': 85}]
+        self.assertEqual(self.request('/api/state')[1]['groups'], expected)
+        self.assertEqual(Store(self.base / 'data').state()['groups'], expected)
+
+    def test_internal_error_reports_name_and_location_without_sensitive_content(self):
+        handler = Handler.__new__(Handler)
+        responses = []
+        handler.json = lambda payload, status: responses.append((status, payload))
+        output = io.StringIO()
+        try:
+            private_local = 'PRIVATE_RUNTIME_VALUE_NOT_FOR_LOGGING'
+            raise NameError('PRIVATE_EXCEPTION_MESSAGE_NOT_FOR_LOGGING', name='missing_group_binding')
+        except NameError as error:
+            with redirect_stdout(output):
+                handler.handle_error(error)
+        console = output.getvalue()
+        self.assertIn('NameError: undefined Python name missing_group_binding', console)
+        self.assertRegex(console, r'backend_tests\.py:\d+ in test_internal_error_')
+        self.assertNotIn('PRIVATE_EXCEPTION_MESSAGE', console)
+        self.assertNotIn(private_local, console)
+        self.assertNotIn(str(Path(__file__).resolve().parent), console)
+        self.assertEqual(responses[0][0], 500)
+        self.assertIn('missing_group_binding', responses[0][1]['error'])
+        self.assertNotIn('PRIVATE_EXCEPTION_MESSAGE', responses[0][1]['error'])
 
     def test_feedback_image_and_backup_restore(self):
         fields = {'date': '2026-10-23', 'author': 'Field team', 'text': 'Useful!'}

@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
 
 ROOT = Path(__file__).resolve().parent
+APP_VERSION = '1.4.1'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -510,7 +511,7 @@ class ReportServer(ThreadingHTTPServer):
         super().__init__(address, Handler)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'FMEMateReport/1.0'
+    server_version = f'FMEMateReport/{APP_VERSION}'
     def log_message(self, format, *args):
         # Never print request bodies, questions, answers, or identifiers.
         print('%s - %s' % (self.address_string(), format % args))
@@ -587,8 +588,21 @@ class Handler(BaseHTTPRequestHandler):
         elif isinstance(exc, (BrokenPipeError, ConnectionResetError)):
             pass
         else:
-            print('Request failed:', type(exc).__name__)
-            self.json({'error': 'The operation failed. Check file permissions, available disk space, and the server console.'}, 500)
+            error_type = type(exc).__name__
+            missing_name = getattr(exc, 'name', None) if isinstance(exc, NameError) else None
+            if not isinstance(missing_name, str) or len(missing_name) > 128 or not missing_name.isidentifier():
+                missing_name = None
+            detail = f'{error_type}: undefined Python name {missing_name}' if missing_name else error_type
+            print('Request failed:', detail, flush=True)
+            # Print locations only: exception messages, source lines and frame locals
+            # can contain uploaded logs or credentials. Basenames omit user paths.
+            trace = exc.__traceback__
+            while trace is not None:
+                code = trace.tb_frame.f_code
+                filename = code.co_filename.replace('\\', '/').rsplit('/', 1)[-1]
+                print(f'  {filename}:{trace.tb_lineno} in {code.co_name}', flush=True)
+                trace = trace.tb_next
+            self.json({'error': f'The operation failed ({detail}). Check the server console for the error location.'}, 500)
 
     def do_HEAD(self):
         self.do_GET()
@@ -734,7 +748,7 @@ def main():
     parser.add_argument('--data-dir', type=Path, default=ROOT / 'data')
     args = parser.parse_args()
     server = ReportServer((args.host, args.port), Store(args.data_dir))
-    print(f'FMEMate Project Pulse: http://localhost:{args.port}')
+    print(f'FMEMate Project Pulse v{APP_VERSION}: http://localhost:{args.port}')
     print(f'Data: {Path(args.data_dir).resolve()}')
     if args.host not in ('127.0.0.1', 'localhost', '::1'):
         print('LAN access enabled. This local service has no authentication; use a trusted network only.')

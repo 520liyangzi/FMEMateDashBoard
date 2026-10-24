@@ -203,7 +203,11 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.4.0。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.4.1。
+
+遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
+
+For API 500 errors, the server console shows the exception type and file/line locations; `NameError` also identifies the undefined Python name. Diagnostics omit request content, source lines, local values and raw exception messages. Historical Line group dates support backfilling and same-date updates.
 
 ## 从 GitHub 获取
 
