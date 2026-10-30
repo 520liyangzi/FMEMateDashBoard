@@ -745,3 +745,12 @@
   .daily-summary-prose p { margin-bottom: 2.5mm; }
   .daily-summary-prose ul, .daily-summary-prose ol { margin-bottom: 2mm; }
 }
+
+@media print {
+  .retention-heading > div, .repeat-usage-heading > div { flex: 1; min-width: 0; }
+  .retention-heading h2, .repeat-usage-heading h2 { display: block; white-space: nowrap; }
+  .retention-heading h2 > svg, .repeat-usage-heading h2 > svg { display: inline-block; vertical-align: middle; margin-right: 2mm; }
+  .repeat-usage-users-head { break-inside: avoid; break-after: avoid; }
+  .repeat-usage-page-note { break-before: avoid; break-after: avoid; }
+  .repeat-usage-table-wrap { break-before: avoid; }
+}

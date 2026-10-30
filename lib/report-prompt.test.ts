@@ -5,6 +5,7 @@ import { buildAiReportPrompt, aiPromptFilename } from './report-prompt.ts';
 
 const facts = () => buildAiFacts({
   records: [
+    { taskId: 'T0', clientId: 'yangzi', date: '2026-10-22', time: '2026-10-22T09:02:00', question: 'Check temperature', answer: '', scene: 'MML' },
     { taskId: 'T1', clientId: 'browser', date: '2026-10-23', time: '2026-10-23T09:00:00', question: 'Which cell is faulty', answer: 'Sorry, temporarily unavailable', scene: 'Diagnosis' },
     { taskId: 'T2', clientId: 'yangzi', date: '2026-10-23', time: '2026-10-23T09:02:00', question: 'Check temperature', answer: '', scene: 'MML' },
   ],
@@ -32,6 +33,15 @@ test('local AI summary prompt contains the complete facts and two explicit repor
   assert.match(prompt, /截图只有存在标记/);
   assert.match(prompt, /建议 \/ Suggested next steps/);
   assert.match(prompt, /2026-10-23（单日）/);
+  assert.equal(data.retention.latest.rate, 100);
+  assert.ok(prompt.includes('"retainedUsers": 1'));
+  assert.ok(prompt.includes('"previousDate": "2026-10-22"'));
+  assert.match(prompt, /逐日重复使用口径，不是首次使用新客队列留存/);
+  assert.match(prompt, /当天新增账号不能进入该分子/);
+  assert.match(prompt, /不能写成整个区间的留存率/);
+  assert.match(prompt, /已观测的前一日可识别活跃账号全部回访/);
+  assert.match(prompt, /不能推为全体真实用户、全部客户或 Line group 成员 100% 留存/);
+  assert.match(prompt, /两日导入是否完整均未确认/);
 });
 
 test('hostile imported text cannot close its collision-safe JSON fence', () => {
@@ -76,4 +86,35 @@ test('multi-day and demo reports are explicitly identified in both language requ
   assert.match(prompt, /两种语言的标题和正文都必须明确标注/);
   assert.match(prompt, /演示数据 \/ DEMO DATA/);
   assert.match(prompt, /禁止将累计数写成“今天”的数据/);
+});
+
+test('unavailable retention remains null in the prompt with explicit rules against invented rates', () => {
+  const data = facts();
+  const incomplete = buildAiFacts({
+    records: [], presets: [], groups: [], feedback: [], failureNotes: {},
+    from: data.range.from, to: data.range.to, scene: '', demo: false,
+  });
+  const prompt = buildAiReportPrompt(incomplete);
+  assert.equal(incomplete.retention.latest.rate, null);
+  assert.ok(prompt.includes('"rate": null'), 'unavailable rate remains explicit in the evidence');
+  assert.ok(prompt.includes('"status": "missing_previous_logs"'));
+  assert.match(prompt, /rate 为 null/);
+  assert.match(prompt, /不能写成 0% 或 100%/);
+  assert.match(prompt, /没观测到回访不等于已确认流失/);
+});
+
+test('multi-day prompt carries the 60% period repeat cohort and keeps it distinct from next-day retention', () => {
+  const records = Array.from({ length: 10 }, (_, i) => ({ taskId: `current-${i}`, clientId: `user-${i}`, date: '2026-10-23', time: '2026-10-23T09:00:00', question: 'A question', answer: 'OK', scene: 'Diagnosis' }));
+  records.push(...Array.from({ length: 6 }, (_, i) => ({ taskId: `prior-${i}`, clientId: `user-${i}`, date: '2026-10-22', time: '2026-10-22T09:00:00', question: 'A question', answer: 'OK', scene: 'Diagnosis' })));
+  const data = buildAiFacts({ records, presets: [], groups: [], feedback: [], failureNotes: {}, from: '2026-10-22', to: '2026-10-23', scene: '', demo: false });
+  const prompt = buildAiReportPrompt(data);
+  assert.equal(data.repeatUsage.rate, 60);
+  assert.equal(data.retention.latest.rate, 100);
+  assert.ok(prompt.includes(JSON.stringify(data, null, 2)));
+  assert.match(prompt, /多日范围优先呈现可用的 repeatUsage 区间重复使用率/);
+  assert.match(prompt, /至少在两个不同自然日活跃/);
+  assert.match(prompt, /不是 60% 转化率、次日留存率或满意度/);
+  assert.match(prompt, /区间后期才出现的用户重复使用机会更少/);
+  assert.match(prompt, /不能跨无记录日期续算/);
+  assert.match(prompt, /不要求为堆砌数据同时写两个比例/);
 });

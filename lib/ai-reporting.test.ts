@@ -76,10 +76,17 @@ test('AI evidence is bounded, reports omissions, keeps complete totals and never
   assert.equal(report.failures.total, 80);
   assert.equal(report.failures.examples.length, 10);
   assert.equal(report.topUsers.length, 10);
+  assert.equal(report.repeatUsage.topUsers.length, 10);
+  assert.equal(report.repeatUsage.totalUsers, 80);
+  assert.equal(report.repeatUsage.coverage.omitted, 70);
   assert.equal(report.topQuestions.length, 20);
   assert.equal(report.customQuestions.length, 10);
   assert.equal(report.customAuthors.length, 10);
   assert.equal(report.daily.length, 31);
+  assert.equal(report.retention.daily.length, 31);
+  assert.equal(report.retention.latest.date, '2026-10-23');
+  assert.ok(report.retention.coverage.omittedDays > 0);
+  assert.equal(report.evidence.coverage.retentionDaily.included, 31);
   assert.equal(report.evidence.coverage.failureExamples.omitted, 70);
   assert.equal(report.evidence.coverage.topQuestions.available, 80);
   assert.equal(report.community.feedbackCount, 20);
@@ -128,4 +135,87 @@ test('scene filtering applies to usage while community evidence keeps date scope
   assert.equal(report.community.feedbackCount, 1);
   assert.equal(report.community.comparison.netChange, 1);
   assert.equal(report.range.scene, '\u0000');
+});
+
+test('AI retention facts describe the prior-day cohort rather than period or new users', () => {
+  const report = facts({ records: [
+    row('1', 'alice', '2026-10-22'), row('2', 'bob', '2026-10-22'), row('3', 'browser', '2026-10-22'),
+    row('4', 'alice', '2026-10-23'), row('5', 'newcomer', '2026-10-23'), row('6', ' BROWSER ', '2026-10-23'),
+  ] });
+  assert.equal(report.totals.users, 3, 'period users include the current-day newcomer');
+  assert.equal(report.retention.latest.date, '2026-10-23');
+  assert.equal(report.retention.latest.previousDate, '2026-10-22');
+  assert.equal(report.retention.latest.previousUsers, 2);
+  assert.equal(report.retention.latest.retainedUsers, 1);
+  assert.equal(report.retention.latest.rate, 50);
+  assert.equal(report.retention.latest.previousBrowserUses, 1);
+  assert.equal(report.retention.latest.currentBrowserUses, 1);
+  assert.equal(report.retention.latest.status, 'available');
+  assert.ok(!Object.values(report.retention.latest).some(Array.isArray), 'no full cohort ID lists enter the writing prompt');
+  assert.ok(!JSON.stringify(report.retention).includes('ClientIds'));
+  assert.match(report.retention.coverage.limitations, /not confirmed complete/);
+  assert.match(report.methodology.join(' '), /not a first-use or registration cohort/);
+});
+
+test('AI retention leaves missing strict prior-day evidence unavailable and respects scene cohorts', () => {
+  const gap = facts({ records: [row('1', 'alice', '2026-10-21'), row('2', 'alice', '2026-10-23')] });
+  assert.equal(gap.retention.latest.previousDate, '2026-10-22');
+  assert.equal(gap.retention.latest.rate, null);
+  assert.equal(gap.retention.latest.status, 'missing_previous_logs');
+  const missingRangeEnd = facts({ to: '2026-10-24', records: [row('1', 'alice', '2026-10-22'), row('2', 'alice', '2026-10-23')] });
+  assert.equal(missingRangeEnd.retention.latest.date, '2026-10-24', 'latest means the selected end rather than the last observed usage date');
+  assert.equal(missingRangeEnd.retention.latest.status, 'missing_current_logs');
+  assert.equal(missingRangeEnd.retention.latest.rate, null);
+  const sceneFiltered = facts({ scene: 'Diagnosis', records: [
+    row('1', 'alice', '2026-10-22'), row('2', 'alice', '2026-10-23', 'Check temperature', '', 'MML'),
+  ] });
+  assert.equal(sceneFiltered.retention.latest.previousUsers, 1);
+  assert.equal(sceneFiltered.retention.latest.retainedUsers, 0);
+  assert.equal(sceneFiltered.retention.latest.rate, 0, 'an observed day with usage in another scene is not missing logs');
+  assert.equal(sceneFiltered.retention.latest.status, 'available');
+  const emptyAndNamed = [
+    row('e1', 'empty-user', '2026-10-22', 'q', '', ''), row('e2', 'empty-user', '2026-10-23', 'q', '', ''),
+    row('a1', 'old-all-user', '2026-10-22', 'q', '', 'all'), row('a2', 'new-all-user', '2026-10-23', 'q', '', 'all'),
+  ];
+  assert.equal(facts({ scene: '\u0000', records: emptyAndNamed }).retention.latest.rate, 100);
+  assert.equal(facts({ scene: 'all', records: emptyAndNamed }).retention.latest.rate, 0);
+});
+
+test('period repeat facts distinguish six of ten repeated users from prior-day and historical users', () => {
+  const records = Array.from({ length: 10 }, (_, i) => row(`current-${i}`, `user-${i}`, '2026-10-23'));
+  records.push(...Array.from({ length: 6 }, (_, i) => row(`prior-${i}`, `user-${i}`, '2026-10-22')));
+  records.push(row('first-day', 'user-0', '2026-10-21'));
+  records.push(...['21', '22', '23'].map(date => row(`browser-${date}`, 'browser', `2026-10-${date}`)));
+  const report = facts({ from: '2026-10-21', records });
+  assert.equal(report.repeatUsage.status, 'available');
+  assert.deepEqual(report.repeatUsage.range, { from: '2026-10-21', to: '2026-10-23', days: 3 });
+  assert.equal(report.repeatUsage.totalUsers, 10);
+  assert.equal(report.repeatUsage.repeatUsers, 6);
+  assert.equal(report.repeatUsage.rate, 60);
+  assert.equal(report.totals.returningUsers, 0, 'historical returning users differ from cross-day repeat users');
+  assert.equal(report.retention.latest.rate, 100, 'all six prior-day users returned, although period repeat usage is 60%');
+  const longest = report.repeatUsage.topUsers[0];
+  assert.equal(longest.clientId, 'user-0');
+  assert.equal(longest.activeDays, 3);
+  assert.equal(longest.activeDayShare, 100);
+  assert.equal(longest.longestStreak, 3);
+  assert.equal(report.repeatUsage.observedDays, 3);
+  assert.equal(report.repeatUsage.daysWithoutLogs, 0);
+  assert.ok(!report.repeatUsage.topUsers.some(user => user.clientId === 'browser'));
+});
+
+test('period repeat facts keep unknown log days and unavailable short-range rates explicit', () => {
+  const report = facts({ from: '2026-10-20', records: [row('1', 'alice', '2026-10-21'), row('2', 'alice', '2026-10-23')] });
+  assert.equal(report.repeatUsage.rate, 100);
+  assert.equal(report.repeatUsage.observedDays, 2);
+  assert.equal(report.repeatUsage.daysWithoutLogs, 2);
+  assert.equal(report.repeatUsage.topUsers[0].activeDayShare, 50);
+  assert.equal(report.repeatUsage.topUsers[0].longestStreak, 1, 'unobserved dates do not join two streaks');
+  assert.match(report.repeatUsage.coverage.limitations, /not confirmed inactivity/);
+  const single = facts({ from: '2026-10-23', records: [row('one', 'alice', '2026-10-23')] });
+  assert.equal(single.repeatUsage.status, 'single_day_range');
+  assert.equal(single.repeatUsage.rate, null);
+  const oneObservedDay = facts({ records: [row('one', 'alice', '2026-10-23')] });
+  assert.equal(oneObservedDay.repeatUsage.status, 'insufficient_logs');
+  assert.equal(oneObservedDay.repeatUsage.rate, null);
 });

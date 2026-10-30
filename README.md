@@ -61,6 +61,37 @@ python server.py --data-dir D:\FMEMateData
 - **新增 / 回访用户**：根据已导入历史中的首次出现日期判断；没有导入的早期日志不参与判断。周期比较仅反映现有日志覆盖范围。
 - 日期筛选同时影响报表中的日志趋势、排名和失败明细。Excel 和 PDF 按页面当前筛选结果生成；离线 HTML 包含完整数据快照并保留当前筛选条件。
 
+## 用户次日留存与周期复用 / Retention and repeat usage
+
+**概览 / Overview** 展示所选结束日期的次日留存摘要，并在活跃度面板提供周期复用率；**用户分析 / User analytics** 提供次日留存与周期复用率面板、最近 14 天的每日留存明细，以及每页 10 位用户的使用频率表。两项指标用途不同：次日留存回答“昨天用过的人，今天回来多少”，周期复用率回答“这个区间有多少人跨天再次使用”。
+
+| 指标 | 计算口径 | 示例 |
+| --- | --- | --- |
+| **次日留存（D1）** | 日期 D−1 和 D 都活跃的可识别 ID 数 ÷ D−1 的可识别活跃 ID 数 | 昨天 9 个 ID 活跃，其中 9 个今天也活跃：**9 / 9 = 100%** |
+| **周期复用率** | 所选区间中至少在 **2 个不同日期** 活跃的可识别 ID 数 ÷ 区间全部可识别活跃 ID 数 | 区间 10 个 ID 活跃，其中 6 个跨天再次使用：**6 / 10 = 60%** |
+| **活跃天数占比** | 观察到的活跃日期数 ÷ 所选区间的自然日数 | 同一天调用多次仍只算 1 个活跃日 |
+| **最长连续活跃天数** | 在相邻自然日上连续观察到活跃的最长天数 | 10 月 21 日与 23 日活跃属于 2 个活跃日，不是连续 2 天 |
+
+D1 的基准是前一天的**全部可识别活跃 ID**，不是只统计前一天首次注册或首次出现的新用户。次日留存摘要卡片固定以所选范围的结束日期 D 为准，**不是整个区间的平均留存**；D−1 可以位于所选开始日期之前，系统会从已导入历史中查找。两个日期均采用同一个 Scene 筛选；MML 的有效活动也参与，包括正常的空 Answer。所有留存与复用指标均排除空白 Client Id 和异常 `browser`（忽略该异常 ID 的大小写与首尾空格），重复 Task Id 只保留首次导入记录。
+
+只有两个日期都存在已导入日志时，才能展示该对日期的 D1。日期覆盖按**任意 Scene 的日志**判断，再按当前 Scene 计算用户集合；任一日期完全没有日志时显示“数据不足 / 不可用”，不是补成 0%。D−1 没有可识别基准用户时也不计算百分比。周期复用率在仅选择 1 个自然日、区间内只有 1 个有日志的日期，或没有可识别活跃用户时显示不可用，不把缺少观察窗口写成 0%。
+
+使用时先导入需要比较的两个日期，再选择结束日期；例如选择 10 月 23 日，会比较 10 月 22 日与 23 日。查看周期复用率时选择多日范围，并保留完整的相关日志。每日留存明细最多展开所选区间末尾 **3,660 个自然日**；页面显示最近 14 天，AI 总结附带最多 31 天的留存证据。Excel 新增每日留存与逐用户使用频率工作表；逐用户导出包含全量记录，不受页面每页 10 行限制。离线 HTML 根据完整日志快照推导相同指标，更新版本无需数据库迁移或重新导入已有日志。
+
+这些都是**已导入数据中观察到的可识别 ID 指标**，不是实际全部用户的真实留存率。ID 需要跨日期稳定才能匹配；`browser` 背后的人数无法还原。当天尚未结束或日志未导全时结果可能变化；没有日志的日期无法区分未使用与未导入。后加入的用户拥有更短的复用观察时间，不能仅凭周期复用率或活跃天数占比判断使用习惯或项目成败。
+
+**Overview** shows next-day retention for the selected end date D and period repeat usage in its engagement panel. **User analytics** provides D1 and period repeat-usage panels, the latest 14 daily retention rows, and a user-frequency table with 10 users per page.
+
+- **Next-day retention (D1)** = identifiable IDs active on both D−1 and D / identifiable IDs active on D−1. If all 9 of yesterday's active IDs return today, **9 / 9 = 100%**. The cohort includes every identifiable ID active yesterday, not just new sign-ups or newly observed users. The summary card describes the selected end date, not a range average; its prior-day baseline can fall before the selected start date.
+- **Period repeat-usage rate** = identifiable IDs active on at least two **different dates** / all identifiable IDs active in the selected period. For 6 returning-across-days IDs out of 10 active IDs, **6 / 10 = 60%**. Repeated calls on one date do not count as cross-day reuse.
+- **Active-day share** = observed active dates / selected calendar days. **Longest streak** counts only adjacent calendar dates with observed activity; activity on the 21st and 23rd is not a two-day streak.
+
+The same Scene filter applies to both D1 days. MML activity, including a normal empty answer, counts. Blank Client IDs and the invalid `browser` ID are excluded; the browser comparison ignores case and surrounding whitespace. Task IDs remain deduplicated. Day coverage is checked using imported logs from any Scene before applying the selected Scene to user sets. If either day has no imported logs, D1 is unknown rather than 0%; a zero identifiable-user baseline is also unavailable. Period repeat usage is unavailable for a single-day selection, a range with only one globally observed log date, or no identifiable users.
+
+Import both comparison days, then select the end date. For example, an end date of October 23 compares October 22 with October 23. Daily retention expansion is limited to the last 3,660 selected calendar days; the screen shows 14 rows and AI summary evidence includes at most 31. Excel includes daily retention and complete per-user frequency sheets, unaffected by the 10-row on-screen pagination. Offline HTML derives the same metrics from its complete log snapshot. No database migration or reimport is needed for existing records.
+
+These are observed metrics for identifiable IDs in imported logs, not verified retention of all actual people. IDs must remain stable across dates. An unfinished day or incomplete imports can change the results; a day without logs cannot distinguish inactivity from missing data. Late joiners have less time to return, so period repeat usage and active-day share should be interpreted with that observation window in mind.
+
 ## Line group 与客户反馈
 
 - 按日期填写 Line group 总人数。同一天重新填写会更新该日记录，填写的是群总人数，不是新增人数；需要至少两个不同日期的快照才能体现跨日增长。保存真实人数或反馈后自动退出演示模式，筛选日期会自动包含新增记录。
@@ -112,7 +143,7 @@ python server.py --host 0.0.0.0 --port 8000
 
 1. 导入日志，更新 Line group 人数与反馈，保存已知失败原因。
 2. 在工作空间打开“AI总结”，选择日期和 Scene；点击“仅看最近有日志的一天”可生成日报范围。多日范围会要求输出阶段汇报。
-3. 可补充汇报风格要求，点击“生成 AI 总结提示词”。提示词包含当前统计汇总、问题排行、自主提问、有限的失败上下文与已填原因、群人数及文字反馈。截图不会放入提示词；示例上限和截断情况会保留。
+3. 可补充汇报风格要求，点击“生成 AI 总结提示词”。提示词包含当前统计汇总、问题排行、自主提问、次日留存与周期复用、有限的失败上下文与已填原因、群人数及文字反馈。截图不会放入提示词；示例上限和截断情况会保留。
 4. 复制完整提示词交给本地 AI 工具，或者下载 `FMEMate_AI_Report_Prompt_起始日期_结束日期.md` 并放到项目根目录。在该目录打开本地 AI 工具，粘贴页面提供的“请读取 …，按要求生成中英文汇报”指令。
 5. 提示词要求生成 `reports/FMEMate_Progress_起始日期_结束日期_zh.md` 和对应 `_en.md`，按使用情况、客户需求、失败排查、群运营、下一步组织自然语言汇报。核对后可复制到群里，也可存入“每日总结”归档。
 
@@ -122,7 +153,7 @@ python server.py --host 0.0.0.0 --port 8000
 
 下载的提示词和生成的 `reports/` 可能包含日志证据，已加入 `.gitignore`。上一版已经保存的汇报保留，可在历史草稿中查看、复制和下载；完整备份及离线 HTML 继续包含已保存汇报。旧的本地 API 配置文件不会被删除，新流程无需使用它。
 
-The **AI summary** tab is under **Workspace**. It creates a self-contained prompt locally from the current dates, scene and calculated metrics. No API URL or key is needed in the dashboard. Copy the prompt into your local AI tool, or download `FMEMate_AI_Report_Prompt_FROM_TO.md` into the project root, open the tool there and use the displayed read-file instruction. The prompt requests separate Chinese and English Markdown reports in `reports/`, with dated headings and concise paragraphs for usage, needs, failure investigation, community progress and suggested next actions. It includes bounded textual evidence and reporting rules; screenshots are excluded. Offline snapshots support the same local prompt flow. Regenerate after changing filters or writing preferences. Review the output before sharing or saving it in **Daily summaries**. Existing saved report drafts remain available. Downloaded prompt files and generated reports are ignored by Git.
+The **AI summary** tab is under **Workspace**. It creates a self-contained prompt locally from the current dates, scene and calculated metrics. No API URL or key is needed in the dashboard. Copy the prompt into your local AI tool, or download `FMEMate_AI_Report_Prompt_FROM_TO.md` into the project root, open the tool there and use the displayed read-file instruction. The prompt requests separate Chinese and English Markdown reports in `reports/`, with dated headings and concise paragraphs for usage, needs, failure investigation, community progress and suggested next actions. It includes bounded textual evidence, next-day retention and period repeat-usage metrics, and reporting rules; screenshots are excluded. Offline snapshots support the same local prompt flow. Regenerate after changing filters or writing preferences. Review the output before sharing or saving it in **Daily summaries**. Existing saved report drafts remain available. Downloaded prompt files and generated reports are ignored by Git.
 
 ## 每日总结 / Daily summaries
 
@@ -203,7 +234,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.4.1。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.5.0。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
