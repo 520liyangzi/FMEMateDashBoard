@@ -117,12 +117,19 @@ export type RepeatUsageUser = {
   lastDate: string;
 };
 
+export const DEFAULT_REPEAT_DAYS = 3;
+/** Whole-day thresholds from 2 to 3660 are supported; invalid values use the default. */
+export function normalizeRepeatDays(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 2 && value <= 3660 ? value : DEFAULT_REPEAT_DAYS;
+}
+
 export type RepeatUsageAnalysis = {
+  minimumActiveDays: number;
   range: { from: string; to: string; days: number };
-  status: 'available' | 'single_day_range' | 'insufficient_logs' | 'no_identifiable_users' | 'invalid_range';
+  status: 'available' | 'single_day_range' | 'insufficient_period' | 'insufficient_logs' | 'no_identifiable_users' | 'invalid_range';
   totalUsers: number;
   repeatUsers: number;
-  /** Identifiable users active on at least two distinct dates / all identifiable users × 100. */
+  /** Users active on at least minimumActiveDays distinct dates / all identifiable users × 100. */
   rate: number | null;
   /** All-scene observed dates. Unobserved dates do not establish inactivity or missing imports. */
   observedDays: number;
@@ -131,9 +138,10 @@ export type RepeatUsageAnalysis = {
 };
 
 /** Multi-day repeat usage in one selected period, separate from next-day retention. */
-export function analyzeRepeatUsage(records: LogRecord[], from: string, to: string, scene?: string): RepeatUsageAnalysis {
+export function analyzeRepeatUsage(records: LogRecord[], from: string, to: string, scene?: string, minimumActiveDays = DEFAULT_REPEAT_DAYS): RepeatUsageAnalysis {
+  minimumActiveDays = normalizeRepeatDays(minimumActiveDays);
   if (!validDate(from) || !validDate(to) || from > to) {
-    return { range: { from, to, days: 0 }, status: 'invalid_range', totalUsers: 0, repeatUsers: 0, rate: null, observedDays: 0, daysWithoutLogs: 0, users: [] };
+    return { minimumActiveDays, range: { from, to, days: 0 }, status: 'invalid_range', totalUsers: 0, repeatUsers: 0, rate: null, observedDays: 0, daysWithoutLogs: 0, users: [] };
   }
   const days = Math.round((stamp(to) - stamp(from)) / DAY) + 1;
   const observed = new Set<string>();
@@ -162,13 +170,14 @@ export function analyzeRepeatUsage(records: LogRecord[], from: string, to: strin
     return { clientId, activeDays: dates.length, activeDayShare: dates.length / days * 100, longestStreak, firstDate: dates[0], lastDate: dates[dates.length - 1] };
   }).sort((a, b) => b.activeDays - a.activeDays || b.longestStreak - a.longestStreak || a.clientId.localeCompare(b.clientId));
   const totalUsers = users.length;
-  const repeatUsers = users.filter(user => user.activeDays >= 2).length;
+  const repeatUsers = users.filter(user => user.activeDays >= minimumActiveDays).length;
   const status: RepeatUsageAnalysis['status'] = days === 1 ? 'single_day_range'
-    : observed.size < 2 ? 'insufficient_logs'
+    : days < minimumActiveDays ? 'insufficient_period'
+    : observed.size < minimumActiveDays ? 'insufficient_logs'
     : totalUsers === 0 ? 'no_identifiable_users'
     : 'available';
   return {
-    range: { from, to, days }, status, totalUsers, repeatUsers,
+    minimumActiveDays, range: { from, to, days }, status, totalUsers, repeatUsers,
     rate: status === 'available' ? repeatUsers / totalUsers * 100 : null,
     observedDays: observed.size, daysWithoutLogs: days - observed.size, users,
   };

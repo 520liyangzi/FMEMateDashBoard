@@ -23,6 +23,7 @@ export type AiFactsInput = {
   to: string;
   scene: string;
   demo: boolean;
+  minimumActiveDays?: number;
 };
 
 const LIMITS = {
@@ -36,7 +37,7 @@ const LIMITS = {
 export function buildAiFacts(input: AiFactsInput) {
   const stats = analyze(input.records, input.presets, input.from, input.to, input.scene);
   const { from, to, days } = stats.range;
-  const repeatUsage = analyzeRepeatUsage(input.records, from, to, input.scene);
+  const repeatUsage = analyzeRepeatUsage(input.records, from, to, input.scene, input.minimumActiveDays);
   const retention = analyzeRetention(input.records, from, to, input.scene);
   // Retention cohorts are useful in the interactive dashboard; the writing
   // prompt only needs counts, never unbounded lists of Client IDs.
@@ -134,6 +135,7 @@ export function buildAiFacts(input: AiFactsInput) {
     previous: { ...stats.previous, hasUsageBaseline: stats.previous.uses > 0 },
     changes: { ...stats.changes, failureRate: stats.previous.uses > 0 ? stats.changes.failureRate : null },
     repeatUsage: {
+      minimumActiveDays: repeatUsage.minimumActiveDays,
       range: repeatUsage.range,
       status: repeatUsage.status,
       totalUsers: repeatUsage.totalUsers,
@@ -144,7 +146,7 @@ export function buildAiFacts(input: AiFactsInput) {
       topUsers: repeatUsageUsers,
       coverage: {
         ...coverage(repeatUsage.users.length, repeatUsageUsers.length, 'Most observed active dates, then longest calendar-day streak; latest selected range only'),
-        definition: 'Identifiable Client IDs active on at least two distinct calendar dates in the selected period, divided by all identifiable Client IDs active in that period. browser is excluded.',
+        definition: `Identifiable Client IDs active on at least ${repeatUsage.minimumActiveDays} distinct calendar dates in the selected period, divided by all identifiable Client IDs active in that period. browser is excluded. Dates need not be consecutive.`,
         units: 'rate and activeDayShare are percentages from 0 to 100. activeDays and longestStreak count calendar dates; activeDayShare = activeDays / selected calendar days × 100.',
         limitations: 'observedDays counts dates with imported logs in any Scene; daysWithoutLogs is unobserved coverage, not confirmed inactivity or failed imports. Log completeness is unconfirmed. Later-joining users have fewer opportunities to repeat. This is not conversion, signup-cohort retention, next-day retention, or the period returningUsers metric.',
       },
@@ -192,8 +194,8 @@ export function buildAiFacts(input: AiFactsInput) {
     methodology: [
       'All users fields count distinct identifiable Client IDs. The invalid browser ID is excluded from all people counts and rankings. Its interactions remain in usage, question and failure totals. Actual people behind browser are unknown; never describe identifiable user counts as actual total people.',
       'Period users are unique across the whole period; never sum daily unique users. New users are first seen only within imported history, not proven new real-world customers.',
-      'Period repeatUsage counts identifiable users active on two or more distinct selected calendar dates divided by all identifiable active users in that period. A 60% rate means 6 repeat users out of 10 identifiable period users, not 60% conversion or next-day retention. New or later-joining users have less time to repeat; this is not age-adjusted signup-cohort retention. browser is excluded.',
-      'repeatUsage.topUsers includes at most ten users. activeDays counts distinct observed dates, activeDayShare is activeDays / all selected calendar days × 100, and longestStreak counts consecutive calendar dates without bridging gaps. Single-day ranges, fewer than two observed global log dates, or no identifiable users have an unavailable null rate. daysWithoutLogs indicates unknown coverage, not proven inactivity or missing imports; imported history may be incomplete.',
+      `Period repeatUsage uses the selected minimumActiveDays threshold of ${repeatUsage.minimumActiveDays}: identifiable users active on at least ${repeatUsage.minimumActiveDays} distinct selected calendar dates divided by all identifiable active users in that period. Dates need not be consecutive; multiple interactions on one date count once. Always report the threshold with the dates and numerator/denominator. A 60% rate means 6 qualifying users out of 10 identifiable period users, not 60% conversion or next-day retention. New or later-joining users have less time to repeat; this is not age-adjusted signup-cohort retention. browser is excluded.`,
+      `repeatUsage.topUsers includes at most ten users. activeDays counts distinct observed dates, activeDayShare is activeDays / all selected calendar days × 100, and longestStreak counts consecutive calendar dates without bridging gaps. Single-day ranges, selected periods shorter than the ${repeatUsage.minimumActiveDays}-day threshold (insufficient_period), fewer than ${repeatUsage.minimumActiveDays} observed global log dates (insufficient_logs), no identifiable users or invalid ranges have an unavailable null rate. A fully observed eligible range with no qualifying users may have a true observed 0%. daysWithoutLogs indicates unknown coverage, not proven inactivity or missing imports; imported history may be incomplete.`,
       'Next-day retention is day-over-day repeat usage by the full prior-day active identifiable cohort, not a first-use or registration cohort, conversion, or period returningUsers metric. Only prior-day IDs observed again on the strict next calendar day form the numerator; new current-day users do not enter it. The same Scene filter applies to both days.',
       'retention.latest describes only the selected range end date versus its previous calendar day, not retention across the whole selected interval. Rate is percent; 100% means all observed identifiable prior-day IDs returned, not all actual people or Line group members. Always state both dates and retainedUsers/previousUsers with the rate.',
       'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for both days, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',

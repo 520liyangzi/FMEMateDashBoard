@@ -68,13 +68,13 @@ python server.py --data-dir D:\FMEMateData
 | 指标 | 计算口径 | 示例 |
 | --- | --- | --- |
 | **次日留存（D1）** | 日期 D−1 和 D 都活跃的可识别 ID 数 ÷ D−1 的可识别活跃 ID 数 | 昨天 9 个 ID 活跃，其中 9 个今天也活跃：**9 / 9 = 100%** |
-| **周期复用率** | 所选区间中至少在 **2 个不同日期** 活跃的可识别 ID 数 ÷ 区间全部可识别活跃 ID 数 | 区间 10 个 ID 活跃，其中 6 个跨天再次使用：**6 / 10 = 60%** |
+| **周期复用率** | 所选区间中至少在 **N 个不同日期** 活跃的可识别 ID 数 ÷ 区间全部可识别活跃 ID 数；N 默认 3，可调整 | N = 3 时，区间 10 个 ID 活跃，其中 6 个至少在 3 天使用：**6 / 10 = 60%** |
 | **活跃天数占比** | 观察到的活跃日期数 ÷ 所选区间的自然日数 | 同一天调用多次仍只算 1 个活跃日 |
 | **最长连续活跃天数** | 在相邻自然日上连续观察到活跃的最长天数 | 10 月 21 日与 23 日活跃属于 2 个活跃日，不是连续 2 天 |
 
 D1 的基准是前一天的**全部可识别活跃 ID**，不是只统计前一天首次注册或首次出现的新用户。次日留存摘要卡片固定以所选范围的结束日期 D 为准，**不是整个区间的平均留存**；D−1 可以位于所选开始日期之前，系统会从已导入历史中查找。两个日期均采用同一个 Scene 筛选；MML 的有效活动也参与，包括正常的空 Answer。所有留存与复用指标均排除空白 Client Id 和异常 `browser`（忽略该异常 ID 的大小写与首尾空格），重复 Task Id 只保留首次导入记录。
 
-只有两个日期都存在已导入日志时，才能展示该对日期的 D1。日期覆盖按**任意 Scene 的日志**判断，再按当前 Scene 计算用户集合；任一日期完全没有日志时显示“数据不足 / 不可用”，不是补成 0%。D−1 没有可识别基准用户时也不计算百分比。周期复用率在仅选择 1 个自然日、区间内只有 1 个有日志的日期，或没有可识别活跃用户时显示不可用，不把缺少观察窗口写成 0%。
+只有两个日期都存在已导入日志时，才能展示该对日期的 D1。日期覆盖按**任意 Scene 的日志**判断，再按当前 Scene 计算用户集合；任一日期完全没有日志时显示“数据不足 / 不可用”，不是补成 0%。D−1 没有可识别基准用户时也不计算百分比。周期复用门槛可在项目概览或用户分析中设置为 2–3660 个不同日期，默认 3，日期不要求连续。网页会记住当前浏览器的设置；离线 HTML 保留导出时的门槛，Excel、打印说明和 AI 总结也采用同一口径。所选自然日数或区间内有日志的日期数不足 N，或没有可识别活跃用户时，周期复用率显示不可用，不把缺少观察窗口写成 0%。
 
 使用时先导入需要比较的两个日期，再选择结束日期；例如选择 10 月 23 日，会比较 10 月 22 日与 23 日。查看周期复用率时选择多日范围，并保留完整的相关日志。每日留存明细最多展开所选区间末尾 **3,660 个自然日**；页面显示最近 14 天，AI 总结附带最多 31 天的留存证据。Excel 新增每日留存与逐用户使用频率工作表；逐用户导出包含全量记录，不受页面每页 10 行限制。离线 HTML 根据完整日志快照推导相同指标，更新版本无需数据库迁移或重新导入已有日志。
 
@@ -83,10 +83,10 @@ D1 的基准是前一天的**全部可识别活跃 ID**，不是只统计前一�
 **Overview** shows next-day retention for the selected end date D and period repeat usage in its engagement panel. **User analytics** provides D1 and period repeat-usage panels, the latest 14 daily retention rows, and a user-frequency table with 10 users per page.
 
 - **Next-day retention (D1)** = identifiable IDs active on both D−1 and D / identifiable IDs active on D−1. If all 9 of yesterday's active IDs return today, **9 / 9 = 100%**. The cohort includes every identifiable ID active yesterday, not just new sign-ups or newly observed users. The summary card describes the selected end date, not a range average; its prior-day baseline can fall before the selected start date.
-- **Period repeat-usage rate** = identifiable IDs active on at least two **different dates** / all identifiable IDs active in the selected period. For 6 returning-across-days IDs out of 10 active IDs, **6 / 10 = 60%**. Repeated calls on one date do not count as cross-day reuse.
+- **Period repeat-usage rate** = identifiable IDs active on at least **N distinct dates** / all identifiable IDs active in the selected period. N defaults to **3** and can be set to 2–3660 in Overview or User analytics. With N = 3, 6 accounts active on at least three dates out of 10 active accounts means **6 / 10 = 60%**. Dates need not be consecutive, and repeated calls on one date count as one active day. The browser remembers the setting; offline HTML retains the exported threshold. Excel, print explanations and AI summary use the same threshold.
 - **Active-day share** = observed active dates / selected calendar days. **Longest streak** counts only adjacent calendar dates with observed activity; activity on the 21st and 23rd is not a two-day streak.
 
-The same Scene filter applies to both D1 days. MML activity, including a normal empty answer, counts. Blank Client IDs and the invalid `browser` ID are excluded; the browser comparison ignores case and surrounding whitespace. Task IDs remain deduplicated. Day coverage is checked using imported logs from any Scene before applying the selected Scene to user sets. If either day has no imported logs, D1 is unknown rather than 0%; a zero identifiable-user baseline is also unavailable. Period repeat usage is unavailable for a single-day selection, a range with only one globally observed log date, or no identifiable users.
+The same Scene filter applies to both D1 days. MML activity, including a normal empty answer, counts. Blank Client IDs and the invalid `browser` ID are excluded; the browser comparison ignores case and surrounding whitespace. Task IDs remain deduplicated. Day coverage is checked using imported logs from any Scene before applying the selected Scene to user sets. If either day has no imported logs, D1 is unknown rather than 0%; a zero identifiable-user baseline is also unavailable. Period repeat usage is unavailable when the selected calendar-day count or globally observed log-date count is below N, or there are no identifiable users. These unavailable cases are not reported as 0%.
 
 Import both comparison days, then select the end date. For example, an end date of October 23 compares October 22 with October 23. Daily retention expansion is limited to the last 3,660 selected calendar days; the screen shows 14 rows and AI summary evidence includes at most 31. Excel includes daily retention and complete per-user frequency sheets, unaffected by the 10-row on-screen pagination. Offline HTML derives the same metrics from its complete log snapshot. No database migration or reimport is needed for existing records.
 
@@ -234,7 +234,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.5.0。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.5.1。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 

@@ -106,15 +106,40 @@ test('unavailable retention remains null in the prompt with explicit rules again
 test('multi-day prompt carries the 60% period repeat cohort and keeps it distinct from next-day retention', () => {
   const records = Array.from({ length: 10 }, (_, i) => ({ taskId: `current-${i}`, clientId: `user-${i}`, date: '2026-10-23', time: '2026-10-23T09:00:00', question: 'A question', answer: 'OK', scene: 'Diagnosis' }));
   records.push(...Array.from({ length: 6 }, (_, i) => ({ taskId: `prior-${i}`, clientId: `user-${i}`, date: '2026-10-22', time: '2026-10-22T09:00:00', question: 'A question', answer: 'OK', scene: 'Diagnosis' })));
-  const data = buildAiFacts({ records, presets: [], groups: [], feedback: [], failureNotes: {}, from: '2026-10-22', to: '2026-10-23', scene: '', demo: false });
+  const data = buildAiFacts({ records, presets: [], groups: [], feedback: [], failureNotes: {}, from: '2026-10-22', to: '2026-10-23', scene: '', demo: false, minimumActiveDays: 2 });
   const prompt = buildAiReportPrompt(data);
   assert.equal(data.repeatUsage.rate, 60);
   assert.equal(data.retention.latest.rate, 100);
   assert.ok(prompt.includes(JSON.stringify(data, null, 2)));
   assert.match(prompt, /多日范围优先呈现可用的 repeatUsage 区间重复使用率/);
-  assert.match(prompt, /至少在两个不同自然日活跃/);
+  assert.match(prompt, /至少在 2 个不同自然日活跃/);
   assert.match(prompt, /不是 60% 转化率、次日留存率或满意度/);
   assert.match(prompt, /区间后期才出现的用户重复使用机会更少/);
   assert.match(prompt, /不能跨无记录日期续算/);
   assert.match(prompt, /不要求为堆砌数据同时写两个比例/);
+});
+
+
+test('AI report instructions show the current repeat threshold and unavailable eligibility rules', () => {
+  const records = Array.from({ length: 5 }, (_, i) => ({ taskId: `day-${i}`, clientId: 'alice', date: `2026-10-${20 + i}`, time: `2026-10-${20 + i}T09:00:00`, question: 'Question', answer: 'OK', scene: 'Diagnosis' }));
+  const input = { records, presets: [], groups: [], feedback: [], failureNotes: {}, from: '2026-10-20', to: '2026-10-24', scene: '', demo: false };
+  const defaults = buildAiReportPrompt(buildAiFacts(input));
+  assert.match(defaults, /本次门槛 minimumActiveDays 为 3/);
+  assert.match(defaults, /至少在 3 个不同自然日活跃/);
+  const data = buildAiFacts({ ...input, minimumActiveDays: 5 });
+  const prompt = buildAiReportPrompt(data);
+  assert.equal(data.repeatUsage.rate, 100);
+  assert.match(prompt, /本次门槛 minimumActiveDays 为 5/);
+  assert.match(prompt, /至少使用 5 个不同日期的门槛/);
+  assert.match(prompt, /至少在 5 个不同自然日活跃/);
+  assert.ok(prompt.includes('"minimumActiveDays": 5'));
+  assert.match(prompt, /日期不必连续/);
+  assert.match(prompt, /少于门槛（insufficient_period）/);
+  assert.match(prompt, /少于门槛（insufficient_logs）/);
+  assert.match(prompt, /满足观察条件但没有账号达标时才可以引用已计算的 0%/);
+  const unavailable = buildAiFacts({ ...input, to: '2026-10-23', minimumActiveDays: 5 });
+  assert.equal(unavailable.repeatUsage.status, 'insufficient_period');
+  const unavailablePrompt = buildAiReportPrompt(unavailable);
+  assert.ok(unavailablePrompt.includes('"status": "insufficient_period"'));
+  assert.ok(unavailablePrompt.includes('"rate": null'));
 });

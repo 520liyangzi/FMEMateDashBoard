@@ -186,7 +186,7 @@ test('period repeat facts distinguish six of ten repeated users from prior-day a
   records.push(...Array.from({ length: 6 }, (_, i) => row(`prior-${i}`, `user-${i}`, '2026-10-22')));
   records.push(row('first-day', 'user-0', '2026-10-21'));
   records.push(...['21', '22', '23'].map(date => row(`browser-${date}`, 'browser', `2026-10-${date}`)));
-  const report = facts({ from: '2026-10-21', records });
+  const report = facts({ from: '2026-10-21', records, minimumActiveDays: 2 });
   assert.equal(report.repeatUsage.status, 'available');
   assert.deepEqual(report.repeatUsage.range, { from: '2026-10-21', to: '2026-10-23', days: 3 });
   assert.equal(report.repeatUsage.totalUsers, 10);
@@ -205,7 +205,7 @@ test('period repeat facts distinguish six of ten repeated users from prior-day a
 });
 
 test('period repeat facts keep unknown log days and unavailable short-range rates explicit', () => {
-  const report = facts({ from: '2026-10-20', records: [row('1', 'alice', '2026-10-21'), row('2', 'alice', '2026-10-23')] });
+  const report = facts({ from: '2026-10-20', minimumActiveDays: 2, records: [row('1', 'alice', '2026-10-21'), row('2', 'alice', '2026-10-23')] });
   assert.equal(report.repeatUsage.rate, 100);
   assert.equal(report.repeatUsage.observedDays, 2);
   assert.equal(report.repeatUsage.daysWithoutLogs, 2);
@@ -215,7 +215,33 @@ test('period repeat facts keep unknown log days and unavailable short-range rate
   const single = facts({ from: '2026-10-23', records: [row('one', 'alice', '2026-10-23')] });
   assert.equal(single.repeatUsage.status, 'single_day_range');
   assert.equal(single.repeatUsage.rate, null);
-  const oneObservedDay = facts({ records: [row('one', 'alice', '2026-10-23')] });
+  const oneObservedDay = facts({ minimumActiveDays: 2, records: [row('one', 'alice', '2026-10-23')] });
   assert.equal(oneObservedDay.repeatUsage.status, 'insufficient_logs');
   assert.equal(oneObservedDay.repeatUsage.rate, null);
+});
+
+
+test('AI repeat facts use the default three-day threshold and a selected five-day threshold', () => {
+  const records = Array.from({ length: 5 }, (_, i) => row(`alice-${i}`, 'alice', `2026-10-${20 + i}`));
+  records.push(...Array.from({ length: 3 }, (_, i) => row(`bob-${i}`, 'bob', `2026-10-${20 + i}`)));
+  records.push(row('carol', 'carol', '2026-10-24'));
+  records.push(...Array.from({ length: 5 }, (_, i) => row(`browser-${i}`, 'browser', `2026-10-${20 + i}`)));
+  const defaults = facts({ from: '2026-10-20', to: '2026-10-24', records });
+  assert.equal(defaults.repeatUsage.minimumActiveDays, 3);
+  assert.equal(defaults.repeatUsage.repeatUsers, 2);
+  assert.equal(defaults.repeatUsage.totalUsers, 3);
+  assert.equal(defaults.repeatUsage.rate, 2 / 3 * 100);
+  assert.match(defaults.repeatUsage.coverage.definition, /at least 3 distinct calendar dates/);
+  const selected = facts({ from: '2026-10-20', to: '2026-10-24', minimumActiveDays: 5, records });
+  assert.equal(selected.repeatUsage.minimumActiveDays, 5);
+  assert.equal(selected.repeatUsage.repeatUsers, 1);
+  assert.equal(selected.repeatUsage.rate, 1 / 3 * 100);
+  assert.match(selected.repeatUsage.coverage.definition, /at least 5 distinct calendar dates/);
+  assert.match(selected.methodology.join(' '), /selected minimumActiveDays threshold of 5/);
+  const tooShort = facts({ from: '2026-10-20', to: '2026-10-23', minimumActiveDays: 5, records });
+  assert.equal(tooShort.repeatUsage.status, 'insufficient_period');
+  assert.equal(tooShort.repeatUsage.rate, null);
+  const sparse = facts({ from: '2026-10-20', to: '2026-10-24', minimumActiveDays: 5, records: records.filter(record => record.date !== '2026-10-24') });
+  assert.equal(sparse.repeatUsage.status, 'insufficient_logs');
+  assert.equal(sparse.repeatUsage.rate, null);
 });
