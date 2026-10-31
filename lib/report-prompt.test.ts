@@ -151,3 +151,20 @@ test('selected follow-up window and consecutive mode flow into facts and bilingu
  assert.equal(data.retention.windowDays,3);assert.equal(data.retention.latest.windowStart,'2026-10-21');assert.equal(data.retention.latest.rate,100);assert.equal(data.repeatUsage.mode,'consecutive');assert.equal(data.repeatUsage.repeatUsers,1);
  const prompt=buildAiReportPrompt(data);assert.match(prompt,/后续 3 天内至少再次使用一次/);assert.match(prompt,/mode=consecutive/);assert.match(prompt,/使用 longestStreak 判断/);assert.ok(!prompt.includes('日期不必连续'));assert.ok(!prompt.includes('Observed D-1'));
 });
+
+test('MTTR reporting requires explicit periods and counts without attributing whole-system changes to the app', () => {
+  const data = facts();
+  const prompt = buildAiReportPrompt(data);
+  assert.equal(data.effectiveness.mttr.status, 'no_dataset');
+  assert.match(prompt, /MTTR 减少率=\(基准期 meanSeconds−对比期 meanSeconds\)÷基准期 meanSeconds×100%/);
+  assert.match(prompt, /基准期和对比期的具体起止日期、各期有效关闭工单数/);
+  assert.match(prompt, /按 J 的关闭日期归属周期/);
+  assert.match(prompt, /禁止对每日均值取简单平均/);
+  assert.match(prompt, /零耗时有效/);
+  assert.match(prompt, /overlap=true 必须说明周期重叠/);
+  assert.match(prompt, /unequalDays=true 必须说明周期长度不同/);
+  assert.match(prompt, /未关联哪些工单或用户使用过 FMEMate/);
+  assert.match(prompt, /不能声称“由 FMEMate 带来\/证明了效率提升”/);
+  assert.match(prompt, /savedSeconds 只是平均每单耗时差/);
+  assert.ok(prompt.includes('"reductionRate": null'));
+});

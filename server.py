@@ -22,9 +22,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
+from mttr_import import import_mttr, validate_dataset, MttrImportError
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.7.0'
+APP_VERSION = '1.8.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS failure_notes (taskId TEXT PRIMARY KEY, reason TEXT N
 CREATE TABLE IF NOT EXISTS ai_reports (id TEXT PRIMARY KEY, createdAt TEXT NOT NULL, dateFrom TEXT NOT NULL, dateTo TEXT NOT NULL, scene TEXT NOT NULL, model TEXT NOT NULL, demo INTEGER NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS daily_summaries (date TEXT PRIMARY KEY, title TEXT NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS site_visits (id TEXT PRIMARY KEY, date TEXT NOT NULL, site TEXT NOT NULL, description TEXT NOT NULL, photos TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mttr_dataset (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0);
 """
 
@@ -178,6 +180,30 @@ class Store:
                     'siteVisits': [self.visit_row(r) for r in db.execute('SELECT * FROM site_visits ORDER BY date DESC,createdAt DESC,id')],
                     'dailySummaries': [dict(r) for r in db.execute('SELECT date,title,zh,en,createdAt,updatedAt FROM daily_summaries ORDER BY date DESC')],
                     'total': db.execute('SELECT count(*) FROM logs').fetchone()[0]}
+
+    def get_mttr(self):
+        with self.lock, self.connect() as db:
+            row = db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()
+            return json.loads(row['data']) if row else None
+
+    def import_mttr(self, fields):
+        if set(fields) != {'file'} or not fields['file'].get('filename'):
+            raise ApiError(400, 'Select one ticket export in the file field.')
+        try:
+            dataset = import_mttr(fields['file']['data'], fields['file']['filename'])
+        except MttrImportError as exc:
+            raise ApiError(400, str(exc))
+        # Parse and validate before touching the live dataset. One transaction
+        # replaces the snapshot, including when the same workbook is reuploaded.
+        with self.lock, self.connect() as db:
+            db.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                       (json.dumps(dataset, ensure_ascii=False, allow_nan=False),))
+        return dataset
+
+    def delete_mttr(self):
+        with self.lock, self.connect() as db:
+            db.execute('DELETE FROM mttr_dataset')
+        return {'ok': True}
 
     @staticmethod
     def visit_row(row):
@@ -536,7 +562,7 @@ class Store:
                 required_tables = {'logs', 'settings', 'groups', 'feedback', 'history'}
                 tables = {r['name'] for r in schema if r['type'] == 'table'}
                 # Legacy backups may omit either of the subsequently added tables.
-                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
+                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits', 'mttr_dataset'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
                     raise ApiError(400, 'Backup database contains unsupported schema objects.')
                 if 'failure_notes' in tables and {r['name'] for r in source.execute('PRAGMA table_info(failure_notes)')} != {'taskId', 'reason', 'updatedAt'}:
                     raise ApiError(400, 'Backup failure reason columns are invalid.')
@@ -546,10 +572,22 @@ class Store:
                     raise ApiError(400, 'Backup daily summary columns are invalid.')
                 if 'site_visits' in tables and {r['name'] for r in source.execute('PRAGMA table_info(site_visits)')} != {'id', 'date', 'site', 'description', 'photos', 'createdAt', 'updatedAt'}:
                     raise ApiError(400, 'Backup site visit columns are invalid.')
+                if 'mttr_dataset' in tables and {r['name'] for r in source.execute('PRAGMA table_info(mttr_dataset)')} != {'id', 'data'}:
+                    raise ApiError(400, 'Backup MTTR columns are invalid.')
                 if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ApiError(400, 'Backup database integrity check failed.')
                 with self.connect(new_db) as dest:
                     dest.executescript(SCHEMA)
+                    if 'mttr_dataset' in tables:
+                        rows = source.execute('SELECT id,data FROM mttr_dataset').fetchall()
+                        if len(rows) > 1 or any(row['id'] != 1 for row in rows):
+                            raise ApiError(400, 'Backup MTTR snapshot is invalid.')
+                        for row in rows:
+                            try:
+                                dataset = validate_dataset(json.loads(row['data']))
+                            except (MttrImportError, ValueError, TypeError, KeyError):
+                                raise ApiError(400, 'Backup MTTR data is invalid.')
+                            dest.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?)', (json.dumps(dataset, allow_nan=False),))
                     if 'site_visits' in tables:
                         for row in source.execute('SELECT * FROM site_visits'):
                             clean = self.validate_visit({**dict(row), 'photos': json.loads(row['photos'])})
@@ -750,6 +788,8 @@ class Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             path = unquote(url.path)
             params = parse_qs(url.query)
+            if path == '/api/mttr':
+                return self.json(self.server.store.get_mttr())
             if path == '/api/state':
                 return self.json(self.server.store.state())
             if path == '/api/ai/config':
@@ -815,6 +855,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(store.validate_ai_request(self.json_body()))
             if path == '/api/ai/generate':
                 return self.json(store.generate_ai_report(self.json_body()))
+            if path == '/api/mttr/import':
+                return self.json(store.import_mttr(self.multipart()))
             if path == '/api/site-visits':
                 return self.json(store.save_visit(self.multipart()))
             if path == '/api/daily-summaries':
@@ -862,6 +904,8 @@ class Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             params = parse_qs(url.query)
             store = self.server.store
+            if url.path == '/api/mttr':
+                return self.json(store.delete_mttr())
             if url.path == '/api/site-visits':
                 return self.json(store.delete_visit(params.get('id', [''])[0], params.get('expectedUpdatedAt', [''])[0]))
             if url.path == '/api/daily-summaries':

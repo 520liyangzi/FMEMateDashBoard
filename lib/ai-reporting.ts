@@ -1,4 +1,5 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
+import { compareMttr, previousMttrPeriod, type MttrDataset, type MttrPeriod } from './mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -26,6 +27,9 @@ export type AiFactsInput = {
   minimumActiveDays?: number;
   retentionDays?: number;
   repeatMode?: RepeatMode;
+  mttr?: MttrDataset | null;
+  mttrBaseline?: MttrPeriod;
+  mttrCurrent?: MttrPeriod;
 };
 
 const LIMITS = {
@@ -41,6 +45,10 @@ export function buildAiFacts(input: AiFactsInput) {
   const { from, to, days } = stats.range;
   const repeatUsage = analyzeRepeatUsage(input.records, from, to, input.scene, input.minimumActiveDays, input.repeatMode);
   const retention = analyzeRetention(input.records, from, to, input.scene, input.retentionDays);
+  // MTTR has its own ticket-system ranges and is independent of app Scene filters.
+  const mttrCurrent = input.mttrCurrent ?? { from, to };
+  const mttrBaseline = input.mttrBaseline ?? previousMttrPeriod(mttrCurrent) ?? { from: '', to: '' };
+  const mttrComparison = compareMttr(input.mttr ?? null, mttrBaseline, mttrCurrent);
   // Retention cohorts are useful in the interactive dashboard; the writing
   // prompt only needs counts, never unbounded lists of Client IDs.
   const retentionDay = (day: RetentionDay) => ({
@@ -173,6 +181,26 @@ export function buildAiFacts(input: AiFactsInput) {
         limitations: 'Imported logs are not confirmed complete on the baseline or any follow-up day, including the current day. A missing baseline, any unobserved follow-up date, or no baseline identifiable cohort produce an unavailable rate, not zero. Not observed returning does not prove churn.',
       },
     },
+    effectiveness: {
+      mttr: {
+        ...mttrComparison,
+        source: 'Imported work-order system aggregate; independent of app logs and Scene filters.',
+        importedAt: input.mttr?.importedAt ?? null,
+        dataQuality: input.mttr ? {
+          sourceRows: input.mttr.sourceRows,
+          matchedRows: input.mttr.matchedRows,
+          validRows: input.mttr.validRows,
+          excludedRows: input.mttr.excludedRows,
+          invalidDates: input.mttr.invalidDates,
+          negativeDurations: input.mttr.negativeDurations,
+          earliestCloseDate: input.mttr.earliestDate,
+          latestCloseDate: input.mttr.latestDate,
+        } : null,
+        definition: 'Mean elapsed seconds = sum of valid ticket (J close timestamp minus F creation timestamp) / valid ticket count. U must be Radio-OSP or Radio-ISP and S tt_status_description must be CLOSE. Each ticket belongs to its J close date, inclusively within each selected range; the full elapsed duration is counted, including time before the period.',
+        units: 'meanSeconds, totalSeconds and savedSeconds are seconds. reductionRate is percentage: (baseline mean - current mean) / baseline mean × 100. Positive means shorter mean duration; negative means longer. savedSeconds is the difference in mean duration per ticket, not total work-hours saved.',
+        limitations: 'Whole-system observed closed-ticket comparison, with no ticket-to-app-user or app-use linkage. It does not establish FMEMate causation, labor time saved, ROI or comparable ticket difficulty. Imported coverage is unconfirmed; no recorded closure on a date does not prove no tickets. Missing tickets, invalid ranges or a zero baseline mean make the corresponding rate unavailable, never an invented 0% or 100%. Overlapping or unequal-length periods must be disclosed. The latest import replaces the previous dataset rather than accumulating repeat uploads.',
+      },
+    },
     topUsers,
     topQuestions,
     customQuestions,
@@ -206,6 +234,7 @@ export function buildAiFacts(input: AiFactsInput) {
       `Window retention is not a first-use or registration cohort. It uses baseline-day identifiable accounts and counts each account once if it returns on ANY of the following ${retention.windowDays} calendar days. The baseline is windowDays before the selected end. The baseline day is excluded from follow-up; new later accounts do not enter the numerator. It does not require activity exactly on day N or on every day. Scene filtering is consistent and browser is excluded.`,
       'retention.latest describes the selected end date and its preceding window, not an average over the selected period. Always state previousDate (baseline), windowStart, date (window end), windowDays and retainedUsers/previousUsers. Missing baseline or any unobserved follow-up date makes rate null. Present logs are not confirmed complete; absent observations do not establish churn.',
       'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for the baseline and every follow-up day, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
+      'MTTR is independent of app log metrics, Scene filtering and app reporting dates: use effectiveness.mttr baseline/current ranges exactly. It measures overall elapsed time for qualifying closed tickets, not demonstrated FMEMate efficiency or active handling labor time. State both ranges, counts, means and the reduction sign; disclose overlap, unequal periods and unconfirmed import coverage. Never average daily means or infer total labor hours saved from savedSeconds.',
       'Preset matching ignores case, whitespace, punctuation and symbols. MML records are always excluded from custom questions. Empty MML answers are normal.',
       'Only answers containing Sorry (case-insensitive) count as logged failures. Absence of Sorry is not proof of success, resolution, satisfaction, time saved or business value.',
       'Failure reasons are human-entered notes; missing reasons are under investigation. Evidence examples are samples, not all failures. Do not infer causes from error wording alone.',

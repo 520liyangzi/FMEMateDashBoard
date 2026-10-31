@@ -245,3 +245,48 @@ test('AI repeat facts use the default three-day threshold and a selected five-da
   assert.equal(sparse.repeatUsage.status, 'insufficient_logs');
   assert.equal(sparse.repeatUsage.rate, null);
 });
+
+test('MTTR facts use independent weighted close-date periods and include no raw ticket or filename data', () => {
+  const report = facts({
+    scene: 'MML',
+    mttrBaseline: { from: '2026-09-01', to: '2026-09-07' },
+    mttrCurrent: { from: '2026-09-08', to: '2026-09-14' },
+    mttr: {
+      filename: 'PRIVATE-TICKET-NAME.xlsx', importedAt: '2026-10-31T09:00:00Z',
+      sourceRows: 12, matchedRows: 10, validRows: 8, invalidDates: 1, negativeDurations: 1, excludedRows: 2,
+      earliestDate: '2026-09-01', latestDate: '2026-09-14', days: [
+        { date: '2026-09-01', count: 1, totalSeconds: 3600 },
+        { date: '2026-09-07', count: 3, totalSeconds: 25200 },
+        { date: '2026-09-14', count: 4, totalSeconds: 14400 },
+      ],
+    },
+  });
+  const mttr = report.effectiveness.mttr;
+  assert.equal(mttr.status, 'available');
+  assert.equal(mttr.baseline.meanSeconds, 7200, 'whole-ticket weighted mean, not mean of daily means');
+  assert.equal(mttr.current.meanSeconds, 3600);
+  assert.equal(mttr.reductionRate, 50);
+  assert.equal(mttr.savedSeconds, 3600);
+  assert.equal(mttr.baseline.count, 4);
+  assert.equal(mttr.current.count, 4);
+  assert.equal(mttr.dataQuality!.invalidDates, 1);
+  assert.equal(mttr.dataQuality!.negativeDurations, 1);
+  assert.equal(report.range.from, '2026-10-22', 'MTTR dates are independent of app dates');
+  assert.ok(!JSON.stringify(report).includes('PRIVATE-TICKET-NAME'));
+  assert.match(mttr.definition, /J close date/);
+  assert.match(mttr.limitations, /does not establish FMEMate causation/);
+});
+
+test('MTTR absent data and zero baseline remain unavailable in AI evidence', () => {
+  const none = facts().effectiveness.mttr;
+  assert.equal(none.status, 'no_dataset');
+  assert.equal(none.reductionRate, null);
+  assert.equal(none.dataQuality, null);
+  const zero = facts({ mttrBaseline: { from: '2026-10-01', to: '2026-10-01' }, mttrCurrent: { from: '2026-10-02', to: '2026-10-03' }, mttr: {
+    filename: '', importedAt: '', sourceRows: 2, matchedRows: 2, validRows: 2, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    earliestDate: '2026-10-01', latestDate: '2026-10-02', days: [{ date: '2026-10-01', count: 1, totalSeconds: 0 }, { date: '2026-10-02', count: 1, totalSeconds: 3600 }],
+  } }).effectiveness.mttr;
+  assert.equal(zero.status, 'zero_baseline');
+  assert.equal(zero.reductionRate, null);
+  assert.equal(zero.unequalDays, true);
+});
