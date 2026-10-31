@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 import csv
 from mttr_import import (xlsx_rows,csv_rows,excel_time,normalized,category,header_key,column_index,
-                         HEADER_ALIASES,MttrImportError,MAX_ROWS)
+                         HEADER_ALIASES,MttrImportError,MAX_ROWS,source_size)
 
 TT_ROLES=('ttId','category')
 JOB_ROLES=('jobId','ttId','created','finished','assignee','status')
@@ -72,7 +72,7 @@ def source_mapping(rows,source,sheet,mapping):
 def source_rows(content,filename):
     name=str(filename or '').replace('\\','/').rsplit('/',1)[-1][:255]
     suffix=PurePosixPath(name).suffix.lower()
-    if suffix not in ('.xlsx','.csv') or not content:
+    if suffix not in ('.xlsx','.csv') or not source_size(content):
         raise MttrImportError('Upload nonempty .xlsx or UTF-8 .csv files for both TT and Job.')
     rows=xlsx_rows(content) if suffix=='.xlsx' else csv_rows(content)
     try:

@@ -11,7 +11,8 @@ from functools import lru_cache
 import io
 import json
 import math
-from pathlib import PurePosixPath
+import os
+from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import tempfile
@@ -31,6 +32,31 @@ class MttrImportError(ValueError):
     def __init__(self, message, details=None):
         super().__init__(message)
         self.details = details
+
+def source_size(content):
+    """Internal staged Paths and legacy in-memory bytes are the only sources.
+
+    Never interpret a client-provided string as a filesystem path. Staged files
+    must remain available until the consuming generator/context has finished.
+    """
+    if isinstance(content, bytes):
+        return len(content)
+    if isinstance(content, os.PathLike):
+        try:
+            path = Path(content)
+            if not path.is_file():
+                raise MttrImportError('The staged import file is missing or unreadable. Upload it again.')
+            return path.stat().st_size
+        except (OSError, TypeError, ValueError) as exc:
+            raise MttrImportError('The staged import file is missing or unreadable. Upload it again.') from exc
+    raise MttrImportError('Invalid import source. Upload a file before importing.')
+
+@contextmanager
+def binary_source(content):
+    """Own and close one byte stream without loading a staged file into RAM."""
+    source_size(content)
+    with (io.BytesIO(content) if isinstance(content, bytes) else open(content, 'rb')) as stream:
+        yield stream
 
 def normalized(value):
     return re.sub(r'\s+', ' ', str(value)).strip()
@@ -180,15 +206,16 @@ def excel_time(value, date1904=False):
     return None
 
 def xlsx_rows(content):
+    source_size(content)
     try:
-        archive = zipfile.ZipFile(io.BytesIO(content))
-    except (zipfile.BadZipFile, ValueError):
+        archive = zipfile.ZipFile(io.BytesIO(content) if isinstance(content, bytes) else content)
+    except (zipfile.BadZipFile, ValueError, OSError):
         raise MttrImportError('Invalid .xlsx file. Resave the ticket export as .xlsx.')
     with archive, tempfile.TemporaryDirectory(prefix='fmemate-mttr-') as tmp:
         infos = archive.infolist()
         names = [i.filename for i in infos]
         if len(infos) > 20000 or len(names) != len(set(names)) or sum(i.file_size for i in infos) > MAX_EXPANDED:
-            raise MttrImportError('The expanded workbook is too large or contains duplicate paths.')
+            raise MttrImportError('The expanded workbook exceeds the 1 GB limit, has too many entries, or contains duplicate paths. Split the export into smaller files.')
         if any(i.flag_bits & 1 for i in infos):
             raise MttrImportError('Password-protected workbooks are unsupported.')
         workbook = xml_small(archive, 'xl/workbook.xml')
@@ -287,19 +314,20 @@ def xlsx_rows(content):
 
 def csv_rows(content):
     try:
-        stream = io.StringIO(content.decode('utf-8-sig'), newline='')
+        with binary_source(content) as binary:
+            with io.TextIOWrapper(binary, encoding='utf-8-sig', newline='') as stream:
+                yield {'sheetName': 'CSV', 'date1904': False}
+                for index, row in enumerate(csv.reader(stream)):
+                    if index >= MAX_ROWS:
+                        raise MttrImportError('The CSV has more than 2,000,000 rows.')
+                    if len(row)>16384:
+                        raise MttrImportError('The CSV has more columns than Excel supports.')
+                    if any(len(v) > MAX_TEXT for v in row):
+                        raise MttrImportError('A CSV cell is too long.')
+                    if index == 0 or any(v.strip() for v in row):
+                        yield {'_row': index + 1, **{column_name(col+1):value for col,value in enumerate(row)}}
     except UnicodeDecodeError:
         raise MttrImportError('CSV must use UTF-8 encoding; alternatively upload .xlsx.')
-    yield {'sheetName': 'CSV', 'date1904': False}
-    for index, row in enumerate(csv.reader(stream)):
-        if index >= MAX_ROWS:
-            raise MttrImportError('The CSV has more than 2,000,000 rows.')
-        if len(row)>16384:
-            raise MttrImportError('The CSV has more columns than Excel supports.')
-        if any(len(v) > MAX_TEXT for v in row):
-            raise MttrImportError('A CSV cell is too long.')
-        if index == 0 or any(v.strip() for v in row):
-            yield {'_row': index + 1, **{column_name(col+1):value for col,value in enumerate(row)}}
 
 def aggregate_tickets(db, table='tickets'):
     return [{'date': r[0], 'count': r[1], 'totalSeconds': r[2]} for r in db.execute(
@@ -335,7 +363,7 @@ def stage_mttr(content, filename, mapping=None):
     suffix = PurePosixPath(filename).suffix.lower()
     if suffix not in ('.xlsx', '.csv'):
         raise MttrImportError('Upload .xlsx or UTF-8 .csv. Save older .xls files as .xlsx first.')
-    if not content:
+    if not source_size(content):
         raise MttrImportError('The ticket export is empty.')
     result = dict(formatVersion=2, filename=filename, importedAt=datetime.now(timezone.utc).isoformat(), sourceRows=0,
                   matchedRows=0, validRows=0, invalidDates=0, negativeDurations=0, excludedRows=0, missingIds=0,

@@ -4,7 +4,7 @@
 
 ## 快速启动
 
-1. 解压完整目录，保留 `dist/`、`server.py`、`ai_service.py`、`mttr_import.py`、`job_mttr_import.py` 和启动脚本的相对位置。
+1. 解压完整目录，保留 `dist/`、`server.py`、`ai_service.py`、`mttr_import.py`、`job_mttr_import.py`、`mttr_uploads.py` 和启动脚本的相对位置。
 2. 安装 **Python 3.10 或更高版本**。运行服务不需要 Node.js，也不需要安装 pip 依赖。
 3. Windows 双击 `start.bat`；macOS / Linux 在目录中执行 `bash start.sh`。也可以执行：
 
@@ -221,7 +221,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.0。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.1。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -274,7 +274,7 @@ Date filters apply to visit counts, visit days and photo totals independently of
 | Job | jb_assign_to | AG，记录的处理人，用于筛选和排名 |
 | Job | jb_status | AR，只统计 Done / Close（忽略大小写与首尾空白） |
 
-两份表分别选择文件后一起提交，均读取第一个工作表、从物理第 2 行开始。支持 `.xlsx` 和 UTF-8 CSV；`.xls` 请另存为 `.xlsx`。单次请求（两份文件合计加上传开销）最大 128 MB。表头清晰且唯一时按字段识别；无法确认时页面让你分别选择 TT 的 2 个字段或 Job 的 6 个字段，显示列样例并保留已选择的两份文件。不能用 tt_id 代替 jb_id 去重，也不能把分派日期当作完成时间。
+两份表分别选择文件后一起提交，均读取第一个工作表、从物理第 2 行开始。支持 `.xlsx` 和 UTF-8 CSV；`.xls` 请另存为 `.xlsx`。网页使用 4 MiB 分块上传，每份文件默认最大 1 GiB（1024 MiB），不再受旧版两份文件合计 128 MB 的请求上限影响。上传后从磁盘流式读取，字段确认重试复用已上传文件。表头清晰且唯一时按字段识别；无法确认时页面让你分别选择 TT 的 2 个字段或 Job 的 6 个字段，显示列样例并保留已选择的两份文件。不能用 tt_id 代替 jb_id 去重，也不能把分派日期当作完成时间。
 
 - **处理时长 = jb_finish_date − jb_create_date**，按完成日期归属所选期间，包含夜间、周末及周期开始前的完整自然经过时间，不转换时区。整体 MTTR = Job 总处理时长 ÷ Job 数；不平均每天均值、个人均值或个人减少率。
 - TT 分类先筛为 Radio-OSP / Radio-ISP，再以去重后的 tt_id 匹配 Job，TT 重复行不会放大 Job 数量。同一 TT 下多个不同 Job 分别统计。TT 表同文件重复 ID 中，只要有一行符合分类，该 ID 即符合条件；后续文件对该 TT 的分类更新会重新筛选所有已保存 Job。
@@ -291,4 +291,23 @@ Jobs deduplicate by `jb_id`, so multiple distinct Jobs under one TT remain separ
 
 Choose any baseline/comparison periods, then view overall or one assignee. Overall MTTR is total eligible Job duration divided by Job count. Reduction is (baseline mean − comparison mean) / baseline mean × 100%; positive means shorter. Individual ranks use the same periods, require samples in both and a positive baseline, and sort highest percentage first. Unassigned Jobs count in the overall mean but never rank as a person. Counts and both means accompany every result. Missing periods and zero baselines remain unavailable. The comparison alone does not establish FMEMate causation.
 
-Excel, offline HTML, print layouts, backups and AI prompts preserve the TT/Job methodology and selected assignee. Legacy single-table MTTR figures are retained for migration but are not presented as Job results; reimport both historical tables once. `.xlsx` and UTF-8 CSV are supported, with a 128 MB combined request limit.
+Excel, offline HTML, print layouts, backups and AI prompts preserve the TT/Job methodology and selected assignee. Legacy single-table MTTR figures are retained for migration but are not presented as Job results; reimport both historical tables once. `.xlsx` and UTF-8 CSV are supported, with 4 MiB binary chunks and a configurable default limit of 1 GiB per file. Uploaded files are parsed from disk; mapping retries reuse the same staging session.
+
+
+### 大表上传 / Large uploads (v1.9.1)
+
+旧版 `POST /api/mttr/import-pair` 的 multipart 总请求超过 128 MiB 会返回 413，此时数据尚未解析。新版网页把 TT 与 Job 文件分块保存到本地 `data/.mttr-uploads/`，每个分块最多 4 MiB，然后从磁盘读取两份文件并关联计算；CSV 按行读取，XLSX 流式读取工作表。普通 API 的 128 MiB 请求限制保持不变；旧网页仍走旧接口时，需要重启服务并刷新网页以加载新版。
+
+- 默认每份文件最大 1 GiB，页面显示总字节上传百分比；上传完成后单独显示“解析计算中”，此时不再显示可取消上传按钮。上传进度 100% 不等于计算完成。
+- 上传阶段可以取消，删除暂存文件，不修改已保存报表。字段选择或解析失败时保留暂存会话，重试字段映射不必再次上传；开始导入新的文件对时会清理上次暂存。
+- 暂存不包含在完整备份或离线导出内，成功导入后自动清理；24 小时过期会话在服务启动或新上传时清理，最多保留 8 个活动会话。
+- 磁盘需容纳两份原文件、Excel 解压读取所需临时文件和数据库。超限、磁盘空间不足、会话过期会显示明确提示，原报表保留。
+- 现有解析保护仍生效：XLSX 解压总量上限 1 GiB，最多 2,000,000 行，单元格内容上限 65,536 字符。提高上传限制不会取消这些解析限制。
+
+需要支持更大的单文件时，可自行指定上限，例如每份 2 GiB：
+
+```bash
+python server.py --mttr-max-file-mb 2048
+```
+
+The web app stages each source using 4 MiB binary chunks, then parses disk-backed CSV/XLSX sources with bounded memory. The default per-file upload cap is 1 GiB and can be changed with `--mttr-max-file-mb`. Existing report data changes only after the paired import validates and commits. Mapping retries reuse uploaded files. Upload cancellation is available before server-side parsing begins; once parsing starts, wait for its atomic result. Successful uploads clean up staging, and expired sessions are removed on startup or new uploads. Staged source files are excluded from backups and offline exports.

@@ -25,9 +25,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
 from mttr_import import stage_mttr, finish_dataset, aggregate_tickets, validate_dataset, MttrImportError
 from job_mttr_import import stage_pair, joined_aggregates, finish_pair, validate_v3, RADIO
+from mttr_uploads import MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.9.0'
+APP_VERSION = '1.9.1'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -153,7 +154,7 @@ def offline_assets(static_dir):
             'css': '\n'.join(read_asset(href, ('.css',)) for href in parser.styles)}
 
 class Store:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, mttr_max_file_bytes=DEFAULT_MAX_FILE_BYTES):
         self.root = Path(data_dir).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.uploads = self.root / 'uploads'
@@ -164,6 +165,7 @@ class Store:
         with self.connect() as db:
             db.executescript(SCHEMA)
             db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)', ('presets', json.dumps(DEFAULT_PRESETS)))
+        self.mttr_uploads = MttrUploads(self.root / '.mttr-uploads',max_file_bytes=mttr_max_file_bytes)
 
     @contextmanager
     def connect(self, path=None):
@@ -849,6 +851,8 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get('Content-Length', '-1'))
         except ValueError:
             raise ApiError(400, 'Invalid content length.')
+        if length > MAX_BODY and urlsplit(self.path).path == '/api/mttr/import-pair':
+            raise ApiError(413, 'TT 和 Job 合计超过旧接口 128 MiB 上限，请刷新网页使用分块上传 / Combined files exceed the legacy 128 MiB request limit. Refresh the dashboard to use chunked upload.')
         if length < 0 or length > MAX_BODY:
             raise ApiError(413, 'Request must include a content length and be 128 MB or smaller.')
         body = self.rfile.read(length)
@@ -886,7 +890,7 @@ class Handler(BaseHTTPRequestHandler):
         return result
 
     def handle_error(self, exc):
-        if isinstance(exc, (ApiError, AiError)):
+        if isinstance(exc, (ApiError, AiError, MttrUploadError)):
             payload = {'error': exc.message}
             if getattr(exc, 'details', None) is not None:
                 payload['details'] = exc.details
@@ -979,6 +983,24 @@ class Handler(BaseHTTPRequestHandler):
             self.check_origin()
             path = urlsplit(self.path).path
             store = self.server.store
+            if path == '/api/mttr/uploads':
+                return self.json(store.mttr_uploads.create(self.json_body()))
+            upload = re.fullmatch(r'/api/mttr/uploads/([0-9a-f]{32})/(tt|job|import)',path)
+            if upload:
+                upload_id,source=upload.groups()
+                if source=='import':
+                    return self.json(store.mttr_uploads.finish(upload_id,self.json_body(),store.import_mttr_pair))
+                if self.headers.get_content_type()!='application/octet-stream':
+                    raise ApiError(415,'分块请使用 application/octet-stream / Use application/octet-stream for file chunks.')
+                query=parse_qs(urlsplit(self.path).query)
+                values=query.get('offset',[])
+                if set(query)!={'offset'} or len(values)!=1 or not re.fullmatch(r'(?:0|[1-9]\d{0,19})',values[0]):
+                    raise ApiError(400,'分块偏移量无效 / Specify one nonnegative offset.')
+                try:length=int(self.headers.get('Content-Length','-1'))
+                except ValueError:raise ApiError(400,'Invalid chunk content length.')
+                if not 0<length<=CHUNK_SIZE:
+                    raise ApiError(413,'每个上传分块须为 1 字节至 4 MiB / Each upload chunk must contain 1 byte to 4 MiB.')
+                return self.json(store.mttr_uploads.append(upload_id,source,int(values[0]),self.body()))
             if path == '/api/ai/config':
                 return self.json(store.ai.save_config(self.json_body()))
             if path == '/api/ai/preview':
@@ -1030,12 +1052,20 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.handle_error(exc)
 
+    def do_PUT(self):
+        if re.fullmatch(r'/api/mttr/uploads/[0-9a-f]{32}/(?:tt|job)',urlsplit(self.path).path):
+            return self.do_POST()
+        self.json({'error':'PUT is supported only for file chunks.'},405)
+
     def do_DELETE(self):
         try:
             self.check_origin()
             url = urlsplit(self.path)
             params = parse_qs(url.query)
             store = self.server.store
+            upload = re.fullmatch(r'/api/mttr/uploads/([0-9a-f]{32})',url.path)
+            if upload:
+                return self.json(store.mttr_uploads.cancel(upload[1]))
             if url.path == '/api/mttr':
                 return self.json(store.delete_mttr())
             if url.path == '/api/site-visits':
@@ -1059,13 +1089,20 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.handle_error(exc)
 
+def positive_mttr_mb(value):
+    try:parsed=int(value)
+    except ValueError:raise argparse.ArgumentTypeError('MTTR file limit must be a positive integer in MiB.')
+    if not 0<parsed<=8589934591:raise argparse.ArgumentTypeError('MTTR file limit must be a positive safe integer in MiB.')
+    return parsed
+
 def main():
     parser = argparse.ArgumentParser(description='Run the local FMEMate reporting dashboard.')
     parser.add_argument('--host', default='127.0.0.1', help='Bind address; use 0.0.0.0 only on a trusted LAN.')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--data-dir', type=Path, default=ROOT / 'data')
+    parser.add_argument('--mttr-max-file-mb', type=positive_mttr_mb, default=1024, help='Maximum TT or Job file size in MiB for chunk uploads (default: 1024).')
     args = parser.parse_args()
-    server = ReportServer((args.host, args.port), Store(args.data_dir))
+    server = ReportServer((args.host, args.port), Store(args.data_dir, mttr_max_file_bytes=args.mttr_max_file_mb*1024*1024))
     print(f'FMEMate Project Pulse v{APP_VERSION}: http://localhost:{args.port}')
     print(f'Data: {Path(args.data_dir).resolve()}')
     if args.host not in ('127.0.0.1', 'localhost', '::1'):

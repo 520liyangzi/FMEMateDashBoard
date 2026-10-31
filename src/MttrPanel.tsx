@@ -1,6 +1,7 @@
-import {useMemo,useState} from 'react';
+import {useMemo,useRef,useState} from 'react';
 import {ArrowDownRight,ArrowUpRight,CalendarDays,ChevronLeft,ChevronRight,Clock3,CheckCircle2,FileSpreadsheet,Info,Trash2,Upload,Users} from 'lucide-react';
 import {analyzeMttrPeople,compareMttr,previousMttrPeriod,shiftMttrPeriod,type MttrDataset,type MttrPeriod,type MttrPairMappings,type MttrTtMapping,type MttrJobMapping} from '../lib/mttr';
+import type {MttrUploadProgress} from './mttr-upload';
 import './mttr.css';
 
 type Language='zh'|'en';
@@ -12,7 +13,7 @@ const jobRoles=['jobId','ttId','created','finished','assignee','status'] as cons
 export type MttrPanelProps={
   lang:Language;dataset:MttrDataset|null;baseline:MttrPeriod;current:MttrPeriod;
   onBaselineChange:(period:MttrPeriod)=>void;onCurrentChange:(period:MttrPeriod)=>void;
-  onImport:(ttFile:File,jobFile:File,mappings?:MttrPairMappings)=>Promise<void>;onClear:()=>Promise<void>;readOnly:boolean;
+  onImport:(ttFile:File,jobFile:File,mappings?:MttrPairMappings,onProgress?:(progress:MttrUploadProgress)=>void,signal?:AbortSignal)=>Promise<void>;onClear:()=>Promise<void>;readOnly:boolean;
   assignee?:string;onAssigneeChange:(assignee:string|undefined)=>void;
 };
 const dayMs=86400000;
@@ -22,6 +23,8 @@ export default function MttrPanel({lang,dataset,baseline,current,onBaselineChang
   const t=(zh:string,en:string)=>lang==='zh'?zh:en;
   const [ttFile,setTtFile]=useState<File|null>(null),[jobFile,setJobFile]=useState<File|null>(null);
   const [busy,setBusy]=useState(false),[error,setError]=useState(''),[importProgress,setImportProgress]=useState('');
+  const uploadController=useRef<AbortController|null>(null);
+  const [uploadProgress,setUploadProgress]=useState<MttrUploadProgress|null>(null),[cancelling,setCancelling]=useState(false);
   const [errorDetails,setErrorDetails]=useState<unknown|null>(null),[mappingSource,setMappingSource]=useState<Source|null>(null);
   const [pairMappings,setPairMappings]=useState<MttrPairMappings>({}),[mappingDraft,setMappingDraft]=useState<Record<string,string>>({});
   const mappingDetails=errorDetails&&typeof errorDetails==='object'?errorDetails as MappingDetails:null;
@@ -55,12 +58,14 @@ export default function MttrPanel({lang,dataset,baseline,current,onBaselineChang
   function resetMapping(){setPairMappings({});setMappingSource(null);setErrorDetails(null);setError('');setImportProgress('');}
   async function runImport(mappings:MttrPairMappings={}){
     if(!ttFile||!jobFile)return;
-    setError('');setErrorDetails(null);setMappingSource(null);setBusy(true);setPairMappings(mappings);
-    setImportProgress(t('正在筛选 TT 并关联 Job，请稍候…','Filtering TT records and joining Jobs. Please wait…'));
+    setError('');setErrorDetails(null);setMappingSource(null);setBusy(true);setPairMappings(mappings);setCancelling(false);
+    const controller=new AbortController();uploadController.current=controller;setUploadProgress({phase:'upload',loaded:0,total:ttFile.size+jobFile.size});
+    setImportProgress('');
     try{
-      await onImport(ttFile,jobFile,mappings);
+      await onImport(ttFile,jobFile,mappings,setUploadProgress,controller.signal);
       setImportProgress(t('TT 与 Job 导入完成；按 Job ID 累积去重，同一 TT 可以保留多个不同 Job。','TT and Job import completed. Unique Job IDs accumulate; multiple distinct Jobs may belong to the same TT.'));
     }catch(e){
+      if(e instanceof Error&&e.name==='AbortError'){setImportProgress(t('上传已取消，已保存的数据未改变。','Upload cancelled. Saved data is unchanged.'));return;}
       const extra=e&&typeof e==='object'&&'details' in e?e.details:null;
       setErrorDetails(extra);setImportProgress('');
       const details=extra&&typeof extra==='object'?extra as MappingDetails:null;
@@ -68,8 +73,9 @@ export default function MttrPanel({lang,dataset,baseline,current,onBaselineChang
         setMappingSource(details.source);setMappingDraft({...details.suggestedMapping});
         setError(t(`${details.source==='tt'?'TT':'Job'} 表的字段需要确认，请在下方选择实际列。两份文件已保留，已有数据尚未改变。`,`Confirm the actual columns in the ${details.source==='tt'?'TT':'Job'} table below. Both files are retained and existing data is unchanged.`));
       }else setError(e instanceof Error?e.message:String(e));
-    }finally{setBusy(false);}
+    }finally{setBusy(false);setCancelling(false);if(uploadController.current===controller)uploadController.current=null;}
   }
+  function cancelUpload(){setCancelling(true);uploadController.current?.abort();}
   async function importPair(){
     if(!ttFile||!jobFile)return;
     if(legacy&&!window.confirm(t('当前为旧版工单汇总。成功导入 TT 与 Job 两份表后将重建 Job 工单库，请选择覆盖完整历史的两份文件；失败不会修改旧数据。是否继续？','The current dataset uses the legacy ticket methodology. A successful TT + Job import will rebuild the Job store. Choose both files covering the full history; a failed import will preserve old data. Continue?')))return;
@@ -93,7 +99,8 @@ export default function MttrPanel({lang,dataset,baseline,current,onBaselineChang
   };
   return <section className="mttr-panel card" aria-label={t('MTTR 成效对比','MTTR effectiveness comparison')}>
     <div className="mttr-heading"><div><span className="mttr-kicker">JOB RESOLUTION EFFICIENCY</span><h2><Clock3 size={18}/>{t('MTTR 成效对比','MTTR effectiveness comparison')}</h2><p>{t('TT 表筛选无线工单，Job 表关联处理人和完成时长；支持整体与个人效率对比。','Filter radio tickets in TT, then join Job assignees and resolution times for overall and individual comparisons.')}</p></div><span className="mttr-scope">Radio-OSP / Radio-ISP · Job Done / Close</span></div>
-    {!readOnly&&<div className="mttr-pair-import"><div className="mttr-pair-files"><label><span><FileSpreadsheet size={16}/>{t('TT 表','TT table')}</span><input type="file" aria-label={t('选择 TT 表','Select TT table')} disabled={busy} accept=".xlsx,.csv,.xls" onChange={e=>{const file=e.currentTarget.files?.[0]||null;setTtFile(file);resetMapping();}}/><small>{t('B：tt_id；U：Radio-ISP / Radio-OSP 分类。TT 不限制状态。','B: tt_id; U: Radio-ISP / Radio-OSP category. No TT status filter.')}</small></label><label><span><FileSpreadsheet size={16}/>{t('Job 表','Job table')}</span><input type="file" aria-label={t('选择 Job 表','Select Job table')} disabled={busy} accept=".xlsx,.csv,.xls" onChange={e=>{const file=e.currentTarget.files?.[0]||null;setJobFile(file);resetMapping();}}/><small>{t('B：tt_id；G：创建；I：完成；AG：处理人；AR：状态；jb_id 用于去重。','B: tt_id; G: created; I: finished; AG: assignee; AR: status; jb_id deduplicates Jobs.')}</small></label></div><div className="mttr-import-controls"><button className="btn primary" disabled={busy||!ttFile||!jobFile} onClick={()=>void importPair()}><Upload size={15}/>{busy?t('正在关联导入…','Joining and importing…'):t('导入 TT 和 Job','Import TT and Job')}</button>{dataset&&<button className="text-button mttr-clear" disabled={busy} onClick={()=>void clear()}><Trash2 size={14}/>{t('清除 Job 数据','Clear Job dataset')}</button>}<span>{t('两份文件必须同时选择 · Job ID 累积去重','Select both files · accumulate unique Job IDs')}</span></div></div>}
+    {!readOnly&&<div className="mttr-pair-import"><div className="mttr-pair-files"><label><span><FileSpreadsheet size={16}/>{t('TT 表','TT table')}</span><input type="file" aria-label={t('选择 TT 表','Select TT table')} disabled={busy} accept=".xlsx,.csv,.xls" onChange={e=>{const file=e.currentTarget.files?.[0]||null;setTtFile(file);resetMapping();}}/><small>{t('B：tt_id；U：Radio-ISP / Radio-OSP 分类。TT 不限制状态。','B: tt_id; U: Radio-ISP / Radio-OSP category. No TT status filter.')}</small></label><label><span><FileSpreadsheet size={16}/>{t('Job 表','Job table')}</span><input type="file" aria-label={t('选择 Job 表','Select Job table')} disabled={busy} accept=".xlsx,.csv,.xls" onChange={e=>{const file=e.currentTarget.files?.[0]||null;setJobFile(file);resetMapping();}}/><small>{t('B：tt_id；G：创建；I：完成；AG：处理人；AR：状态；jb_id 用于去重。','B: tt_id; G: created; I: finished; AG: assignee; AR: status; jb_id deduplicates Jobs.')}</small></label></div><div className="mttr-import-controls"><button className="btn primary" disabled={busy||!ttFile||!jobFile} onClick={()=>void importPair()}><Upload size={15}/>{busy?t('正在关联导入…','Joining and importing…'):t('导入 TT 和 Job','Import TT and Job')}</button>{dataset&&<button className="text-button mttr-clear" disabled={busy} onClick={()=>void clear()}><Trash2 size={14}/>{t('清除 Job 数据','Clear Job dataset')}</button>}<span>{t('两份文件必须同时选择 · 分块上传 · Job ID 累积去重','Select both files · chunked uploads · unique Job IDs')}</span></div></div>}
+    {busy&&uploadProgress&&<div className="mttr-transfer" role="status" aria-live="polite"><div><strong>{uploadProgress.phase==='upload'?t(`正在上传 ${uploadProgress.source==='tt'?'TT':uploadProgress.source==='job'?'Job':'文件'}`,`Uploading ${uploadProgress.source==='tt'?'TT':uploadProgress.source==='job'?'Job':'files'}`):t('上传完成，正在服务端解析与关联…','Upload complete. Parsing and joining on the server…')}</strong>{uploadProgress.phase==='upload'&&<span>{(uploadProgress.loaded/Math.max(1,uploadProgress.total)*100).toFixed(1)}% · {(uploadProgress.loaded/1048576).toFixed(1)} / {(uploadProgress.total/1048576).toFixed(1)} MB</span>}</div>{uploadProgress.phase==='upload'?<progress aria-label={t('工单文件上传进度','Ticket file upload progress')} max={uploadProgress.total||1} value={uploadProgress.loaded}/>:<progress aria-label={t('服务端解析中','Server parsing in progress')}/>}<div><small>{uploadProgress.phase==='upload'?t('进度表示两份文件已接收字节数，上传完成后还需解析。单文件默认上限 1 GiB，以上传服务配置为准。','Progress tracks received bytes across both files; parsing follows upload. The default per-file limit is 1 GiB, subject to server configuration.'):t('上传 100% 不代表导入完成；解析阶段请等待结果，此阶段不提供取消。','100% uploaded does not mean import complete. Please wait for the parsing result; cancellation is unavailable during this phase.')}</small>{uploadProgress.phase==='upload'&&<button className="btn" disabled={cancelling} onClick={cancelUpload}>{cancelling?t('正在取消…','Cancelling…'):t('取消上传','Cancel upload')}</button>}</div></div>}
     {importProgress&&<div className="mttr-import-progress" role="status" aria-live="polite">{importProgress}</div>}
     {error&&<div className="mttr-error" role="alert">{error}</div>}
     {!readOnly&&mappingSource&&mappingDetails?.requiresMapping&&<div className="mttr-mapping-card" aria-label={t('确认工单字段列','Confirm ticket field columns')}><h3>{t(`确认 ${mappingSource==='tt'?'TT':'Job'} 表字段`,`Confirm ${mappingSource==='tt'?'TT':'Job'} table fields`)}</h3><p>{t(`工作表：${mappingDetails.sheetName||'—'}。确认后将使用已选的两份文件重新关联，另一份表已确认的映射会保留。`,`Worksheet: ${mappingDetails.sheetName||'—'}. Retry the selected file pair after confirmation; confirmed mappings for the other table are retained.`)}</p><div className="mttr-mapping-warning"><Info size={15}/><span>{mappingSource==='job'?t('Job ID 必须选择 jb_id；TT ID 仅用于关联，不能用它代替 Job ID 去重。完成时间请选择 jb_finish_date，不使用 Assign 分派日期或人员字段。','Job ID must be jb_id. TT ID links the tables and must not deduplicate Jobs. Use jb_finish_date as the finish timestamp, rather than assignment dates or people fields.'):t('TT 表只需要 tt_id 和分类列，不使用 TT 状态或 TT 创建 / 关闭时间计算 MTTR。','The TT table supplies only tt_id and category. TT status and TT creation / closure timestamps do not determine MTTR.')}</span></div><div className="mttr-mapping-grid">{mappingRoles.map(role=>{const selected=mappingColumns.find(c=>c.column===mappingDraft[role]);return <label key={role}><span>{roleLabel(role)}</span><select disabled={busy} aria-label={t(`MTTR ${mappingSource==='tt'?'TT':'Job'} ${roleLabel(role)}列`,`MTTR ${mappingSource==='tt'?'TT':'Job'} ${roleLabel(role)} column`)} value={mappingDraft[role]||''} onChange={e=>{const value=e.currentTarget.value;setMappingDraft(prev=>({...prev,[role]:value}));}}><option value="">{t('请选择对应列','Select the corresponding column')}</option>{mappingColumns.map(column=><option key={column.column} value={column.column}>{column.column} · {column.header||t('无表头','No header')}</option>)}</select><small className="mttr-mapping-samples">{selected?t(`样例：${selected.samples?.length?selected.samples.join(' · '):'未提供'}`,`Samples: ${selected.samples?.length?selected.samples.join(' · '):'not provided'}`):t('按字段含义选择对应列。','Choose the column matching the field meaning.')}</small></label>;})}</div><p>{t('同一份表的各字段必须选择不同列。','Each field within a table must use a distinct column.')}</p><div className="mttr-mapping-actions"><button className="btn primary" disabled={busy||!mappingReady} onClick={()=>void retryMapped()}><CheckCircle2 size={15}/>{t('按所选列关联导入','Import pair with selected columns')}</button><button className="btn" disabled={busy} onClick={cancelMapping}>{t('取消字段确认','Cancel column confirmation')}</button></div></div>}
