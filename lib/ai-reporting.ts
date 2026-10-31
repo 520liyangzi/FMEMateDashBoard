@@ -1,5 +1,5 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
-import { analyzeRepeatUsage, analyzeRetention, type RetentionDay } from './retention.ts';
+import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
   id: string;
@@ -24,6 +24,8 @@ export type AiFactsInput = {
   scene: string;
   demo: boolean;
   minimumActiveDays?: number;
+  retentionDays?: number;
+  repeatMode?: RepeatMode;
 };
 
 const LIMITS = {
@@ -37,13 +39,16 @@ const LIMITS = {
 export function buildAiFacts(input: AiFactsInput) {
   const stats = analyze(input.records, input.presets, input.from, input.to, input.scene);
   const { from, to, days } = stats.range;
-  const repeatUsage = analyzeRepeatUsage(input.records, from, to, input.scene, input.minimumActiveDays);
-  const retention = analyzeRetention(input.records, from, to, input.scene);
+  const repeatUsage = analyzeRepeatUsage(input.records, from, to, input.scene, input.minimumActiveDays, input.repeatMode);
+  const retention = analyzeRetention(input.records, from, to, input.scene, input.retentionDays);
   // Retention cohorts are useful in the interactive dashboard; the writing
   // prompt only needs counts, never unbounded lists of Client IDs.
   const retentionDay = (day: RetentionDay) => ({
     date: day.date,
     previousDate: day.previousDate,
+    windowStart: day.windowStart,
+    windowDays: day.windowDays,
+    observedWindowDays: day.observedWindowDays,
     previousUsers: day.previousUsers,
     retainedUsers: day.retainedUsers,
     rate: day.rate,
@@ -135,6 +140,7 @@ export function buildAiFacts(input: AiFactsInput) {
     previous: { ...stats.previous, hasUsageBaseline: stats.previous.uses > 0 },
     changes: { ...stats.changes, failureRate: stats.previous.uses > 0 ? stats.changes.failureRate : null },
     repeatUsage: {
+      mode: repeatUsage.mode,
       minimumActiveDays: repeatUsage.minimumActiveDays,
       range: repeatUsage.range,
       status: repeatUsage.status,
@@ -146,12 +152,13 @@ export function buildAiFacts(input: AiFactsInput) {
       topUsers: repeatUsageUsers,
       coverage: {
         ...coverage(repeatUsage.users.length, repeatUsageUsers.length, 'Most observed active dates, then longest calendar-day streak; latest selected range only'),
-        definition: `Identifiable Client IDs active on at least ${repeatUsage.minimumActiveDays} distinct calendar dates in the selected period, divided by all identifiable Client IDs active in that period. browser is excluded. Dates need not be consecutive.`,
+        definition: `Identifiable Client IDs active on at least ${repeatUsage.minimumActiveDays} ${repeatUsage.mode === 'consecutive' ? 'consecutive calendar days' : 'distinct calendar dates'} in the selected period, divided by all identifiable Client IDs active in that period. browser is excluded. Mode is ${repeatUsage.mode}: consecutive mode uses longestStreak; any mode uses activeDays.`,
         units: 'rate and activeDayShare are percentages from 0 to 100. activeDays and longestStreak count calendar dates; activeDayShare = activeDays / selected calendar days × 100.',
-        limitations: 'observedDays counts dates with imported logs in any Scene; daysWithoutLogs is unobserved coverage, not confirmed inactivity or failed imports. Log completeness is unconfirmed. Later-joining users have fewer opportunities to repeat. This is not conversion, signup-cohort retention, next-day retention, or the period returningUsers metric.',
+        limitations: 'observedDays counts dates with imported logs in any Scene; daysWithoutLogs is unobserved coverage, not confirmed inactivity or failed imports. Log completeness is unconfirmed. Later-joining users have fewer opportunities to repeat. This is not conversion, signup-cohort retention, window retention, or the period returningUsers metric.',
       },
     },
     retention: {
+      windowDays: retention.windowDays,
       latest: retentionDay(retention.latest),
       daily: retentionDaily,
       coverage: {
@@ -161,9 +168,9 @@ export function buildAiFacts(input: AiFactsInput) {
         includedDays: retentionDaily.length,
         omittedDays: retentionAvailableDays - retentionDaily.length,
         selection: 'Latest 31 selected calendar dates; latest always refers to the selected range end, not the entire period.',
-        definition: 'Observed D-1 active identifiable Client IDs seen again on D, divided by all observed active identifiable Client IDs on D-1; rate is a percentage from 0 to 100.',
-        scope: 'Strict previous calendar day, not the nearest earlier date. The selected Scene filter applies to both days. browser activity is excluded from people and cohorts.',
-        limitations: 'Imported logs are not confirmed complete on either day, including the current day. Missing logs or no prior identifiable cohort produce an unavailable rate, not zero. Not observed returning does not prove churn.',
+        definition: 'Baseline-day identifiable accounts returning at least once during the following windowDays calendar days / baseline identifiable accounts × 100. Baseline-day repeats do not count; returning exactly on day N is not required.',
+        scope: 'Baseline = selected end date minus windowDays; follow-up runs from baseline + 1 through the selected end date inclusive. The same Scene filter applies throughout. browser is excluded from both cohorts.',
+        limitations: 'Imported logs are not confirmed complete on the baseline or any follow-up day, including the current day. A missing baseline, any unobserved follow-up date, or no baseline identifiable cohort produce an unavailable rate, not zero. Not observed returning does not prove churn.',
       },
     },
     topUsers,
@@ -194,11 +201,11 @@ export function buildAiFacts(input: AiFactsInput) {
     methodology: [
       'All users fields count distinct identifiable Client IDs. The invalid browser ID is excluded from all people counts and rankings. Its interactions remain in usage, question and failure totals. Actual people behind browser are unknown; never describe identifiable user counts as actual total people.',
       'Period users are unique across the whole period; never sum daily unique users. New users are first seen only within imported history, not proven new real-world customers.',
-      `Period repeatUsage uses the selected minimumActiveDays threshold of ${repeatUsage.minimumActiveDays}: identifiable users active on at least ${repeatUsage.minimumActiveDays} distinct selected calendar dates divided by all identifiable active users in that period. Dates need not be consecutive; multiple interactions on one date count once. Always report the threshold with the dates and numerator/denominator. A 60% rate means 6 qualifying users out of 10 identifiable period users, not 60% conversion or next-day retention. New or later-joining users have less time to repeat; this is not age-adjusted signup-cohort retention. browser is excluded.`,
+      `Period repeatUsage uses the selected minimumActiveDays threshold of ${repeatUsage.minimumActiveDays}: identifiable users active on at least ${repeatUsage.minimumActiveDays} ${repeatUsage.mode === 'consecutive' ? 'consecutive calendar days' : 'distinct selected calendar dates'} divided by all identifiable active users in that period. Mode ${repeatUsage.mode} uses ${repeatUsage.mode === 'consecutive' ? 'longestStreak' : 'activeDays'}; multiple interactions on one date count once. Always report the threshold with the dates and numerator/denominator. A 60% rate means 6 qualifying users out of 10 identifiable period users, not 60% conversion or window retention. New or later-joining users have less time to repeat; this is not age-adjusted signup-cohort retention. browser is excluded.`,
       `repeatUsage.topUsers includes at most ten users. activeDays counts distinct observed dates, activeDayShare is activeDays / all selected calendar days × 100, and longestStreak counts consecutive calendar dates without bridging gaps. Single-day ranges, selected periods shorter than the ${repeatUsage.minimumActiveDays}-day threshold (insufficient_period), fewer than ${repeatUsage.minimumActiveDays} observed global log dates (insufficient_logs), no identifiable users or invalid ranges have an unavailable null rate. A fully observed eligible range with no qualifying users may have a true observed 0%. daysWithoutLogs indicates unknown coverage, not proven inactivity or missing imports; imported history may be incomplete.`,
-      'Next-day retention is day-over-day repeat usage by the full prior-day active identifiable cohort, not a first-use or registration cohort, conversion, or period returningUsers metric. Only prior-day IDs observed again on the strict next calendar day form the numerator; new current-day users do not enter it. The same Scene filter applies to both days.',
-      'retention.latest describes only the selected range end date versus its previous calendar day, not retention across the whole selected interval. Rate is percent; 100% means all observed identifiable prior-day IDs returned, not all actual people or Line group members. Always state both dates and retainedUsers/previousUsers with the rate.',
-      'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for both days, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
+      `Window retention is not a first-use or registration cohort. It uses baseline-day identifiable accounts and counts each account once if it returns on ANY of the following ${retention.windowDays} calendar days. The baseline is windowDays before the selected end. The baseline day is excluded from follow-up; new later accounts do not enter the numerator. It does not require activity exactly on day N or on every day. Scene filtering is consistent and browser is excluded.`,
+      'retention.latest describes the selected end date and its preceding window, not an average over the selected period. Always state previousDate (baseline), windowStart, date (window end), windowDays and retainedUsers/previousUsers. Missing baseline or any unobserved follow-up date makes rate null. Present logs are not confirmed complete; absent observations do not establish churn.',
+      'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for the baseline and every follow-up day, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
       'Preset matching ignores case, whitespace, punctuation and symbols. MML records are always excluded from custom questions. Empty MML answers are normal.',
       'Only answers containing Sorry (case-insensitive) count as logged failures. Absence of Sorry is not proof of success, resolution, satisfaction, time saved or business value.',
       'Failure reasons are human-entered notes; missing reasons are under investigation. Evidence examples are samples, not all failures. Do not infer causes from error wording alone.',
@@ -220,7 +227,7 @@ export function buildAiFacts(input: AiFactsInput) {
         failureExamples: coverage(stats.failures.length, failureExamples.length, 'Latest failures first'),
         feedback: coverage(selectedFeedback.length, feedback.length, 'Latest saved feedback first'),
         daily: coverage(stats.daily.length, daily.length, 'Latest dates; totals cover the full range'),
-        retentionDaily: coverage(retentionAvailableDays, retentionDaily.length, 'Latest selected calendar dates; strict D-1 cohorts and no unbounded Client ID lists'),
+        retentionDaily: coverage(retentionAvailableDays, retentionDaily.length, 'Latest selected calendar dates; fixed-length follow-up windows and no unbounded Client ID lists'),
         communityRecords: coverage(selectedGroups.length, communityRecords.length, 'Latest actual snapshot dates in range; baseline is separately included'),
         scenes: coverage(stats.scenes.length, scenes.length, 'Most interactions first'),
       },

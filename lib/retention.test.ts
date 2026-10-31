@@ -264,3 +264,27 @@ test('repeat thresholds accept only supported safe whole numbers and default saf
     assert.equal(result.minimumActiveDays, 3, 'invalid dates still retain the effective threshold');
   }
 });
+
+test('N-day window counts a return on any follow-up day once, excludes new users and baseline repeats',()=>{
+ const records=[row('a','A','2026-10-21'),row('b','B','2026-10-21'),row('c','C','2026-10-21'),row('aa','A','2026-10-21'),row('r1','A','2026-10-22'),row('r2','A','2026-10-23'),row('r3','B','2026-10-28'),row('new','NEW','2026-10-28'),row('outside','C','2026-10-29')];
+ for(let d=22;d<=28;d++)records.push(row(`coverage${d}`,'browser',`2026-10-${d}`));
+ const result=analyzeRetention(records,'2026-10-28','2026-10-28','',7).latest;
+ assert.equal(result.previousDate,'2026-10-21');assert.equal(result.windowStart,'2026-10-22');assert.equal(result.windowDays,7);assert.equal(result.observedWindowDays,7);assert.equal(result.previousUsers,3);assert.equal(result.retainedUsers,2);assert.equal(result.rate,2/3*100);assert.deepEqual(result.retainedClientIds,['A','B']);assert.deepEqual(result.notObservedClientIds,['C']);
+ const incomplete=analyzeRetention(records.filter(r=>r.date!=='2026-10-25'),'2026-10-28','2026-10-28','',7).latest;
+ assert.equal(incomplete.rate,null);assert.equal(incomplete.status,'missing_current_logs');assert.equal(incomplete.observedWindowDays,6);
+});
+
+test('rolling counted unions expire accounts correctly and match independent cohorts',()=>{
+ const records:LogRecord[]=[];
+ for(let day=1;day<=15;day++){records.push(row(`coverage${day}`,'browser',`2026-10-${String(day).padStart(2,'0')}`));for(let id=0;id<5;id++)if((day+id)%(id+2)===0)records.push(row(`${day}-${id}`,`U${id}`,`2026-10-${String(day).padStart(2,'0')}`));}
+ const result=analyzeRetention(records,'2026-10-04','2026-10-15','',3);
+ for(const d of result.daily){const baseline=new Set(records.filter(r=>r.date===d.previousDate&&r.clientId!=='browser').map(r=>r.clientId));const returned=new Set(records.filter(r=>r.date>d.previousDate&&r.date<=d.date).map(r=>r.clientId));const expected=[...baseline].filter(id=>returned.has(id)).length;assert.equal(d.retainedUsers,expected);assert.equal(d.rate,baseline.size?expected/baseline.size*100:null);}
+});
+
+test('consecutive reuse distinguishes spaced dates, respects boundaries and keeps the denominator',()=>{
+ const records=[row('a1','A','2026-10-21'),row('a2','A','2026-10-23'),row('a3','A','2026-10-25'),row('b1','B','2026-10-21','MML'),row('b2','B','2026-10-22','MML'),row('b3','B','2026-10-23','MML'),row('c','C','2026-10-25')];
+ const any=analyzeRepeatUsage(records,'2026-10-21','2026-10-25','',3,'any'),consecutive=analyzeRepeatUsage(records,'2026-10-21','2026-10-25','',3,'consecutive');
+ assert.equal(any.repeatUsers,2);assert.equal(consecutive.repeatUsers,1);assert.equal(consecutive.totalUsers,3);assert.equal(consecutive.rate,1/3*100);assert.equal(consecutive.mode,'consecutive');
+ assert.equal(analyzeRepeatUsage(records,'2026-10-22','2026-10-25','',3,'consecutive').repeatUsers,0);
+ assert.equal(analyzeRepeatUsage(records,'2026-10-21','2026-10-25','MML',3,'consecutive').rate,100);
+});

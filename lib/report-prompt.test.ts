@@ -36,12 +36,12 @@ test('local AI summary prompt contains the complete facts and two explicit repor
   assert.equal(data.retention.latest.rate, 100);
   assert.ok(prompt.includes('"retainedUsers": 1'));
   assert.ok(prompt.includes('"previousDate": "2026-10-22"'));
-  assert.match(prompt, /逐日重复使用口径，不是首次使用新客队列留存/);
-  assert.match(prompt, /当天新增账号不能进入该分子/);
-  assert.match(prompt, /不能写成整个区间的留存率/);
-  assert.match(prompt, /已观测的前一日可识别活跃账号全部回访/);
-  assert.match(prompt, /不能推为全体真实用户、全部客户或 Line group 成员 100% 留存/);
-  assert.match(prompt, /两日导入是否完整均未确认/);
+  assert.match(prompt, /不是首次使用新客队列留存/);
+  assert.match(prompt, /后续新账号不能进入分子/);
+  assert.match(prompt, /不能平均 daily 的比例当作整个区间结论/);
+  assert.match(prompt, /基准日可识别账号全部在窗口内回访/);
+  assert.match(prompt, /不代表全部真实用户或群成员/);
+  assert.match(prompt, /已有日志不等于完整导入/);
 });
 
 test('hostile imported text cannot close its collision-safe JSON fence', () => {
@@ -113,7 +113,7 @@ test('multi-day prompt carries the 60% period repeat cohort and keeps it distinc
   assert.ok(prompt.includes(JSON.stringify(data, null, 2)));
   assert.match(prompt, /多日范围优先呈现可用的 repeatUsage 区间重复使用率/);
   assert.match(prompt, /至少在 2 个不同自然日活跃/);
-  assert.match(prompt, /不是 60% 转化率、次日留存率或满意度/);
+  assert.match(prompt, /不是 60% 转化率、窗口留存率或满意度/);
   assert.match(prompt, /区间后期才出现的用户重复使用机会更少/);
   assert.match(prompt, /不能跨无记录日期续算/);
   assert.match(prompt, /不要求为堆砌数据同时写两个比例/);
@@ -142,4 +142,12 @@ test('AI report instructions show the current repeat threshold and unavailable e
   const unavailablePrompt = buildAiReportPrompt(unavailable);
   assert.ok(unavailablePrompt.includes('"status": "insufficient_period"'));
   assert.ok(unavailablePrompt.includes('"rate": null'));
+});
+
+test('selected follow-up window and consecutive mode flow into facts and bilingual writing rules',()=>{
+ const rows=[['2026-10-20','A'],['2026-10-20','B'],['2026-10-21','A'],['2026-10-22','NEW'],['2026-10-23','B']];
+ const records=rows.map(([date,clientId],i)=>({taskId:String(i),date,clientId,time:date+'T12:00:00',question:'Q',answer:'',scene:'MML'}));
+ const data=buildAiFacts({records,presets:[],groups:[],feedback:[],failureNotes:{},from:'2026-10-20',to:'2026-10-23',scene:'',demo:false,retentionDays:3,minimumActiveDays:2,repeatMode:'consecutive'});
+ assert.equal(data.retention.windowDays,3);assert.equal(data.retention.latest.windowStart,'2026-10-21');assert.equal(data.retention.latest.rate,100);assert.equal(data.repeatUsage.mode,'consecutive');assert.equal(data.repeatUsage.repeatUsers,1);
+ const prompt=buildAiReportPrompt(data);assert.match(prompt,/后续 3 天内至少再次使用一次/);assert.match(prompt,/mode=consecutive/);assert.match(prompt,/使用 longestStreak 判断/);assert.ok(!prompt.includes('日期不必连续'));assert.ok(!prompt.includes('Observed D-1'));
 });

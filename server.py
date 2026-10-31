@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.6.0'
+APP_VERSION = '1.7.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')

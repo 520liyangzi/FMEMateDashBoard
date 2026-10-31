@@ -3,6 +3,9 @@ import { isCountableClient, parseTime, type LogRecord } from './analytics.ts';
 export type RetentionDay = {
   date: string;
   previousDate: string;
+  windowStart: string;
+  windowDays: number;
+  observedWindowDays: number;
   previousUsers: number;
   retainedUsers: number;
   /** Percentage in the range 0–100. Null means the rate is not observable. */
@@ -14,6 +17,7 @@ export type RetentionDay = {
 };
 
 export type RetentionAnalysis = {
+  windowDays: number;
   latest: RetentionDay & {
     previousClientIds: string[];
     retainedClientIds: string[];
@@ -36,35 +40,34 @@ const sceneMatches = (record: LogRecord, scene?: string) => !scene || (scene ===
 
 type ActivityDay = { users: Set<string>; browserUses: number };
 
-/**
- * Exact next-calendar-day repeat-user retention, not a conversion metric.
- * Coverage is observed from all scenes; both cohorts use the selected scene.
- * Client IDs are trimmed defensively and remain case-sensitive (except browser).
- */
-export function analyzeRetention(records: LogRecord[], from: string, to: string, scene?: string): RetentionAnalysis {
+/** Invalid follow-up lengths use one day, preserving existing reports. */
+export function normalizeRetentionDays(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1 && value <= 3660 ? value : 1;
+}
+
+/** Baseline-day users observed at least once in the following N calendar days. */
+export function analyzeRetention(records: LogRecord[], from: string, to: string, scene?: string, windowDays = 1): RetentionAnalysis {
+  windowDays = normalizeRetentionDays(windowDays);
   const emptyIds = { previousClientIds: [], retainedClientIds: [], notObservedClientIds: [] };
   if (!validDate(from) || !validDate(to) || from > to) {
-    return {
-      latest: {
-        date: to,
-        previousDate: validDate(to) ? calendarDate(stamp(to) - DAY) : '',
-        previousUsers: 0, retainedUsers: 0, rate: null,
-        previousBrowserUses: 0, currentBrowserUses: 0,
-        status: 'invalid_range', ...emptyIds,
-      },
-      daily: [], range: { from, to }, omittedDays: 0,
-    };
+    return { windowDays, latest: {
+      date: to, previousDate: validDate(to) ? calendarDate(stamp(to) - windowDays * DAY) : '',
+      windowStart: validDate(to) ? calendarDate(stamp(to) - (windowDays - 1) * DAY) : '',
+      windowDays, observedWindowDays: 0, previousUsers: 0, retainedUsers: 0, rate: null,
+      previousBrowserUses: 0, currentBrowserUses: 0, status: 'invalid_range', ...emptyIds,
+    }, daily: [], range: { from, to }, omittedDays: 0 };
   }
-
+  const selectedDays = Math.round((stamp(to) - stamp(from)) / DAY) + 1;
+  const omittedDays = Math.max(0, selectedDays - MAX_DAILY_DAYS);
+  const firstEnd = stamp(from) + omittedDays * DAY;
   const coverage = new Set<string>();
   const activity = new Map<string, ActivityDay>();
   const seenTasks = new Set<string>();
-  const earliestSourceDate = calendarDate(stamp(from) - DAY);
+  const earliestSourceDate = calendarDate(firstEnd - windowDays * DAY);
   for (const record of records) {
     const taskId = record.taskId.trim();
     if (seenTasks.has(taskId)) continue;
     seenTasks.add(taskId);
-    // Deduplicate the complete source before selecting dates or scenes.
     if (!validDate(record.date) || record.date < earliestSourceDate || record.date > to) continue;
     coverage.add(record.date);
     if (!sceneMatches(record, scene)) continue;
@@ -74,37 +77,44 @@ export function analyzeRetention(records: LogRecord[], from: string, to: string,
     if (!isCountableClient(clientId)) day.browserUses++;
     else if (clientId) day.users.add(clientId);
   }
-
-  const describe = (date: string): RetentionAnalysis['latest'] => {
-    const previousDate = calendarDate(stamp(date) - DAY);
-    const previous = activity.get(previousDate);
-    const current = activity.get(date);
-    const previousClientIds = [...(previous?.users ?? [])].sort();
-    const retainedClientIds = previousClientIds.filter(id => current?.users.has(id));
-    const notObservedClientIds = previousClientIds.filter(id => !current?.users.has(id));
-    const status: RetentionDay['status'] = !coverage.has(previousDate) ? 'missing_previous_logs'
-      : !coverage.has(date) ? 'missing_current_logs'
-      : !previousClientIds.length ? 'no_previous_users'
-      : 'available';
-    return {
-      date, previousDate,
-      previousUsers: previousClientIds.length,
-      retainedUsers: retainedClientIds.length,
-      rate: status === 'available' ? retainedClientIds.length / previousClientIds.length * 100 : null,
-      previousBrowserUses: previous?.browserUses ?? 0,
-      currentBrowserUses: current?.browserUses ?? 0,
-      status, previousClientIds, retainedClientIds, notObservedClientIds,
-    };
+  // Slide a counted union rather than rescanning N dates for every daily cohort.
+  const windowUsers = new Map<string, number>();
+  let observedWindowDays = 0, currentBrowserUses = 0;
+  const shift = (time: number, delta: number) => {
+    const date = calendarDate(time), day = activity.get(date);
+    if (coverage.has(date)) observedWindowDays += delta;
+    currentBrowserUses += (day?.browserUses ?? 0) * delta;
+    for (const id of day?.users ?? []) {
+      const count = (windowUsers.get(id) ?? 0) + delta;
+      if (count > 0) windowUsers.set(id, count); else windowUsers.delete(id);
+    }
   };
-
-  const selectedDays = Math.round((stamp(to) - stamp(from)) / DAY) + 1;
-  const omittedDays = Math.max(0, selectedDays - MAX_DAILY_DAYS);
+  for (let i = 0; i < windowDays; i++) shift(firstEnd - i * DAY, 1);
+  const describe = (end: number): RetentionAnalysis['latest'] => {
+    const date = calendarDate(end), previousDate = calendarDate(end - windowDays * DAY);
+    const previous = activity.get(previousDate);
+    const previousClientIds = [...(previous?.users ?? [])].sort();
+    const retainedClientIds = previousClientIds.filter(id => windowUsers.has(id));
+    const notObservedClientIds = previousClientIds.filter(id => !windowUsers.has(id));
+    const status: RetentionDay['status'] = !coverage.has(previousDate) ? 'missing_previous_logs'
+      : observedWindowDays < windowDays ? 'missing_current_logs'
+      : !previousClientIds.length ? 'no_previous_users' : 'available';
+    return { date, previousDate, windowStart: calendarDate(end - (windowDays - 1) * DAY), windowDays, observedWindowDays,
+      previousUsers: previousClientIds.length, retainedUsers: retainedClientIds.length,
+      rate: status === 'available' ? retainedClientIds.length / previousClientIds.length * 100 : null,
+      previousBrowserUses: previous?.browserUses ?? 0, currentBrowserUses,
+      status, previousClientIds, retainedClientIds, notObservedClientIds };
+  };
   const daily: RetentionDay[] = [];
+  let latest = describe(firstEnd);
   for (let offset = omittedDays; offset < selectedDays; offset++) {
-    const { previousClientIds: _previous, retainedClientIds: _retained, notObservedClientIds: _notObserved, ...day } = describe(calendarDate(stamp(from) + offset * DAY));
+    const end = stamp(from) + offset * DAY;
+    if (offset > omittedDays) { shift(end - windowDays * DAY, -1); shift(end, 1); }
+    latest = describe(end);
+    const { previousClientIds: _p, retainedClientIds: _r, notObservedClientIds: _n, ...day } = latest;
     daily.push(day);
   }
-  return { latest: describe(to), daily, range: { from, to }, omittedDays };
+  return { windowDays, latest, daily, range: { from, to }, omittedDays };
 }
 
 export type RepeatUsageUser = {
@@ -123,7 +133,11 @@ export function normalizeRepeatDays(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 2 && value <= 3660 ? value : DEFAULT_REPEAT_DAYS;
 }
 
+export type RepeatMode = 'any' | 'consecutive';
+export function normalizeRepeatMode(value: unknown): RepeatMode { return value === 'consecutive' ? 'consecutive' : 'any'; }
+
 export type RepeatUsageAnalysis = {
+  mode: RepeatMode;
   minimumActiveDays: number;
   range: { from: string; to: string; days: number };
   status: 'available' | 'single_day_range' | 'insufficient_period' | 'insufficient_logs' | 'no_identifiable_users' | 'invalid_range';
@@ -138,10 +152,11 @@ export type RepeatUsageAnalysis = {
 };
 
 /** Multi-day repeat usage in one selected period, separate from next-day retention. */
-export function analyzeRepeatUsage(records: LogRecord[], from: string, to: string, scene?: string, minimumActiveDays = DEFAULT_REPEAT_DAYS): RepeatUsageAnalysis {
+export function analyzeRepeatUsage(records: LogRecord[], from: string, to: string, scene?: string, minimumActiveDays = DEFAULT_REPEAT_DAYS, mode: RepeatMode = 'any'): RepeatUsageAnalysis {
   minimumActiveDays = normalizeRepeatDays(minimumActiveDays);
+  mode = normalizeRepeatMode(mode);
   if (!validDate(from) || !validDate(to) || from > to) {
-    return { minimumActiveDays, range: { from, to, days: 0 }, status: 'invalid_range', totalUsers: 0, repeatUsers: 0, rate: null, observedDays: 0, daysWithoutLogs: 0, users: [] };
+    return { mode, minimumActiveDays, range: { from, to, days: 0 }, status: 'invalid_range', totalUsers: 0, repeatUsers: 0, rate: null, observedDays: 0, daysWithoutLogs: 0, users: [] };
   }
   const days = Math.round((stamp(to) - stamp(from)) / DAY) + 1;
   const observed = new Set<string>();
@@ -170,14 +185,14 @@ export function analyzeRepeatUsage(records: LogRecord[], from: string, to: strin
     return { clientId, activeDays: dates.length, activeDayShare: dates.length / days * 100, longestStreak, firstDate: dates[0], lastDate: dates[dates.length - 1] };
   }).sort((a, b) => b.activeDays - a.activeDays || b.longestStreak - a.longestStreak || a.clientId.localeCompare(b.clientId));
   const totalUsers = users.length;
-  const repeatUsers = users.filter(user => user.activeDays >= minimumActiveDays).length;
+  const repeatUsers = users.filter(user => (mode === 'consecutive' ? user.longestStreak : user.activeDays) >= minimumActiveDays).length;
   const status: RepeatUsageAnalysis['status'] = days === 1 ? 'single_day_range'
     : days < minimumActiveDays ? 'insufficient_period'
     : observed.size < minimumActiveDays ? 'insufficient_logs'
     : totalUsers === 0 ? 'no_identifiable_users'
     : 'available';
   return {
-    minimumActiveDays, range: { from, to, days }, status, totalUsers, repeatUsers,
+    mode, minimumActiveDays, range: { from, to, days }, status, totalUsers, repeatUsers,
     rate: status === 'available' ? repeatUsers / totalUsers * 100 : null,
     observedDays: observed.size, daysWithoutLogs: days - observed.size, users,
   };

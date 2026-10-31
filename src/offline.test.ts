@@ -89,7 +89,7 @@ test('real failure causes, AI reports and full daily archives remain offline whi
       return Response.json({js:'console.log(1)',css:'body{}'});
     }) as typeof fetch);
     const dailySummaries=Array.from({length:25},(_,i)=>({date:`2026-10-${String(i+1).padStart(2,'0')}`,title:'Daily archive',zh:'已保存的每日总结',en:`Saved daily update ${i}`}));
-    const live={demo:false,tab:'daily',minimumActiveDays:5,state:{feedback:[],failureNotes:{task1:'Saved cause: upstream timeout'},aiReports:[{id:'r1',zh:'已保存的汇报',en:'Saved AI update'}],aiReportsTotal:1,dailySummaries}};
+    const live={demo:false,tab:'daily',minimumActiveDays:5,retentionDays:7,repeatMode:'consecutive',state:{feedback:[],failureNotes:{task1:'Saved cause: upstream timeout'},aiReports:[{id:'r1',zh:'已保存的汇报',en:'Saved AI update'}],aiReportsTotal:1,dailySummaries}};
     await downloadOfflineReport(live,'en');
     let html=await context.generated()!.text();
     assert.ok(html.includes('Saved cause: upstream timeout'));
@@ -98,6 +98,8 @@ test('real failure causes, AI reports and full daily archives remain offline whi
     assert.deepEqual(realExported.state.dailySummaries,dailySummaries);
     assert.equal(realExported.tab,'daily');
     assert.equal(realExported.minimumActiveDays,5);
+    assert.equal(realExported.retentionDays,7);
+    assert.equal(realExported.repeatMode,'consecutive');
     const demo={demo:true,state:{feedback:[{imageUrl:'/uploads/production.png'}],failureNotes:{task1:'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE'},aiReports:[{id:'r2',en:'PRIVATE_AI_REPORT_ONLY_IN_LIVE_STATE'}],aiReportsTotal:1,dailySummaries:[{date:'2026-10-23',en:'PRIVATE_DAILY_SUMMARY_ONLY_IN_LIVE_STATE'}]}};
     await downloadOfflineReport(demo,'zh');
     html=await context.generated()!.text();
