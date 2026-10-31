@@ -168,3 +168,14 @@ test('MTTR reporting requires explicit periods and counts without attributing wh
   assert.match(prompt, /savedSeconds 只是平均每单耗时差/);
   assert.ok(prompt.includes('"reductionRate": null'));
 });
+
+test('MTTR prompt distinguishes incremental unique-ticket totals, latest import statistics and legacy data', () => {
+  const prompt = buildAiReportPrompt(facts());
+  assert.match(prompt, /B 列工单 ID 去首尾空格后按区分大小写的值去重/);
+  assert.match(prompt, /同文件及跨文件的相同 ID 只保留首条有效工单/);
+  assert.match(prompt, /重复导入不增加工单数量/);
+  assert.match(prompt, /累计去重工单总数只用 totalTickets/);
+  assert.match(prompt, /最近一次导入文件的行数，不是累计工单数/);
+  assert.match(prompt, /历史数据尚未验证 ID 去重、需要重新导入/);
+  assert.ok(!prompt.includes('latest import replaces the previous dataset'));
+});

@@ -6,6 +6,7 @@ from contextlib import contextmanager, closing
 import io
 import json
 import mimetypes
+import math
 import os
 import re
 import shutil
@@ -22,10 +23,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
-from mttr_import import import_mttr, validate_dataset, MttrImportError
+from mttr_import import stage_mttr, finish_dataset, aggregate_tickets, validate_dataset, MttrImportError
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.8.0'
+APP_VERSION = '1.8.1'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -42,15 +43,17 @@ CREATE TABLE IF NOT EXISTS failure_notes (taskId TEXT PRIMARY KEY, reason TEXT N
 CREATE TABLE IF NOT EXISTS ai_reports (id TEXT PRIMARY KEY, createdAt TEXT NOT NULL, dateFrom TEXT NOT NULL, dateTo TEXT NOT NULL, scene TEXT NOT NULL, model TEXT NOT NULL, demo INTEGER NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS daily_summaries (date TEXT PRIMARY KEY, title TEXT NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS site_visits (id TEXT PRIMARY KEY, date TEXT NOT NULL, site TEXT NOT NULL, description TEXT NOT NULL, photos TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mttr_tickets (ticketId TEXT PRIMARY KEY, createdAt TEXT NOT NULL, closedAt TEXT NOT NULL, durationSeconds REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS mttr_dataset (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0);
 """
 
 class ApiError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, details=None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.details = details
 
 def require_date(value):
     if not isinstance(value, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
@@ -190,20 +193,44 @@ class Store:
         if set(fields) != {'file'} or not fields['file'].get('filename'):
             raise ApiError(400, 'Select one ticket export in the file field.')
         try:
-            dataset = import_mttr(fields['file']['data'], fields['file']['filename'])
+            with stage_mttr(fields['file']['data'], fields['file']['filename']) as (summary, staged):
+                with self.lock, self.connect() as db:
+                    db.execute('ATTACH DATABASE ? AS incoming_mttr', (staged,))
+                    existing = db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()
+                    if existing and json.loads(existing['data']).get('formatVersion') != 2:
+                        # Legacy snapshots have no IDs. Rebuild only after a fully
+                        # parsed, valid upload; failed uploads leave legacy data intact.
+                        db.execute('DELETE FROM mttr_tickets')
+                    db.execute('INSERT OR IGNORE INTO mttr_tickets(ticketId,createdAt,closedAt,durationSeconds) SELECT ticketId,createdAt,closedAt,durationSeconds FROM incoming_mttr.tickets')
+                    added = db.execute('SELECT changes()').fetchone()[0]
+                    dataset = finish_dataset(summary, aggregate_tickets(db, 'mttr_tickets'), added)
+                    db.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                               (json.dumps(dataset, ensure_ascii=False, allow_nan=False),))
+                return dataset
         except MttrImportError as exc:
-            raise ApiError(400, str(exc))
-        # Parse and validate before touching the live dataset. One transaction
-        # replaces the snapshot, including when the same workbook is reuploaded.
-        with self.lock, self.connect() as db:
-            db.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
-                       (json.dumps(dataset, ensure_ascii=False, allow_nan=False),))
-        return dataset
+            raise ApiError(400, str(exc), exc.details)
 
     def delete_mttr(self):
         with self.lock, self.connect() as db:
             db.execute('DELETE FROM mttr_dataset')
+            db.execute('DELETE FROM mttr_tickets')
         return {'ok': True}
+
+    @staticmethod
+    def validate_mttr_ticket(row):
+        ticket_id = require_string(row['ticketId'], 'MTTR ticket ID', 1000, True)
+        if ticket_id != ticket_id.strip():
+            raise ApiError(400, 'Backup MTTR ticket ID has surrounding whitespace.')
+        stamps = []
+        for key in ('createdAt','closedAt'):
+            value = require_string(row[key], 'MTTR timestamp', 100, True)
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?',value):
+                raise ApiError(400, 'Backup MTTR ticket timestamp is invalid.')
+            stamps.append(datetime.fromisoformat(value))
+        duration = row['durationSeconds']
+        if type(duration) not in (int,float) or not math.isfinite(duration) or duration < 0 or abs((stamps[1]-stamps[0]).total_seconds()-duration) > 0.000001:
+            raise ApiError(400, 'Backup MTTR ticket duration is invalid.')
+        return (ticket_id,row['createdAt'],row['closedAt'],duration)
 
     @staticmethod
     def visit_row(row):
@@ -562,7 +589,7 @@ class Store:
                 required_tables = {'logs', 'settings', 'groups', 'feedback', 'history'}
                 tables = {r['name'] for r in schema if r['type'] == 'table'}
                 # Legacy backups may omit either of the subsequently added tables.
-                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits', 'mttr_dataset'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
+                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits', 'mttr_dataset', 'mttr_tickets'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
                     raise ApiError(400, 'Backup database contains unsupported schema objects.')
                 if 'failure_notes' in tables and {r['name'] for r in source.execute('PRAGMA table_info(failure_notes)')} != {'taskId', 'reason', 'updatedAt'}:
                     raise ApiError(400, 'Backup failure reason columns are invalid.')
@@ -574,10 +601,13 @@ class Store:
                     raise ApiError(400, 'Backup site visit columns are invalid.')
                 if 'mttr_dataset' in tables and {r['name'] for r in source.execute('PRAGMA table_info(mttr_dataset)')} != {'id', 'data'}:
                     raise ApiError(400, 'Backup MTTR columns are invalid.')
+                if 'mttr_tickets' in tables and {r['name'] for r in source.execute('PRAGMA table_info(mttr_tickets)')} != {'ticketId','createdAt','closedAt','durationSeconds'}:
+                    raise ApiError(400, 'Backup MTTR ticket columns are invalid.')
                 if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ApiError(400, 'Backup database integrity check failed.')
                 with self.connect(new_db) as dest:
                     dest.executescript(SCHEMA)
+                    mttr_snapshot = None
                     if 'mttr_dataset' in tables:
                         rows = source.execute('SELECT id,data FROM mttr_dataset').fetchall()
                         if len(rows) > 1 or any(row['id'] != 1 for row in rows):
@@ -587,7 +617,19 @@ class Store:
                                 dataset = validate_dataset(json.loads(row['data']))
                             except (MttrImportError, ValueError, TypeError, KeyError):
                                 raise ApiError(400, 'Backup MTTR data is invalid.')
+                            mttr_snapshot = dataset
                             dest.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?)', (json.dumps(dataset, allow_nan=False),))
+                    if 'mttr_tickets' in tables:
+                        for row in source.execute('SELECT ticketId,createdAt,closedAt,durationSeconds FROM mttr_tickets'):
+                            clean = self.validate_mttr_ticket(dict(row))
+                            dest.execute('INSERT INTO mttr_tickets VALUES(?,?,?,?)',clean)
+                    ledger_days = aggregate_tickets(dest, 'mttr_tickets')
+                    if mttr_snapshot and mttr_snapshot.get('formatVersion') == 2:
+                        expected = mttr_snapshot['days']
+                        if len(ledger_days) != len(expected) or any(a['date'] != b['date'] or a['count'] != b['count'] or not math.isclose(a['totalSeconds'], b['totalSeconds'], rel_tol=1e-12, abs_tol=1e-5) for a,b in zip(ledger_days,expected)):
+                            raise ApiError(400, 'Backup MTTR ticket ledger does not match its statistics.')
+                    elif ledger_days:
+                        raise ApiError(400, 'Backup MTTR ticket ledger has no matching versioned snapshot.')
                     if 'site_visits' in tables:
                         for row in source.execute('SELECT * FROM site_visits'):
                             clean = self.validate_visit({**dict(row), 'photos': json.loads(row['photos'])})
@@ -760,7 +802,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_error(self, exc):
         if isinstance(exc, (ApiError, AiError)):
-            self.json({'error': exc.message}, exc.status)
+            payload = {'error': exc.message}
+            if getattr(exc, 'details', None) is not None:
+                payload['details'] = exc.details
+            self.json(payload, exc.status)
         elif isinstance(exc, (BrokenPipeError, ConnectionResetError)):
             pass
         else:

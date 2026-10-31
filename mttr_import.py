@@ -1,11 +1,12 @@
 """Streaming, standard-library-only MTTR import for the ticket system export.
 
-Only daily aggregates survive an import. Every upload is a full replacement, so
-reuploading the same export cannot inflate a previously imported dataset.
+Minimal ticket identifiers and timestamps are staged on disk. The server merges
+first valid IDs across uploads and exposes daily aggregates only.
 """
 from __future__ import annotations
 import csv
 from datetime import date, datetime, timedelta, timezone
+from contextlib import contextmanager, closing
 from functools import lru_cache
 import io
 import json
@@ -20,11 +21,24 @@ import zipfile
 MAX_EXPANDED = 1024 * 1024 * 1024
 MAX_ROWS = 2_000_000
 MAX_TEXT = 65536
-FIELDS = ('filename', 'importedAt', 'sheetName', 'sourceRows', 'matchedRows', 'validRows',
+LEGACY_FIELDS = ('filename', 'importedAt', 'sheetName', 'sourceRows', 'matchedRows', 'validRows',
           'invalidDates', 'negativeDurations', 'excludedRows', 'days', 'earliestDate', 'latestDate')
 
+V2_FIELDS = set(LEGACY_FIELDS) | {'formatVersion', 'totalTickets', 'addedRows', 'duplicateRows', 'missingIds', 'headerColumns', 'diagnostics'}
+TICKET_SCHEMA = 'CREATE TABLE tickets (ticketId TEXT PRIMARY KEY, createdAt TEXT NOT NULL, closedAt TEXT NOT NULL, durationSeconds REAL NOT NULL)'
+
 class MttrImportError(ValueError):
-    pass
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details
+
+def normalized(value):
+    return re.sub(r'\s+', ' ', str(value)).strip()
+
+def category(value):
+    value = re.sub(r'[‐‑‒–—−﹘﹣－]', '-', normalized(value))
+    return re.sub(r'\s*-\s*', '-', value).upper()
+
 
 class SafeXML:
     def __init__(self, stream):
@@ -57,13 +71,14 @@ def xml_small(archive, name):
         raise MttrImportError('The Excel workbook is missing required metadata.')
 
 def excel_time(value, date1904=False):
-    value = str(value).strip()
+    value = normalized(value)
     if not value:
         return None
-    match = re.fullmatch(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T]+(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?', value)
+    match = re.fullmatch(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})[ T]+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?', value)
     if match:
         try:
-            y, m, d, h, minute, sec = map(int, match.groups()[:6])
+            y, m, d, h, minute = map(int, match.groups()[:5])
+            sec = int(match[6] or 0)
             return datetime(y, m, d, h, minute, sec, int((match[7] or '').ljust(6, '0') or 0))
         except ValueError:
             return None
@@ -149,7 +164,10 @@ def xlsx_rows(content):
                             count += 1
                             if count > MAX_ROWS:
                                 raise MttrImportError('The workbook has more than 2,000,000 rows.')
-                            values, nonempty = {}, False
+                            row_number = int(element.attrib.get('r', count))
+                            if row_number < 1 or row_number > MAX_ROWS:
+                                raise MttrImportError('Invalid worksheet row number.')
+                            values, nonempty = {'_row': row_number}, False
                             for cell in element:
                                 if local(cell.tag) != 'c':
                                     continue
@@ -168,10 +186,12 @@ def xlsx_rows(content):
                                 if len(value) > MAX_TEXT:
                                     raise MttrImportError('An Excel cell is too long.')
                                 nonempty = nonempty or bool(value.strip())
-                                if column in ('F', 'J', 'S', 'U'):
+                                if column in ('B', 'F', 'J', 'S', 'U'):
                                     # Excel errors must not be interpreted as normal values.
                                     values[column] = '' if kind in ('e', 'b') else value
-                            if nonempty:
+                            # Preserve physical row 1 even when blank; never treat
+                            # the first nonempty data row as a header.
+                            if nonempty or row_number == 1:
                                 yield values
                             if len(stack) > 1:
                                 stack[-2].remove(element)
@@ -191,60 +211,114 @@ def csv_rows(content):
             raise MttrImportError('The CSV has more than 2,000,000 rows.')
         if any(len(v) > MAX_TEXT for v in row):
             raise MttrImportError('A CSV cell is too long.')
-        if any(v.strip() for v in row):
-            yield {key: row[col] if col < len(row) else '' for key, col in (('F', 5), ('J', 9), ('S', 18), ('U', 20))}
+        if index == 0 or any(v.strip() for v in row):
+            yield {'_row': index + 1, **{key: row[col] if col < len(row) else '' for key, col in (('B', 1), ('F', 5), ('J', 9), ('S', 18), ('U', 20))}}
 
-def import_mttr(content, filename):
+def aggregate_tickets(db, table='tickets'):
+    return [{'date': r[0], 'count': r[1], 'totalSeconds': r[2]} for r in db.execute(
+        f'SELECT substr(closedAt,1,10),count(*),sum(durationSeconds) FROM {table} GROUP BY substr(closedAt,1,10) ORDER BY 1')]
+
+def finish_dataset(result, days, added):
+    result = {**result, 'days': days, 'totalTickets': sum(d['count'] for d in days),
+              'addedRows': added, 'duplicateRows': result['validRows'] - added,
+              'earliestDate': days[0]['date'], 'latestDate': days[-1]['date']}
+    return result
+
+def no_valid_error(result, examples):
+    details = {k: result[k] for k in ('sourceRows', 'matchedRows', 'validRows', 'missingIds', 'invalidDates', 'negativeDurations', 'excludedRows', 'headerColumns', 'diagnostics', 'sheetName')}
+    details['examples'] = examples
+    headers = '; '.join(f'{k}={v or "(blank)"}' for k,v in result['headerColumns'].items())
+    observed = '; '.join(f'{k}={json.dumps(v,ensure_ascii=False)}' for k,v in examples.items())
+    message = (f'没有可导入工单 / No valid tickets. 工作表 / Sheet: {result["sheetName"]}; '
+               f'从第2行读取 / Start row 2; 数据 / Rows {result["sourceRows"]}; '
+               f'U分类匹配 / Category {result["diagnostics"]["categoryMatches"]}; '
+               f'S状态CLOSE / Status {result["diagnostics"]["statusMatches"]}; '
+               f'同时匹配 / Both {result["matchedRows"]}; '
+               f'缺少B列ID / Missing IDs {result["missingIds"]}; '
+               f'日期无效 / Invalid dates {result["invalidDates"]}; '
+               f'负时长 / Negative durations {result["negativeDurations"]}. '
+               f'第1行表头 / Headers: {headers}. 示例 / Examples: {observed}. '
+               '原数据未改变 / Existing data unchanged.')
+    return MttrImportError(message, details)
+
+@contextmanager
+def stage_mttr(content, filename):
     filename = str(filename or '').replace('\\', '/').rsplit('/', 1)[-1][:255]
     suffix = PurePosixPath(filename).suffix.lower()
     if suffix not in ('.xlsx', '.csv'):
         raise MttrImportError('Upload .xlsx or UTF-8 .csv. Save older .xls files as .xlsx first.')
     if not content:
         raise MttrImportError('The ticket export is empty.')
-    result = dict(filename=filename, importedAt=datetime.now(timezone.utc).isoformat(), sourceRows=0,
-                  matchedRows=0, validRows=0, invalidDates=0, negativeDurations=0, excludedRows=0)
-    days = {}
+    result = dict(formatVersion=2, filename=filename, importedAt=datetime.now(timezone.utc).isoformat(), sourceRows=0,
+                  matchedRows=0, validRows=0, invalidDates=0, negativeDurations=0, excludedRows=0, missingIds=0,
+                  headerColumns={k: '' for k in ('B','F','J','S','U')}, diagnostics={'categoryMatches':0, 'statusMatches':0})
+    examples = {k: [] for k in ('S','U','F','J')}
     rows = xlsx_rows(content) if suffix == '.xlsx' else csv_rows(content)
-    try:
-        metadata = next(rows)
-        result['sheetName'] = metadata['sheetName']
-        for row in rows:
-            if str(row.get('S', '')).strip().casefold() == 'tt_status_description':
-                continue
-            result['sourceRows'] += 1
-            if str(row.get('S', '')).strip().upper() != 'CLOSE' or str(row.get('U', '')).strip().upper() not in ('RADIO-OSP', 'RADIO-ISP'):
-                result['excludedRows'] += 1
-                continue
-            result['matchedRows'] += 1
-            created = excel_time(row.get('F', ''), metadata['date1904'])
-            closed = excel_time(row.get('J', ''), metadata['date1904'])
-            if created is None or closed is None:
-                result['invalidDates'] += 1
-                continue
-            seconds = (closed - created).total_seconds()
-            if seconds < 0:
-                result['negativeDurations'] += 1
-                continue
-            result['validRows'] += 1
-            day = closed.date().isoformat()
-            bucket = days.setdefault(day, {'date': day, 'count': 0, 'totalSeconds': 0})
-            bucket['count'] += 1
-            bucket['totalSeconds'] += seconds
-    except MttrImportError:
-        raise
-    except (ET.ParseError, zipfile.BadZipFile, RuntimeError, csv.Error, ValueError, OverflowError, KeyError, OSError) as exc:
-        raise MttrImportError('The ticket export is corrupt or unsupported. Resave it as .xlsx.') from exc
-    finally:
-        rows.close()
-    if not result['validRows']:
-        raise MttrImportError('No valid closed Radio-OSP/Radio-ISP tickets were found in columns F/J/S/U. Previous data is unchanged.')
-    result['days'] = [days[d] for d in sorted(days)]
-    result['earliestDate'], result['latestDate'] = min(days), max(days)
-    return result
+    with tempfile.TemporaryDirectory(prefix='fmemate-mttr-tickets-') as tmp:
+        path = tmp + '/tickets.db'
+        db = sqlite3.connect(path)
+        try:
+            db.execute(TICKET_SCHEMA)
+            try:
+                metadata = next(rows)
+                result['sheetName'] = metadata['sheetName']
+                for row in rows:
+                    if row['_row'] == 1:
+                        result['headerColumns'] = {k: normalized(row.get(k,''))[:200] for k in ('B','F','J','S','U')}
+                        continue
+                    result['sourceRows'] += 1
+                    for key in examples:
+                        value = normalized(row.get(key,''))[:100]
+                        if value not in examples[key] and len(examples[key]) < 3:
+                            examples[key].append(value)
+                    domain_match = category(row.get('U','')) in ('RADIO-OSP','RADIO-ISP')
+                    status_match = normalized(row.get('S','')).upper() == 'CLOSE'
+                    result['diagnostics']['categoryMatches'] += int(domain_match)
+                    result['diagnostics']['statusMatches'] += int(status_match)
+                    if not domain_match or not status_match:
+                        result['excludedRows'] += 1
+                        continue
+                    result['matchedRows'] += 1
+                    ticket_id = str(row.get('B','')).strip()
+                    if not ticket_id or len(ticket_id) > 1000:
+                        result['missingIds'] += 1
+                        continue
+                    created = excel_time(row.get('F',''), metadata['date1904'])
+                    closed = excel_time(row.get('J',''), metadata['date1904'])
+                    if created is None or closed is None:
+                        result['invalidDates'] += 1
+                        continue
+                    seconds = (closed-created).total_seconds()
+                    if seconds < 0:
+                        result['negativeDurations'] += 1
+                        continue
+                    result['validRows'] += 1
+                    db.execute('INSERT OR IGNORE INTO tickets VALUES (?,?,?,?)',
+                               (ticket_id, created.isoformat(), closed.isoformat(), seconds))
+                if not result['validRows']:
+                    raise no_valid_error(result, examples)
+                db.commit()
+            except MttrImportError:
+                raise
+            except (ET.ParseError, zipfile.BadZipFile, RuntimeError, csv.Error, ValueError, OverflowError, KeyError, OSError) as exc:
+                raise MttrImportError('The ticket export is corrupt or unsupported. Resave it as .xlsx.') from exc
+            finally:
+                rows.close()
+        finally:
+            db.close()
+        yield result, path
+
+def import_mttr(content, filename):
+    """Standalone preview, deduplicated within this file. Store performs the merge."""
+    with stage_mttr(content, filename) as (result, path):
+        with closing(sqlite3.connect(path)) as db:
+            days = aggregate_tickets(db)
+        return finish_dataset(result, days, sum(d['count'] for d in days))
 
 def validate_dataset(value):
     """Validate compact aggregates when restoring an untrusted backup."""
-    if not isinstance(value, dict) or set(value) != set(FIELDS):
+    v2 = isinstance(value, dict) and value.get('formatVersion') == 2
+    if not isinstance(value, dict) or set(value) != (V2_FIELDS if v2 else set(LEGACY_FIELDS)):
         raise MttrImportError('Invalid MTTR dataset fields.')
     for key, limit in (('filename', 255), ('sheetName', 200), ('importedAt', 100)):
         if not isinstance(value[key], str) or not value[key] or len(value[key]) > limit:
@@ -254,8 +328,22 @@ def validate_dataset(value):
     for key in ('sourceRows', 'matchedRows', 'validRows', 'invalidDates', 'negativeDurations', 'excludedRows'):
         if type(value[key]) is not int or not 0 <= value[key] <= MAX_ROWS:
             raise MttrImportError('Invalid MTTR row counts.')
-    if value['sourceRows'] != value['matchedRows'] + value['excludedRows'] or value['matchedRows'] != value['validRows'] + value['invalidDates'] + value['negativeDurations']:
+    if v2 and (type(value['missingIds']) is not int or not 0 <= value['missingIds'] <= MAX_ROWS):
+        raise MttrImportError('Invalid MTTR missing-ID count.')
+    if value['sourceRows'] != value['matchedRows'] + value['excludedRows'] or value['matchedRows'] != value['validRows'] + value['invalidDates'] + value['negativeDurations'] + (value['missingIds'] if v2 else 0):
         raise MttrImportError('Inconsistent MTTR row counts.')
+    if v2:
+        for key in ('totalTickets','addedRows','duplicateRows','missingIds'):
+            if type(value[key]) is not int or value[key] < 0 or value[key] > 9007199254740991:
+                raise MttrImportError('Invalid MTTR deduplication counts.')
+        if value['totalTickets'] < 1 or value['validRows'] != value['addedRows'] + value['duplicateRows'] or value['addedRows'] > value['totalTickets']:
+            raise MttrImportError('Inconsistent MTTR deduplication counts.')
+        if not isinstance(value['headerColumns'],dict) or set(value['headerColumns']) != {'B','F','J','S','U'} or any(not isinstance(v,str) or len(v)>200 for v in value['headerColumns'].values()):
+            raise MttrImportError('Invalid MTTR header metadata.')
+        if not isinstance(value['diagnostics'],dict) or set(value['diagnostics']) != {'categoryMatches','statusMatches'} or any(type(v) is not int or not 0<=v<=value['sourceRows'] for v in value['diagnostics'].values()):
+            raise MttrImportError('Invalid MTTR filter diagnostics.')
+        if value['matchedRows'] > min(value['diagnostics'].values()):
+            raise MttrImportError('Inconsistent MTTR filter diagnostics.')
     days = value['days']
     if not isinstance(days, list) or not days or len(days) > MAX_ROWS:
         raise MttrImportError('Invalid MTTR daily aggregates.')
@@ -267,13 +355,13 @@ def validate_dataset(value):
         day = row['date']
         if not isinstance(day, str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}', day) or date.fromisoformat(day).isoformat() != day or day <= previous:
             raise MttrImportError('Invalid MTTR aggregate date order.')
-        if type(row['count']) is not int or row['count'] <= 0 or row['count'] > MAX_ROWS:
+        if type(row['count']) is not int or row['count'] <= 0 or row['count'] > (value['totalTickets'] if v2 else MAX_ROWS):
             raise MttrImportError('Invalid MTTR aggregate ticket count.')
         seconds = row['totalSeconds']
         if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0 or seconds > row['count'] * 315537897600:
             raise MttrImportError('Invalid MTTR aggregate duration.')
         count += row['count']
         previous = day
-    if count != value['validRows'] or value['earliestDate'] != days[0]['date'] or value['latestDate'] != days[-1]['date']:
+    if count != (value['totalTickets'] if v2 else value['validRows']) or value['earliestDate'] != days[0]['date'] or value['latestDate'] != days[-1]['date']:
         raise MttrImportError('Inconsistent MTTR aggregate totals.')
     return value

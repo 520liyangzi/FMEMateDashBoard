@@ -290,3 +290,28 @@ test('MTTR absent data and zero baseline remain unavailable in AI evidence', () 
   assert.equal(zero.reductionRate, null);
   assert.equal(zero.unequalDays, true);
 });
+
+test('MTTR v2 facts distinguish accumulated unique tickets from latest-file counts and legacy provenance', () => {
+  const data = {
+    filename: 'private-file.xlsx', importedAt: '2026-10-31T09:00:00Z',
+    formatVersion: 2 as const, totalTickets: 1000, addedRows: 2, duplicateRows: 7, missingIds: 1,
+    sourceRows: 15, matchedRows: 12, validRows: 9, invalidDates: 1, negativeDurations: 1, excludedRows: 3,
+    earliestDate: '2026-10-01', latestDate: '2026-10-31',
+    days: [{ date: '2026-10-22', count: 1000, totalSeconds: 3600000 }],
+  };
+  const mttr = facts({ mttr: data }).effectiveness.mttr;
+  assert.equal(mttr.dataQuality!.totalTickets, 1000);
+  assert.equal(mttr.dataQuality!.sourceRows, 15);
+  assert.equal(mttr.dataQuality!.addedRows, 2);
+  assert.equal(mttr.dataQuality!.duplicateRows, 7);
+  assert.equal(mttr.dataQuality!.missingIds, 1);
+  assert.equal(mttr.dataQuality!.deduplication, 'B-ticket-id-trimmed-case-sensitive-first-valid-wins');
+  assert.match(mttr.dataQuality!.countsScope, /latest imported file only/);
+  assert.match(mttr.limitations, /repeated valid IDs within or across files are skipped/);
+  assert.ok(!mttr.limitations.includes('replaces the previous dataset'));
+  const { formatVersion, totalTickets, addedRows, duplicateRows, missingIds, ...legacy } = data;
+  const old = facts({ mttr: legacy }).effectiveness.mttr;
+  assert.equal(old.dataQuality!.totalTickets, null, 'never infer unique totals from legacy row counts');
+  assert.equal(old.dataQuality!.deduplication, 'legacy-unverified-reimport-required');
+  assert.match(old.limitations, /Reimport the source Excel/);
+});

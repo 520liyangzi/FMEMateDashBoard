@@ -1,6 +1,15 @@
 /** Only filtered, valid, closed tickets are included in these daily aggregates. */
 export type MttrDay = { date: string; count: number; totalSeconds: number };
 export type MttrDataset = {
+  /** V2 counts refer to the latest file; days/totalTickets cover all unique saved ticket IDs. */
+  formatVersion?: 2;
+  totalTickets?: number;
+  addedRows?: number;
+  duplicateRows?: number;
+  missingIds?: number;
+  sheetName?: string;
+  headerColumns?: Record<string,string>;
+  diagnostics?: {categoryMatches:number;statusMatches:number};
   filename: string;
   importedAt: string;
   sourceRows: number;

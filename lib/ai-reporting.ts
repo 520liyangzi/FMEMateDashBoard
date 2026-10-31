@@ -187,6 +187,13 @@ export function buildAiFacts(input: AiFactsInput) {
         source: 'Imported work-order system aggregate; independent of app logs and Scene filters.',
         importedAt: input.mttr?.importedAt ?? null,
         dataQuality: input.mttr ? {
+          formatVersion: input.mttr.formatVersion ?? 1,
+          countsScope: 'sourceRows/matchedRows/validRows/excludedRows/invalidDates/negativeDurations/addedRows/duplicateRows/missingIds describe the latest imported file only; totalTickets describes accumulated unique tickets.',
+          totalTickets: input.mttr.totalTickets ?? null,
+          addedRows: input.mttr.addedRows ?? null,
+          duplicateRows: input.mttr.duplicateRows ?? null,
+          missingIds: input.mttr.missingIds ?? null,
+          deduplication: input.mttr.formatVersion === 2 ? 'B-ticket-id-trimmed-case-sensitive-first-valid-wins' : 'legacy-unverified-reimport-required',
           sourceRows: input.mttr.sourceRows,
           matchedRows: input.mttr.matchedRows,
           validRows: input.mttr.validRows,
@@ -196,9 +203,11 @@ export function buildAiFacts(input: AiFactsInput) {
           earliestCloseDate: input.mttr.earliestDate,
           latestCloseDate: input.mttr.latestDate,
         } : null,
-        definition: 'Mean elapsed seconds = sum of valid ticket (J close timestamp minus F creation timestamp) / valid ticket count. U must be Radio-OSP or Radio-ISP and S tt_status_description must be CLOSE. Each ticket belongs to its J close date, inclusively within each selected range; the full elapsed duration is counted, including time before the period.',
+        definition: 'Mean elapsed seconds = sum of valid ticket (J close timestamp minus F creation timestamp) / valid ticket count. U must be Radio-OSP or Radio-ISP and S tt_status_description must be CLOSE. Each ticket belongs to its J close date, inclusively within each selected range; the full elapsed duration is counted, including time before the period. Version 2 reads the first worksheet from physical row 2, uses trimmed case-sensitive B-column ticket IDs, and counts the first valid occurrence of each ID once across files and within each file; missing IDs are excluded.',
         units: 'meanSeconds, totalSeconds and savedSeconds are seconds. reductionRate is percentage: (baseline mean - current mean) / baseline mean × 100. Positive means shorter mean duration; negative means longer. savedSeconds is the difference in mean duration per ticket, not total work-hours saved.',
-        limitations: 'Whole-system observed closed-ticket comparison, with no ticket-to-app-user or app-use linkage. It does not establish FMEMate causation, labor time saved, ROI or comparable ticket difficulty. Imported coverage is unconfirmed; no recorded closure on a date does not prove no tickets. Missing tickets, invalid ranges or a zero baseline mean make the corresponding rate unavailable, never an invented 0% or 100%. Overlapping or unequal-length periods must be disclosed. The latest import replaces the previous dataset rather than accumulating repeat uploads.',
+        limitations: 'Whole-system observed closed-ticket comparison, with no ticket-to-app-user or app-use linkage. It does not establish FMEMate causation, labor time saved, ROI or comparable ticket difficulty. Imported coverage is unconfirmed; no recorded closure on a date does not prove no tickets. Missing tickets, invalid ranges or a zero baseline mean make the corresponding rate unavailable, never an invented 0% or 100%. Overlapping or unequal-length periods must be disclosed. ' + (input.mttr?.formatVersion === 2
+          ? 'Imports accumulate by unique B-column ticket ID; repeated valid IDs within or across files are skipped and do not update an earlier valid ticket. Latest-file row counts are not the accumulated ticket total.'
+          : 'Legacy data has no verified ticket-ID deduplication metadata. Reimport the source Excel into the new format before claiming unique-ticket totals or cross-upload deduplication.'),
       },
     },
     topUsers,
