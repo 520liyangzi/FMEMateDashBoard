@@ -1,5 +1,5 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
-import { compareMttr, previousMttrPeriod, type MttrDataset, type MttrPeriod } from './mttr.ts';
+import { compareMttr, previousMttrPeriod, analyzeMttrPeople, type MttrDataset, type MttrPeriod } from './mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -30,11 +30,12 @@ export type AiFactsInput = {
   mttr?: MttrDataset | null;
   mttrBaseline?: MttrPeriod;
   mttrCurrent?: MttrPeriod;
+  mttrAssignee?: string;
 };
 
 const LIMITS = {
   topUsers: 10, repeatUsageUsers: 10, topQuestions: 20, customQuestions: 10, customAuthors: 10,
-  failureExamples: 10, feedback: 10, daily: 31, retentionDaily: 31, communityRecords: 31, scenes: 20,
+  mttrPeople: 20, mttrUnrankedPeople: 10, failureExamples: 10, feedback: 10, daily: 31, retentionDaily: 31, communityRecords: 31, scenes: 20,
   questionCharacters: 1200, answerCharacters: 2000, reasonCharacters: 1000,
   feedbackCharacters: 1200, identifierCharacters: 200, sceneCharacters: 200,
 } as const;
@@ -48,7 +49,13 @@ export function buildAiFacts(input: AiFactsInput) {
   // MTTR has its own ticket-system ranges and is independent of app Scene filters.
   const mttrCurrent = input.mttrCurrent ?? { from, to };
   const mttrBaseline = input.mttrBaseline ?? previousMttrPeriod(mttrCurrent) ?? { from: '', to: '' };
-  const mttrComparison = compareMttr(input.mttr ?? null, mttrBaseline, mttrCurrent);
+  const mttrV3 = input.mttr?.formatVersion === 3;
+  const mttrOverall = compareMttr(mttrV3 ? input.mttr! : null, mttrBaseline, mttrCurrent);
+  const selectedMttrAssignee = mttrV3 ? input.mttrAssignee : undefined;
+  const mttrComparison = compareMttr(mttrV3 ? input.mttr! : null, mttrBaseline, mttrCurrent, selectedMttrAssignee);
+  const mttrPeople = mttrV3 ? analyzeMttrPeople(input.mttr!, mttrBaseline, mttrCurrent) : [];
+  const mttrRanked = mttrPeople.filter(person => person.rank !== null);
+  const mttrUnranked = mttrPeople.filter(person => person.rank === null);
   // Retention cohorts are useful in the interactive dashboard; the writing
   // prompt only needs counts, never unbounded lists of Client IDs.
   const retentionDay = (day: RetentionDay) => ({
@@ -138,6 +145,16 @@ export function buildAiFacts(input: AiFactsInput) {
   }));
   const daily = stats.daily.slice(-LIMITS.daily);
   const communityRecords = selectedGroups.slice(-LIMITS.communityRecords);
+  const mttrPerson = (person: typeof mttrPeople[number], field: string) => ({
+    assignee: text(person.assignee, LIMITS.identifierCharacters, field),
+    comparison: person.comparison,
+    rank: person.rank,
+  });
+  const mttrRanking = mttrRanked.slice(0, LIMITS.mttrPeople).map((person, index) => mttrPerson(person, `effectiveness.mttr.people.ranking[${index}].assignee`));
+  const mttrUnrankedExamples = mttrUnranked.slice(0, LIMITS.mttrUnrankedPeople).map((person, index) => mttrPerson(person, `effectiveness.mttr.people.unrankedExamples[${index}].assignee`));
+  const boundedMapping = (value: Record<string, string> | undefined, keys: string[], field: string) => value ? Object.fromEntries(
+    keys.map(key => [key, text(value[key] ?? '', LIMITS.identifierCharacters, `${field}.${key}`)]),
+  ) : null;
 
   return {
     schemaVersion: 1,
@@ -184,16 +201,49 @@ export function buildAiFacts(input: AiFactsInput) {
     effectiveness: {
       mttr: {
         ...mttrComparison,
-        source: 'Imported work-order system aggregate; independent of app logs and Scene filters.',
+        businessRule: mttrV3 ? 'TT-category-filter-joined-to-completed-JOB-by-TT-ID' : 'legacy-single-table-reimport-TT-and-JOB-required',
+        overall: mttrOverall,
+        selectedScope: {
+          type: selectedMttrAssignee === undefined ? 'overall' : 'assignee',
+          assignee: selectedMttrAssignee === undefined ? null : text(selectedMttrAssignee, LIMITS.identifierCharacters, 'effectiveness.mttr.selectedScope.assignee'),
+          requestedLegacyAssigneeUnavailable: !mttrV3 && input.mttrAssignee !== undefined,
+        },
+        people: {
+          available: mttrV3,
+          totalAssignees: mttrPeople.length,
+          rankedCount: mttrRanked.length,
+          unrankedCount: mttrUnranked.length,
+          ranking: mttrRanking,
+          rankingCoverage: coverage(mttrRanked.length, mttrRanking.length, 'Highest signed percentage reduction first, across all eligible named assignees; unaffected by selected assignee'),
+          unrankedExamples: mttrUnrankedExamples,
+          unrankedCoverage: coverage(mttrUnranked.length, mttrUnrankedExamples.length, 'Unranked assignees sorted by exact name; examples only'),
+          definition: 'Each named assignee is compared against their own baseline and current period means. Both periods need at least one valid completed Job and a positive baseline mean. Unassigned, missing-period and zero-baseline groups are unranked. Ties share competition rank. Signed percentage reduction sorts descending; the highest percentage does not necessarily have the largest absolute mean-time reduction or total time saved. Overall uses all valid joined Jobs, including unassigned, and is not an average of person rates.',
+        },
+        source: 'Imported TT and JOB system aggregates when businessRule is joined; legacy single-table aggregates otherwise. Independent of app logs and Scene filters.',
         importedAt: input.mttr?.importedAt ?? null,
         dataQuality: input.mttr ? {
           formatVersion: input.mttr.formatVersion ?? 1,
-          countsScope: 'sourceRows/matchedRows/validRows/excludedRows/invalidDates/negativeDurations/addedRows/duplicateRows/missingIds describe the latest imported file only; totalTickets describes accumulated unique tickets.',
+          countsScope: mttrV3 ? 'sources.tt and sources.job contain their own latest import diagnostics. totalJobs is the accumulated valid joined unique jb_id count used by MTTR; totalTickets is a compatibility alias equal to totalJobs, not a TT count. storedJobs counts all stored valid unique Jobs including unmatched/non-Radio Jobs; storedTtIds counts all IDs in the stored TT catalog, not only eligible Radio TT IDs.' : 'sourceRows/matchedRows/validRows/excludedRows/invalidDates/negativeDurations/addedRows/duplicateRows/missingIds describe the latest imported file only; totalTickets describes legacy accumulated unique tickets.',
+          totalJobs: input.mttr.totalJobs ?? null,
+          storedJobs: input.mttr.storedJobs ?? null,
+          storedTtIds: input.mttr.storedTtIds ?? null,
+          sources: input.mttr.sources ? {
+            tt: { importedAt: input.mttr.sources.tt.importedAt, sourceRows: input.mttr.sources.tt.sourceRows, matchedRows: input.mttr.sources.tt.matchedRows, uniqueIds: input.mttr.sources.tt.uniqueIds, duplicates: input.mttr.sources.tt.duplicates, missingIds: input.mttr.sources.tt.missingIds },
+            job: { importedAt: input.mttr.sources.job.importedAt, sourceRows: input.mttr.sources.job.sourceRows, statusMatches: input.mttr.sources.job.statusMatches, validRows: input.mttr.sources.job.validRows, invalidDates: input.mttr.sources.job.invalidDates, negativeDurations: input.mttr.sources.job.negativeDurations, missingIds: input.mttr.sources.job.missingIds, duplicates: input.mttr.sources.job.duplicates, addedRows: input.mttr.sources.job.addedRows, unmatchedTt: input.mttr.sources.job.unmatchedTt, missingAssignee: input.mttr.sources.job.missingAssignee },
+          } : null,
+          mappings: input.mttr.mappings ? {
+            tt: boundedMapping(input.mttr.mappings.tt, ['ttId', 'category'], 'effectiveness.mttr.mappings.tt'),
+            job: boundedMapping(input.mttr.mappings.job, ['jobId', 'ttId', 'created', 'finished', 'assignee', 'status'], 'effectiveness.mttr.mappings.job'),
+          } : null,
+          sourceHeaders: input.mttr.sourceHeaders ? {
+            tt: boundedMapping(input.mttr.sourceHeaders.tt, ['ttId', 'category'], 'effectiveness.mttr.sourceHeaders.tt'),
+            job: boundedMapping(input.mttr.sourceHeaders.job, ['jobId', 'ttId', 'created', 'finished', 'assignee', 'status'], 'effectiveness.mttr.sourceHeaders.job'),
+          } : null,
           totalTickets: input.mttr.totalTickets ?? null,
           addedRows: input.mttr.addedRows ?? null,
           duplicateRows: input.mttr.duplicateRows ?? null,
           missingIds: input.mttr.missingIds ?? null,
-          deduplication: input.mttr.formatVersion === 2 ? 'selected-ticket-id-trimmed-case-sensitive-first-valid-wins' : 'legacy-unverified-reimport-required',
+          deduplication: mttrV3 ? 'unique-jb_id-first-valid-wins-not-one-per-TT' : input.mttr.formatVersion === 2 ? 'selected-ticket-id-trimmed-case-sensitive-first-valid-wins' : 'legacy-unverified-reimport-required',
           columnMapping: input.mttr.columnMapping ? Object.fromEntries(
             (['B', 'F', 'J', 'S', 'U'] as const).map(role => [role, text(input.mttr!.columnMapping![role] ?? '', LIMITS.identifierCharacters, `effectiveness.mttr.columnMapping.${role}`)]),
           ) : null,
@@ -210,11 +260,13 @@ export function buildAiFacts(input: AiFactsInput) {
           earliestCloseDate: input.mttr.earliestDate,
           latestCloseDate: input.mttr.latestDate,
         } : null,
-        definition: 'Mean elapsed seconds = sum of valid ticket (selected close timestamp minus selected creation timestamp) / valid ticket count. The selected category field must be Radio-OSP or Radio-ISP and selected status field must be CLOSE. Each ticket belongs to its selected close date, inclusively within each period; the full elapsed duration is counted, including time before the period. Version 2 reads the first worksheet from physical row 2 and deduplicates trimmed, case-sensitive selected ticket IDs, keeping the first valid occurrence across files and within each file; missing IDs are excluded. columnRoles B/F/J/S/U are canonical role keys, not promises of physical file positions: columnMapping gives the actual selected Excel column and headerColumns gives its selected header. Unique recognizable headers may be detected automatically; ambiguous or unmatched fields require user selection. Do not substitute assign_date or another timestamp for the selected close field.',
-        units: 'meanSeconds, totalSeconds and savedSeconds are seconds. reductionRate is percentage: (baseline mean - current mean) / baseline mean × 100. Positive means shorter mean duration; negative means longer. savedSeconds is the difference in mean duration per ticket, not total work-hours saved.',
-        limitations: 'Whole-system observed closed-ticket comparison, with no ticket-to-app-user or app-use linkage. It does not establish FMEMate causation, labor time saved, ROI or comparable ticket difficulty. Imported coverage is unconfirmed; no recorded closure on a date does not prove no tickets. Missing tickets, invalid ranges or a zero baseline mean make the corresponding rate unavailable, never an invented 0% or 100%. Overlapping or unequal-length periods must be disclosed. ' + (input.mttr?.formatVersion === 2
-          ? 'Imports accumulate by unique selected ticket ID; repeated valid IDs within or across files are skipped and do not update an earlier valid ticket. Latest-file row counts are not the accumulated ticket total.'
-          : 'Legacy data has no verified ticket-ID deduplication metadata. Reimport the source Excel into the new format before claiming unique-ticket totals or cross-upload deduplication.'),
+        definition: mttrV3
+          ? 'Filter TT category to Radio-OSP or Radio-ISP, without filtering TT status. Join eligible TT IDs to JOB.tt_id. Include JOB status Done or Close only. Duration is selected JOB finished minus JOB created timestamp; defaults are G created, I finished, AG assignee and AR status, but actual mappings and sourceHeaders govern. Assign to the JOB finished date inclusively. Count each valid unique jb_id once, keeping the first valid occurrence across uploads: multiple Jobs for one TT are separate observations. The latest TT catalog recomputes membership for all saved valid Jobs, including previously unmatched Jobs. Divide total elapsed seconds by valid joined Job count, not TT count or the number of assignees. Do not use TT creation/closure times or assign_date in place of JOB timestamps.'
+          : 'LEGACY SINGLE-TABLE DATA: old single-table percentages and means are deliberately withheld because they do not represent the new TT-category-to-JOB join. Reimport both TT and JOB sources before reporting the new business metric or person ranking. Version 2 uses first-valid selected ticket-ID deduplication; version 1 lacks verified ID deduplication.',
+        units: 'meanSeconds, totalSeconds and savedSeconds are seconds. reductionRate is percentage: (baseline mean - current mean) / baseline mean × 100. Positive means shorter mean duration; negative means longer. savedSeconds is the difference in mean elapsed time per observation, not total work-hours saved.',
+        limitations: 'Observed completed-Job comparison for v3, with no Job-to-app-use or app-user linkage. It does not establish FMEMate causation, labor time saved, ROI or comparable Job difficulty. Imported coverage is unconfirmed. Missing periods, invalid ranges or a zero baseline mean make rates unavailable, never an invented 0% or 100%. Overlapping or unequal-length periods must be disclosed. Individual scope does not filter the overall comparison or overall person ranking. ' + (mttrV3
+          ? 'The denominator is valid joined unique Jobs, including unassigned Jobs in the overall scope. A high percentage reduction need not imply the largest absolute time gain. Diagnostic row counts describe their source imports and are not interchangeable with totalJobs. totalTickets is only a compatibility alias for totalJobs; storedJobs and storedTtIds describe complete ledgers, not eligible matched-job denominators.'
+          : 'Legacy data is not the new TT/JOB joined business rule. Reimport both TT and JOB tables before making joined-Job or assignee-ranking claims. Version 1 additionally needs ID verification; version 2 ticket deduplication does not establish Job deduplication.'),
       },
     },
     topUsers,
@@ -250,7 +302,7 @@ export function buildAiFacts(input: AiFactsInput) {
       `Window retention is not a first-use or registration cohort. It uses baseline-day identifiable accounts and counts each account once if it returns on ANY of the following ${retention.windowDays} calendar days. The baseline is windowDays before the selected end. The baseline day is excluded from follow-up; new later accounts do not enter the numerator. It does not require activity exactly on day N or on every day. Scene filtering is consistent and browser is excluded.`,
       'retention.latest describes the selected end date and its preceding window, not an average over the selected period. Always state previousDate (baseline), windowStart, date (window end), windowDays and retainedUsers/previousUsers. Missing baseline or any unobserved follow-up date makes rate null. Present logs are not confirmed complete; absent observations do not establish churn.',
       'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for the baseline and every follow-up day, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
-      'MTTR is independent of app log metrics, Scene filtering and app reporting dates: use effectiveness.mttr baseline/current ranges exactly. It measures overall elapsed time for qualifying closed tickets, not demonstrated FMEMate efficiency or active handling labor time. State both ranges, counts, means and the reduction sign; disclose overlap, unequal periods and unconfirmed import coverage. Never average daily means or infer total labor hours saved from savedSeconds.',
+      'MTTR is independent of app log metrics, Scene filtering and app reporting dates. V3 joins Radio-OSP/Radio-ISP TT IDs to completed JOBs (Done/Close); TT status is not filtered. Use selected JOB finish-create elapsed time, finish-date grouping and unique jb_id denominators, allowing multiple Jobs per TT. State both ranges/counts/means and the reduction sign. Overall comparison and global person ranking stay independent of the selected person; never average person percentages or daily means. Do not infer total labor hours saved or FMEMate causation. Legacy v1/v2 is not this rule and requires reimporting both tables.',
       'Preset matching ignores case, whitespace, punctuation and symbols. MML records are always excluded from custom questions. Empty MML answers are normal.',
       'Only answers containing Sorry (case-insensitive) count as logged failures. Absence of Sorry is not proof of success, resolution, satisfaction, time saved or business value.',
       'Failure reasons are human-entered notes; missing reasons are under investigation. Evidence examples are samples, not all failures. Do not infer causes from error wording alone.',

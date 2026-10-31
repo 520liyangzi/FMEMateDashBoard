@@ -24,9 +24,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
 from mttr_import import stage_mttr, finish_dataset, aggregate_tickets, validate_dataset, MttrImportError
+from job_mttr_import import stage_pair, joined_aggregates, finish_pair, validate_v3, RADIO
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.8.2'
+APP_VERSION = '1.9.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -43,6 +44,9 @@ CREATE TABLE IF NOT EXISTS failure_notes (taskId TEXT PRIMARY KEY, reason TEXT N
 CREATE TABLE IF NOT EXISTS ai_reports (id TEXT PRIMARY KEY, createdAt TEXT NOT NULL, dateFrom TEXT NOT NULL, dateTo TEXT NOT NULL, scene TEXT NOT NULL, model TEXT NOT NULL, demo INTEGER NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS daily_summaries (date TEXT PRIMARY KEY, title TEXT NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS site_visits (id TEXT PRIMARY KEY, date TEXT NOT NULL, site TEXT NOT NULL, description TEXT NOT NULL, photos TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mttr_tt (ttId TEXT PRIMARY KEY, category TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mttr_jobs (jobId TEXT PRIMARY KEY, ttId TEXT NOT NULL, createdAt TEXT NOT NULL, finishedAt TEXT NOT NULL, assignee TEXT NOT NULL, status TEXT NOT NULL, durationSeconds REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS mttr_jobs_tt ON mttr_jobs(ttId);
 CREATE TABLE IF NOT EXISTS mttr_tickets (ticketId TEXT PRIMARY KEY, createdAt TEXT NOT NULL, closedAt TEXT NOT NULL, durationSeconds REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS mttr_dataset (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0);
@@ -205,6 +209,8 @@ class Store:
                 with self.lock, self.connect() as db:
                     db.execute('ATTACH DATABASE ? AS incoming_mttr', (staged,))
                     existing = db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()
+                    if existing and json.loads(existing['data']).get('formatVersion') == 3:
+                        raise ApiError(409, 'This project uses TT + Job MTTR. Import both files through /api/mttr/import-pair.')
                     if existing and json.loads(existing['data']).get('formatVersion') != 2:
                         # Legacy snapshots have no IDs. Rebuild only after a fully
                         # parsed, valid upload; failed uploads leave legacy data intact.
@@ -218,10 +224,46 @@ class Store:
         except MttrImportError as exc:
             raise ApiError(400, str(exc), exc.details)
 
+    def import_mttr_pair(self, fields):
+        if not {'ttFile','jobFile'}<=set(fields) or not set(fields)<={'ttFile','jobFile','ttMapping','jobMapping'} or any(not fields[k].get('filename') for k in ('ttFile','jobFile')):
+            raise ApiError(400, 'Select both TT and Job export files.')
+        mappings={}
+        for key in ('ttMapping','jobMapping'):
+            if key in fields:
+                try:
+                    mappings[key]=json.loads(fields[key].get('value',''))
+                except (ValueError,TypeError):raise ApiError(400, 'Source mappings must be JSON objects.')
+                if mappings[key] is None:raise ApiError(400, 'A source mapping must specify all fields.')
+        try:
+            with stage_pair(fields['ttFile']['data'],fields['ttFile']['filename'],fields['jobFile']['data'],fields['jobFile']['filename'],mappings.get('ttMapping'),mappings.get('jobMapping')) as (summary,staged):
+                with self.lock,self.connect() as db:
+                    db.execute('ATTACH DATABASE ? AS incoming_jobs',(staged,))
+                    existing=db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()
+                    if existing and json.loads(existing['data']).get('formatVersion')!=3:
+                        db.execute('DELETE FROM mttr_tt');db.execute('DELETE FROM mttr_jobs')
+                    db.execute('INSERT INTO mttr_tt(ttId,category) SELECT ttId,category FROM incoming_jobs.tt WHERE 1 ON CONFLICT(ttId) DO UPDATE SET category=excluded.category')
+                    db.execute('INSERT OR IGNORE INTO mttr_jobs SELECT jobId,ttId,createdAt,finishedAt,assignee,status,durationSeconds FROM incoming_jobs.jobs')
+                    added=db.execute('SELECT changes()').fetchone()[0]
+                    if not db.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]:
+                        raise MttrImportError('没有有效的 Done/Close Job / No valid Done/Close jobs are available. Existing data unchanged.',{'source':'job','sources':summary['sources']})
+                    summary['sources']['job']['addedRows']=added
+                    summary['sources']['job']['duplicates']=summary['sources']['job']['validRows']-added
+                    summary['sources']['job']['unmatchedTt']=db.execute(f'SELECT count(*) FROM incoming_jobs.jobs j LEFT JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.ttId IS NULL OR t.category NOT IN {RADIO}').fetchone()[0]
+                    summary['storedJobs']=db.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]
+                    summary['storedTtIds']=db.execute('SELECT count(*) FROM mttr_tt').fetchone()[0]
+                    days,people=joined_aggregates(db)
+                    dataset=finish_pair(summary,days,people)
+                    db.execute('DELETE FROM mttr_tickets')
+                    db.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',(json.dumps(dataset,ensure_ascii=False,allow_nan=False),))
+                return dataset
+        except MttrImportError as exc:raise ApiError(400,str(exc),exc.details)
+
     def delete_mttr(self):
         with self.lock, self.connect() as db:
             db.execute('DELETE FROM mttr_dataset')
             db.execute('DELETE FROM mttr_tickets')
+            db.execute('DELETE FROM mttr_tt')
+            db.execute('DELETE FROM mttr_jobs')
         return {'ok': True}
 
     @staticmethod
@@ -239,6 +281,17 @@ class Store:
         if type(duration) not in (int,float) or not math.isfinite(duration) or duration < 0 or abs((stamps[1]-stamps[0]).total_seconds()-duration) > 0.000001:
             raise ApiError(400, 'Backup MTTR ticket duration is invalid.')
         return (ticket_id,row['createdAt'],row['closedAt'],duration)
+
+    @staticmethod
+    def validate_job_row(row):
+        job_id=require_string(row['jobId'],'job ID',1000,True)
+        tt_id=require_string(row['ttId'],'TT ID',1000,True)
+        if job_id!=job_id.strip() or tt_id!=tt_id.strip():raise ApiError(400,'Invalid backup Job identifiers.')
+        clean=Store.validate_mttr_ticket({'ticketId':job_id,'createdAt':row['createdAt'],'closedAt':row['finishedAt'],'durationSeconds':row['durationSeconds']})
+        assignee=require_string(row['assignee'],'Job assignee',1000)
+        from mttr_import import normalized
+        if assignee!=normalized(assignee) or row['status'] not in ('DONE','CLOSE'):raise ApiError(400,'Invalid backup Job assignee or status.')
+        return job_id,tt_id,clean[1],clean[2],assignee,row['status'],clean[3]
 
     @staticmethod
     def visit_row(row):
@@ -597,7 +650,7 @@ class Store:
                 required_tables = {'logs', 'settings', 'groups', 'feedback', 'history'}
                 tables = {r['name'] for r in schema if r['type'] == 'table'}
                 # Legacy backups may omit either of the subsequently added tables.
-                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits', 'mttr_dataset', 'mttr_tickets'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
+                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits', 'mttr_dataset', 'mttr_tickets', 'mttr_tt', 'mttr_jobs'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
                     raise ApiError(400, 'Backup database contains unsupported schema objects.')
                 if 'failure_notes' in tables and {r['name'] for r in source.execute('PRAGMA table_info(failure_notes)')} != {'taskId', 'reason', 'updatedAt'}:
                     raise ApiError(400, 'Backup failure reason columns are invalid.')
@@ -611,6 +664,10 @@ class Store:
                     raise ApiError(400, 'Backup MTTR columns are invalid.')
                 if 'mttr_tickets' in tables and {r['name'] for r in source.execute('PRAGMA table_info(mttr_tickets)')} != {'ticketId','createdAt','closedAt','durationSeconds'}:
                     raise ApiError(400, 'Backup MTTR ticket columns are invalid.')
+                if 'mttr_tt' in tables and {r['name'] for r in source.execute('PRAGMA table_info(mttr_tt)')}!={'ttId','category'}:
+                    raise ApiError(400, 'Backup TT catalogue columns are invalid.')
+                if 'mttr_jobs' in tables and {r['name'] for r in source.execute('PRAGMA table_info(mttr_jobs)')}!={'jobId','ttId','createdAt','finishedAt','assignee','status','durationSeconds'}:
+                    raise ApiError(400, 'Backup Job columns are invalid.')
                 if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ApiError(400, 'Backup database integrity check failed.')
                 with self.connect(new_db) as dest:
@@ -622,7 +679,8 @@ class Store:
                             raise ApiError(400, 'Backup MTTR snapshot is invalid.')
                         for row in rows:
                             try:
-                                dataset = validate_dataset(json.loads(row['data']))
+                                payload=json.loads(row['data'])
+                                dataset = validate_v3(payload) if payload.get('formatVersion')==3 else validate_dataset(payload)
                             except (MttrImportError, ValueError, TypeError, KeyError):
                                 raise ApiError(400, 'Backup MTTR data is invalid.')
                             mttr_snapshot = dataset
@@ -638,6 +696,25 @@ class Store:
                             raise ApiError(400, 'Backup MTTR ticket ledger does not match its statistics.')
                     elif ledger_days:
                         raise ApiError(400, 'Backup MTTR ticket ledger has no matching versioned snapshot.')
+                    if 'mttr_tt' in tables:
+                        from mttr_import import category
+                        for row in source.execute('SELECT ttId,category FROM mttr_tt'):
+                            tt_id=require_string(row['ttId'],'TT ID',1000,True)
+                            cat=require_string(row['category'],'TT category',65536)
+                            if tt_id!=tt_id.strip() or cat!=category(cat):raise ApiError(400,'Invalid backup TT catalogue.')
+                            dest.execute('INSERT INTO mttr_tt VALUES (?,?)',(tt_id,cat))
+                    if 'mttr_jobs' in tables:
+                        for row in source.execute('SELECT jobId,ttId,createdAt,finishedAt,assignee,status,durationSeconds FROM mttr_jobs'):
+                            dest.execute('INSERT INTO mttr_jobs VALUES (?,?,?,?,?,?,?)',self.validate_job_row(dict(row)))
+                    if mttr_snapshot and mttr_snapshot.get('formatVersion')==3:
+                        if dest.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]!=mttr_snapshot['storedJobs'] or dest.execute('SELECT count(*) FROM mttr_tt').fetchone()[0]!=mttr_snapshot['storedTtIds']:
+                            raise ApiError(400,'Backup TT/Job ledger counts do not match stored history.')
+                        days,people=joined_aggregates(dest)
+                        def same_aggregates(actual,expected,person=False):
+                            return len(actual)==len(expected) and all(a['date']==b['date'] and (not person or a['assignee']==b['assignee']) and a['count']==b['count'] and math.isclose(a['totalSeconds'],b['totalSeconds'],rel_tol=1e-12,abs_tol=1e-5) for a,b in zip(actual,expected))
+                        if not same_aggregates(days,mttr_snapshot['days']) or not same_aggregates(people,mttr_snapshot['personDays'],True):raise ApiError(400,'Backup TT/Job ledgers do not match MTTR statistics.')
+                    elif dest.execute('SELECT count(*) FROM mttr_tt').fetchone()[0] or dest.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]:
+                        raise ApiError(400,'Backup TT/Job ledger has no matching V3 statistics.')
                     if 'site_visits' in tables:
                         for row in source.execute('SELECT * FROM site_visits'):
                             clean = self.validate_visit({**dict(row), 'photos': json.loads(row['photos'])})
@@ -908,6 +985,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(store.validate_ai_request(self.json_body()))
             if path == '/api/ai/generate':
                 return self.json(store.generate_ai_report(self.json_body()))
+            if path == '/api/mttr/import-pair':
+                return self.json(store.import_mttr_pair(self.multipart()))
             if path == '/api/mttr/import':
                 return self.json(store.import_mttr(self.multipart()))
             if path == '/api/site-visits':

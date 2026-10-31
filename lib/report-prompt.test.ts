@@ -157,34 +157,37 @@ test('MTTR reporting requires explicit periods and counts without attributing wh
   const prompt = buildAiReportPrompt(data);
   assert.equal(data.effectiveness.mttr.status, 'no_dataset');
   assert.match(prompt, /MTTR 减少率=\(基准期 meanSeconds−对比期 meanSeconds\)÷基准期 meanSeconds×100%/);
-  assert.match(prompt, /基准期和对比期的具体起止日期、各期有效关闭工单数/);
-  assert.match(prompt, /按所选关闭日期归属周期/);
-  assert.match(prompt, /禁止对每日均值取简单平均/);
+  assert.match(prompt, /基准期和对比期的具体起止日期、各期有效完成 JOB 数/);
+  assert.match(prompt, /按 JOB 完成日期归属周期/);
+  assert.match(prompt, /每日均值的简单平均/);
   assert.match(prompt, /零耗时有效/);
   assert.match(prompt, /overlap=true 必须说明周期重叠/);
   assert.match(prompt, /unequalDays=true 必须说明周期长度不同/);
-  assert.match(prompt, /未关联哪些工单或用户使用过 FMEMate/);
+  assert.match(prompt, /未关联哪些 JOB 或用户使用过 FMEMate/);
   assert.match(prompt, /不能声称“由 FMEMate 带来\/证明了效率提升”/);
-  assert.match(prompt, /savedSeconds 只是平均每单耗时差/);
+  assert.match(prompt, /savedSeconds 只是平均每单 JOB 耗时差/);
   assert.ok(prompt.includes('"reductionRate": null'));
 });
 
-test('MTTR prompt distinguishes incremental unique-ticket totals, latest import statistics and legacy data', () => {
+test('MTTR prompt distinguishes joined unique Jobs, TT catalog counts and legacy data', () => {
   const prompt = buildAiReportPrompt(facts());
-  assert.match(prompt, /所选工单 ID 去首尾空格后按区分大小写的值去重/);
-  assert.match(prompt, /同文件及跨文件的相同 ID 只保留首条有效工单/);
-  assert.match(prompt, /重复导入不增加工单数量/);
-  assert.match(prompt, /累计去重工单总数只用 totalTickets/);
-  assert.match(prompt, /最近一次导入文件的行数，不是累计工单数/);
-  assert.match(prompt, /历史数据尚未验证 ID 去重、需要重新导入/);
-  assert.ok(!prompt.includes('latest import replaces the previous dataset'));
+  assert.match(prompt, /先筛 TT 的分类为 Radio-OSP 或 Radio-ISP，不过滤 TT 状态/);
+  assert.match(prompt, /仅取 JOB 状态 Done 或 Close/);
+  assert.match(prompt, /重复上传不增加相同 JOB 数量/);
+  assert.match(prompt, /totalJobs 是当前有效关联唯一 JOB 总数/);
+  assert.match(prompt, /totalTickets 只是与 totalJobs 相等的兼容别名，不是 TT 数/);
+  assert.match(prompt, /formatVersion 不是 3 时属于旧单表口径/);
+  assert.match(prompt, /重新导入 TT 和 JOB 两张表/);
 });
 
-test('MTTR prompt refers to mapped actual columns and never assumes assign_date is closure time', () => {
+test('MTTR prompt refers to actual TT and JOB mappings and separates selected people from overall ranking', () => {
   const prompt = buildAiReportPrompt(facts());
-  assert.match(prompt, /实际列取 columnMapping，表头取 headerColumns/);
-  assert.match(prompt, /不假定固定为 U\/S\/F\/J\/B 列/);
-  assert.match(prompt, /有歧义时由用户选择/);
-  assert.match(prompt, /不得擅自将 assign_date 或其他时间字段当成关闭时间/);
-  assert.match(prompt, /完整耗时=所选关闭时间−所选创建时间/);
+  assert.match(prompt, /实际列由 dataQuality.mappings.tt\/job 及 sourceHeaders.tt\/job 给出/);
+  assert.match(prompt, /不得用 TT 创建\/关闭时间、assign_date 或其他字段代替 JOB 创建\/完成时间/);
+  assert.match(prompt, /完整耗时=所选 JOB 完成时间−所选 JOB 创建时间/);
+  assert.match(prompt, /同一个 TT 下的多个不同 jb_id 是不同 JOB/);
+  assert.match(prompt, /不影响 overall 或全局 people.ranking/);
+  assert.match(prompt, /缺一期、零基准和未分配组不排名/);
+  assert.match(prompt, /百分比减少最多不等于绝对平均耗时缩短最多/);
+  assert.match(prompt, /Top 是有限样例/);
 });

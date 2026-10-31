@@ -109,7 +109,7 @@ test('long untrusted text is visibly truncated without broken surrogate pairs', 
   assert.match(report.topQuestions[0].question, /\[truncated\]$/);
   assert.ok(!/[\uD800-\uDFFF]/u.test(report.topQuestions[0].question), 'no lone surrogate code points');
   assert.ok(!/[\uD800-\uDFFF]/u.test(report.community.feedback[0].text), 'no lone surrogate code points');
-  assert.ok(JSON.stringify(report).length < 25000);
+  assert.ok(JSON.stringify(report).length < 30000);
 });
 
 test('empty data and absent baselines produce explicit nulls, never nonfinite numbers', () => {
@@ -252,7 +252,7 @@ test('MTTR facts use independent weighted close-date periods and include no raw 
     mttrBaseline: { from: '2026-09-01', to: '2026-09-07' },
     mttrCurrent: { from: '2026-09-08', to: '2026-09-14' },
     mttr: {
-      filename: 'PRIVATE-TICKET-NAME.xlsx', importedAt: '2026-10-31T09:00:00Z',
+      filename: 'PRIVATE-TICKET-NAME.xlsx', importedAt: '2026-10-31T09:00:00Z', formatVersion: 3, totalJobs: 8,
       sourceRows: 12, matchedRows: 10, validRows: 8, invalidDates: 1, negativeDurations: 1, excludedRows: 2,
       earliestDate: '2026-09-01', latestDate: '2026-09-14', days: [
         { date: '2026-09-01', count: 1, totalSeconds: 3600 },
@@ -273,7 +273,7 @@ test('MTTR facts use independent weighted close-date periods and include no raw 
   assert.equal(mttr.dataQuality!.negativeDurations, 1);
   assert.equal(report.range.from, '2026-10-22', 'MTTR dates are independent of app dates');
   assert.ok(!JSON.stringify(report).includes('PRIVATE-TICKET-NAME'));
-  assert.match(mttr.definition, /selected close date/);
+  assert.match(mttr.definition, /without filtering TT status/);
   assert.match(mttr.limitations, /does not establish FMEMate causation/);
 });
 
@@ -283,7 +283,7 @@ test('MTTR absent data and zero baseline remain unavailable in AI evidence', () 
   assert.equal(none.reductionRate, null);
   assert.equal(none.dataQuality, null);
   const zero = facts({ mttrBaseline: { from: '2026-10-01', to: '2026-10-01' }, mttrCurrent: { from: '2026-10-02', to: '2026-10-03' }, mttr: {
-    filename: '', importedAt: '', sourceRows: 2, matchedRows: 2, validRows: 2, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    filename: '', importedAt: '', formatVersion: 3, totalJobs: 2, sourceRows: 2, matchedRows: 2, validRows: 2, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
     earliestDate: '2026-10-01', latestDate: '2026-10-02', days: [{ date: '2026-10-01', count: 1, totalSeconds: 0 }, { date: '2026-10-02', count: 1, totalSeconds: 3600 }],
   } }).effectiveness.mttr;
   assert.equal(zero.status, 'zero_baseline');
@@ -307,13 +307,13 @@ test('MTTR v2 facts distinguish accumulated unique tickets from latest-file coun
   assert.equal(mttr.dataQuality!.missingIds, 1);
   assert.equal(mttr.dataQuality!.deduplication, 'selected-ticket-id-trimmed-case-sensitive-first-valid-wins');
   assert.match(mttr.dataQuality!.countsScope, /latest imported file only/);
-  assert.match(mttr.limitations, /repeated valid IDs within or across files are skipped/);
+  assert.match(mttr.limitations, /Reimport both TT and JOB tables/);
   assert.ok(!mttr.limitations.includes('replaces the previous dataset'));
   const { formatVersion, totalTickets, addedRows, duplicateRows, missingIds, ...legacy } = data;
   const old = facts({ mttr: legacy }).effectiveness.mttr;
   assert.equal(old.dataQuality!.totalTickets, null, 'never infer unique totals from legacy row counts');
   assert.equal(old.dataQuality!.deduplication, 'legacy-unverified-reimport-required');
-  assert.match(old.limitations, /Reimport the source Excel/);
+  assert.match(old.limitations, /Reimport both TT and JOB tables/);
 });
 
 test('MTTR facts preserve selected column mapping and bounded header labels without assuming fixed positions', () => {
@@ -330,8 +330,78 @@ test('MTTR facts preserve selected column mapping and bounded header labels with
   assert.equal(data.dataQuality!.headerColumns!.J, 'actual_close_time');
   assert.match(data.dataQuality!.headerColumns!.U, /\[truncated\]/);
   assert.equal(report.evidence.truncatedStrings, 1);
-  assert.match(data.definition, /canonical role keys, not promises of physical file positions/);
-  assert.match(data.definition, /Do not substitute assign_date/);
+  assert.match(data.definition, /LEGACY SINGLE-TABLE DATA/);
+  assert.equal(data.businessRule, 'legacy-single-table-reimport-TT-and-JOB-required');
   const noMapping = facts().effectiveness.mttr;
   assert.equal(noMapping.dataQuality, null);
+});
+
+test('v3 MTTR AI facts keep global overall/ranking separate from person scope with bounded evidence', () => {
+  const personDays = [
+    { assignee: 'A', date: '2026-10-21', count: 2, totalSeconds: 72000 },
+    { assignee: 'A', date: '2026-10-22', count: 2, totalSeconds: 14400 },
+    { assignee: 'B', date: '2026-10-21', count: 1, totalSeconds: 360000 },
+    { assignee: 'B', date: '2026-10-22', count: 1, totalSeconds: 180000 },
+    { assignee: '', date: '2026-10-21', count: 1, totalSeconds: 36000 },
+    { assignee: '', date: '2026-10-22', count: 1, totalSeconds: 360 },
+    { assignee: 'Missing current', date: '2026-10-21', count: 1, totalSeconds: 36000 },
+    { assignee: 'Zero baseline', date: '2026-10-21', count: 1, totalSeconds: 0 },
+    { assignee: 'Zero baseline', date: '2026-10-22', count: 1, totalSeconds: 36000 },
+    ...Array.from({ length: 25 }, (_, i) => [
+      { assignee: `Person-${i}`, date: '2026-10-21', count: 1, totalSeconds: 36000 },
+      { assignee: `Person-${i}`, date: '2026-10-22', count: 1, totalSeconds: 18000 },
+    ]).flat(),
+  ];
+  const days = ['2026-10-21', '2026-10-22'].map(date => ({ date,
+    count: personDays.filter(row => row.date === date).reduce((n, row) => n + row.count, 0),
+    totalSeconds: personDays.filter(row => row.date === date).reduce((n, row) => n + row.totalSeconds, 0),
+  }));
+  const mttr = { formatVersion: 3 as const, filename: 'PRIVATE-JOIN.csv', importedAt: '2026-10-31T09:00:00Z',
+    sourceRows: 100, matchedRows: 70, validRows: 61, invalidDates: 0, negativeDurations: 0, excludedRows: 30,
+    totalJobs: 61, totalTickets: 61, storedJobs: 70, storedTtIds: 15, earliestDate: '2026-10-21', latestDate: '2026-10-22', days, personDays,
+    mappings: { tt: { ttId: 'B', category: 'U' }, job: { jobId: 'A', ttId: 'C', created: 'G', finished: 'I', assignee: 'AG', status: 'AR' } },
+    sourceHeaders: { tt: { ttId: 'tt_id', category: 'category' }, job: { jobId: 'jb_id', ttId: 'tt_id', created: 'create_date', finished: 'finish_date', assignee: 'assignee', status: 'jb_status' } },
+  };
+  const base = { mttr, mttrBaseline: { from: '2026-10-21', to: '2026-10-21' }, mttrCurrent: { from: '2026-10-22', to: '2026-10-22' } };
+  const overall = facts(base).effectiveness.mttr;
+  const selected = facts({ ...base, mttrAssignee: 'B' }).effectiveness.mttr;
+  assert.equal(selected.businessRule, 'TT-category-filter-joined-to-completed-JOB-by-TT-ID');
+  assert.equal(selected.reductionRate, 50);
+  assert.deepEqual(selected.selectedScope, { type: 'assignee', assignee: 'B', requestedLegacyAssigneeUnavailable: false });
+  assert.deepEqual(selected.overall, overall.overall, 'selected person never changes overall denominator');
+  assert.deepEqual(selected.people, overall.people, 'ranking is global regardless of selected person');
+  assert.equal(selected.people.ranking[0].assignee, 'A');
+  assert.equal(selected.people.ranking[0].comparison.reductionRate, 80);
+  assert.equal(selected.people.ranking[0].comparison.baseline.count, 2);
+  assert.equal(selected.people.ranking[0].comparison.baseline.meanSeconds, 36000);
+  assert.equal(selected.people.ranking.length, 20);
+  assert.equal(selected.people.rankingCoverage.omitted, 7);
+  assert.equal(selected.people.unrankedCount, 3);
+  assert.ok(selected.people.unrankedExamples.every(row => row.rank === null));
+  assert.ok(selected.people.unrankedExamples.some(row => row.assignee === ''));
+  assert.match(selected.people.definition, /highest percentage does not necessarily have the largest absolute/);
+  assert.equal(selected.dataQuality!.totalJobs, 61);
+  assert.equal(selected.dataQuality!.totalTickets, 61);
+  assert.equal(selected.dataQuality!.storedJobs, 70);
+  assert.equal(selected.dataQuality!.storedTtIds, 15);
+  assert.match(selected.dataQuality!.countsScope, /totalTickets is a compatibility alias equal to totalJobs/);
+  assert.equal(selected.dataQuality!.mappings!.job!.finished, 'I');
+  assert.equal(selected.dataQuality!.sourceHeaders!.job!.finished, 'finish_date');
+  assert.match(selected.definition, /without filtering TT status/);
+  assert.match(selected.definition, /multiple Jobs for one TT are separate observations/);
+  assert.ok(!JSON.stringify(selected).includes('PRIVATE-JOIN'));
+  const unassigned = facts({ ...base, mttrAssignee: '' }).effectiveness.mttr;
+  assert.equal(unassigned.selectedScope.type, 'assignee');
+  assert.equal(unassigned.selectedScope.assignee, '');
+  assert.equal(unassigned.baseline.count, 1);
+  const legacy = facts({ ...base, mttr: { ...mttr, formatVersion: 2 }, mttrAssignee: 'B' }).effectiveness.mttr;
+  assert.equal(legacy.people.available, false);
+  assert.equal(legacy.reductionRate, null);
+  assert.equal(legacy.baseline.meanSeconds, null);
+  assert.equal(legacy.current.meanSeconds, null);
+  assert.equal(legacy.overall.reductionRate, null);
+  assert.equal(legacy.overall.baseline.count, 0);
+  assert.equal(legacy.dataQuality!.totalJobs, 61, 'legacy metadata is preserved without presenting old-rule calculations');
+  assert.equal(legacy.people.ranking.length, 0);
+  assert.equal(legacy.selectedScope.requestedLegacyAssigneeUnavailable, true);
 });

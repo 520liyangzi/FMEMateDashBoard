@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, type MttrDataset } from './mttr.ts';
+import { analyzeMttrPeople, compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, type MttrDataset } from './mttr.ts';
 
 const dataset = (days: MttrDataset['days']): MttrDataset => ({
   filename: 'tickets.xlsx', importedAt: '2026-10-31T00:00:00Z', sourceRows: 0, matchedRows: 0,
@@ -78,4 +78,66 @@ test('equal-period navigation crosses months, leap days and years without timezo
   assert.deepEqual(previousMttrPeriod({ from: '2026-01-01', to: '2026-01-07' }), { from: '2025-12-25', to: '2025-12-31' });
   assert.equal(previousMttrPeriod({ from: '0001-01-01', to: '0001-01-01' }), null);
   assert.equal(shiftMttrPeriod({ from: '9999-12-31', to: '9999-12-31' }, 1), null);
+});
+
+function peopleDataset(): MttrDataset {
+  const personDays = [
+    { assignee: 'Alex', date: '2026-10-01', count: 1, totalSeconds: 100 },
+    { assignee: 'Alex', date: '2026-10-04', count: 1, totalSeconds: 50 },
+    { assignee: 'Blake', date: '2026-10-03', count: 9, totalSeconds: 900 },
+    { assignee: 'Blake', date: '2026-10-06', count: 9, totalSeconds: 1125 },
+    { assignee: '', date: '2026-10-01', count: 1, totalSeconds: 1000 },
+    { assignee: '', date: '2026-10-04', count: 1, totalSeconds: 0 },
+  ];
+  return { ...dataset(personDays), formatVersion: 3, personDays, totalJobs: 22, totalTickets: 22 };
+}
+
+test('V3 assignee filtering uses exact person-day records and includes unassigned only when requested', () => {
+  const d = peopleDataset();
+  assert.equal(compareMttr(d, baseline, current, 'Alex').reductionRate, 50);
+  assert.equal(compareMttr(d, baseline, current, 'Blake').reductionRate, -25);
+  assert.equal(compareMttr(d, baseline, current, '').reductionRate, 100);
+  assert.equal(compareMttr(d, baseline, current, 'alex').status, 'no_baseline_tickets');
+  assert.equal(compareMttr(d, baseline, current).baseline.count, 11);
+  assert.equal(compareMttr(d, baseline, current).current.count, 11);
+  assert.equal(compareMttr(d, baseline, current).reductionRate, 41.25);
+  assert.equal(compareMttr(dataset(d.days), baseline, current, 'Alex').reductionRate, null);
+});
+
+test('person ranks use individual signed reductions while overall MTTR remains weighted', () => {
+  const d = peopleDataset(), rows = analyzeMttrPeople(d, baseline, current);
+  assert.deepEqual(rows.map(r => [r.assignee, r.rank]), [['Alex', 1], ['Blake', 2], ['', null]]);
+  assert.equal(rows[0].comparison.reductionRate, 50);
+  assert.equal(rows[1].comparison.reductionRate, -25);
+  // (50 - 25) / 2 is 12.5%; the actual weighted overall reduction is 41.25%.
+  assert.equal(compareMttr(d, baseline, current).reductionRate, 41.25);
+});
+
+test('missing-period, zero-baseline and low-sample assignees remain visible without a rank', () => {
+  const d = peopleDataset();
+  d.personDays!.push(
+    { assignee: 'New', date: '2026-10-04', count: 2, totalSeconds: 10 },
+    { assignee: 'Absent', date: '2026-10-01', count: 2, totalSeconds: 10 },
+    { assignee: 'Zero', date: '2026-10-01', count: 2, totalSeconds: 0 },
+    { assignee: 'Zero', date: '2026-10-04', count: 2, totalSeconds: 10 },
+  );
+  const rows = analyzeMttrPeople(d, baseline, current, 2);
+  assert.equal(rows[0].assignee, 'Blake');
+  assert.equal(rows[0].rank, 1);
+  for (const name of ['', 'Alex', 'New', 'Absent', 'Zero']) assert.equal(rows.find(r => r.assignee === name)!.rank, null);
+  assert.equal(rows.find(r => r.assignee === 'New')!.comparison.status, 'no_baseline_tickets');
+  assert.equal(rows.find(r => r.assignee === 'Absent')!.comparison.status, 'no_current_tickets');
+  assert.equal(rows.find(r => r.assignee === 'Zero')!.comparison.status, 'zero_baseline');
+  assert.deepEqual(analyzeMttrPeople(null, baseline, current), []);
+});
+
+test('ties use deterministic competition ranks and invalid ranges do not create ranked people', () => {
+  const d = peopleDataset();
+  d.personDays!.push(
+    { assignee: 'Aaron', date: '2026-10-01', count: 2, totalSeconds: 40 },
+    { assignee: 'Aaron', date: '2026-10-04', count: 2, totalSeconds: 20 },
+  );
+  assert.deepEqual(analyzeMttrPeople(d, baseline, current).map(r => [r.assignee, r.rank]), [['Aaron', 1], ['Alex', 1], ['Blake', 3], ['', null]]);
+  const rows = analyzeMttrPeople(d, { from: '', to: '' }, current);
+  assert.equal(rows.every(r => r.rank === null && r.comparison.reductionRate === null), true);
 });
