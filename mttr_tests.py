@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import zipfile
 from xml.sax.saxutils import escape
-from mttr_import import import_mttr, excel_time, validate_dataset, MttrImportError, LEGACY_FIELDS
+from mttr_import import import_mttr, excel_time, validate_dataset, MttrImportError, LEGACY_FIELDS, DEFAULT_MAPPING
 from server import Store, ReportServer, ApiError
 
 HEADER = {'B':'ticket_id', 'F': 'created_time', 'J': 'closed_time', 'S': 'tt_status_description', 'U': 'domain'}
@@ -47,6 +47,17 @@ def as_csv(rows):
         writer.writerow(values)
     return result.getvalue().encode('utf-8-sig')
 
+SHIFTED_MAPPING = {'B':'B','F':'E','J':'R','S':'K','U':'D'}
+def shifted_rows(unknown=False, ticket='SHIFT-1'):
+    header={'B':'tt_id','D':'customer_radio_field' if unknown else 'domain',
+            'E':'ticket_open_timestamp' if unknown else 'tt_create_date',
+            'F':'jb_initiate_date','J':'jb_history_assign_date','K':'tt_status_description',
+            'R':'ticket_finished_timestamp' if unknown else 'tt_close_date',
+            'S':'jb_history_close_by','U':'jb_history_depart_by'}
+    data={'B':ticket,'D':'Radio-OSP','E':'2026/10/19 0:00:00','F':'2026/10/20 9:00:00',
+          'J':'2026/10/20 12:00:00','K':'CLOSE','R':'2026/10/19 10:00:00','S':'operator-x','U':'operator-y'}
+    return header,data
+
 class ImportTests(unittest.TestCase):
     def test_filter_elapsed_times_and_rejections(self):
         rows=[HEADER,row(),row('2026/10/10 0:00:00','2026/10/10 1:00:00',' close ',' Radio-ISP ',ticket='TT-2'),row(status='OPEN'),row(domain='Power'),row(start='bad'),row(end='2026/10/1 0:00:00'),row('2026/10/11 0:00:00','2026/10/11 0:00:00',ticket='TT-3'),{}]
@@ -74,7 +85,7 @@ class ImportTests(unittest.TestCase):
         x=import_mttr(workbook(rows),'x.xlsx');c=import_mttr(as_csv(rows),'x.csv')
         for field in ('days','sourceRows','matchedRows','validRows','excludedRows'):self.assertEqual(x[field],c[field])
         with self.assertRaises(MttrImportError):import_mttr(as_csv([row()]),'x.csv')
-        self.assertEqual(import_mttr(as_csv([row(ticket='IGNORED'),row()]),'x.csv')['validRows'],1)
+        self.assertEqual(import_mttr(as_csv([row(ticket='IGNORED'),row()]),'x.csv',DEFAULT_MAPPING)['validRows'],1)
     def test_large_sheet_many_shared_strings_no_raw_data(self):
         # Many distinct, unused strings remain on disk rather than a giant Python list.
         strings=['unique-ticket-text-'+str(i) for i in range(30000)]+['CLOSE','Radio-OSP']
@@ -113,7 +124,7 @@ class ImportTests(unittest.TestCase):
                 body=src.read(name)
                 if name.endswith('sheet1.xml'):body=body.replace(b'<row>',b'<row r="1">',1).replace(b'</row><row>',b'</row><row r="2">',1)
                 out.writestr(name,body)
-        self.assertEqual(import_mttr(raw.getvalue(),'x.xlsx')['totalTickets'],1)
+        self.assertEqual(import_mttr(raw.getvalue(),'x.xlsx',DEFAULT_MAPPING)['totalTickets'],1)
         sparse=io.BytesIO()
         with zipfile.ZipFile(io.BytesIO(workbook([row()]))) as src,zipfile.ZipFile(sparse,'w') as out:
             for name in src.namelist():
@@ -132,6 +143,50 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(details['diagnostics'],{'categoryMatches':3,'statusMatches':2})
         self.assertEqual(details['headerColumns']['B'],'ticket_id')
         self.assertIn('Existing data unchanged',str(error.exception));self.assertNotIn('TT-1',str(error.exception))
+
+    def test_shifted_columns_auto_detect_csv_and_xlsx(self):
+        data=shifted_rows()
+        for content,name in ((as_csv(data),'shift.csv'),(workbook(data),'shift.xlsx')):
+            result=import_mttr(content,name)
+            self.assertEqual(result['columnMapping'],SHIFTED_MAPPING)
+            self.assertEqual(result['headerColumns']['F'],'tt_create_date')
+            self.assertEqual(result['headerColumns']['J'],'tt_close_date')
+            self.assertEqual(result['days'],[{'date':'2026-10-19','count':1,'totalSeconds':36000}])
+            validate_dataset(result)
+            validate_dataset({k:v for k,v in result.items() if k!='columnMapping'})
+    def test_unknown_headers_preview_and_manual_retry(self):
+        data=shifted_rows(unknown=True)
+        with self.assertRaises(MttrImportError) as error:import_mttr(as_csv(data),'shift.csv')
+        detail=error.exception.details
+        self.assertTrue(detail['requiresMapping']);self.assertEqual(detail['previewRows'],1)
+        self.assertEqual(detail['suggestedMapping'],{'B':'B','S':'K','U':'D'})
+        columns={c['column']:c for c in detail['availableColumns']}
+        self.assertEqual(columns['J']['header'],'jb_history_assign_date')
+        self.assertEqual(columns['B']['samples'],[]);self.assertEqual(columns['E']['samples'],['2026/10/19 0:00:00'])
+        self.assertNotIn('SHIFT-1',str(detail))
+        result=import_mttr(as_csv(data),'shift.csv',SHIFTED_MAPPING)
+        self.assertEqual(result['days'][0]['totalSeconds'],36000)
+    def test_ambiguous_headers_and_unknown_outside_fixed_columns_require_mapping(self):
+        header,data=shifted_rows();header['F']='created_time'
+        with self.assertRaises(MttrImportError) as error:import_mttr(workbook([header,data]),'x.xlsx')
+        self.assertTrue(error.exception.details['requiresMapping']);self.assertNotIn('F',error.exception.details['suggestedMapping'])
+        # One unrelated nonblank header outside old B/F/J/S/U means this is not a
+        # blank-header legacy file. Never silently apply positional defaults.
+        with self.assertRaises(MttrImportError) as error:import_mttr(workbook([{'A':'unknown export'},row()]),'x.xlsx')
+        self.assertTrue(error.exception.details['requiresMapping'])
+    def test_manual_mapping_rejects_missing_duplicate_or_nonexistent_columns(self):
+        content=as_csv(shifted_rows(True))
+        for bad in ({'B':'B'}, {**SHIFTED_MAPPING,'F':'R'}, {**SHIFTED_MAPPING,'J':'ZZ'}, {**SHIFTED_MAPPING,'J':'XFE'}, {**SHIFTED_MAPPING,'F':'e'}):
+            with self.assertRaises(MttrImportError) as error:import_mttr(content,'x.csv',bad)
+            self.assertTrue(error.exception.details['requiresMapping'])
+    def test_mapping_failure_preview_is_bounded(self):
+        header,data=shifted_rows(True)
+        content=workbook([header]+[{**data,'B':'PRIVATE-'+str(i),'F':'date-'+str(i)} for i in range(100)])
+        with self.assertRaises(MttrImportError) as error:import_mttr(content,'x.xlsx')
+        details=error.exception.details
+        self.assertEqual(details['previewRows'],20)
+        self.assertTrue(all(len(c['samples'])<=3 for c in details['availableColumns']))
+        self.assertNotIn('PRIVATE-',str(details))
 
 class StoreTests(unittest.TestCase):
     def setUp(self):
@@ -196,6 +251,19 @@ class StoreTests(unittest.TestCase):
         with zipfile.ZipFile(out,'w') as z:z.writestr('manifest.json',json.dumps({'format':'fmemate-report-backup','version':1}));z.write(dbfile,'report.db')
         with self.assertRaises(ApiError):self.store.restore(out.getvalue())
         self.assertEqual(self.store.get_mttr(),before)
+    def test_shifted_mapping_failure_preserves_ledger_then_merges_and_restores(self):
+        before=self.upload();content=as_csv(shifted_rows(True))
+        with self.assertRaises(ApiError) as error:self.store.import_mttr({'file':{'filename':'x.csv','data':content}})
+        self.assertTrue(error.exception.details['requiresMapping']);self.assertEqual(self.store.get_mttr(),before)
+        def fields(mapping):return {'file':{'filename':'x.csv','data':content},'mapping':{'value':json.dumps(mapping)}}
+        with self.assertRaises(ApiError):self.store.import_mttr(fields({**SHIFTED_MAPPING,'F':'R'}))
+        self.assertEqual(self.store.get_mttr(),before)
+        after=self.store.import_mttr(fields(SHIFTED_MAPPING))
+        self.assertEqual((after['totalTickets'],after['addedRows']),(2,1))
+        target=Store(Path(self.tmp.name)/'mapped');target.restore(self.store.backup())
+        self.assertEqual(target.get_mttr(),after)
+        repeat=target.import_mttr(fields(SHIFTED_MAPPING))
+        self.assertEqual((repeat['totalTickets'],repeat['addedRows'],repeat['duplicateRows']),(2,0,1))
     def test_http_contract_and_origin(self):
         server=ReportServer(('127.0.0.1',0),self.store);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         url='http://127.0.0.1:'+str(server.server_port)
@@ -211,6 +279,14 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(error.exception.code,400);payload=json.load(error.exception)
             self.assertEqual(payload['details']['diagnostics'],{'categoryMatches':1,'statusMatches':0})
             self.assertIn('Start row 2',payload['error'])
+            shifted=as_csv(shifted_rows(True));mapping_json=json.dumps(SHIFTED_MAPPING).encode()
+            shifted_body=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="shift.csv"\r\n\r\n').encode()+shifted+f'\r\n--{boundary}--\r\n'.encode()
+            with self.assertRaises(HTTPError) as error:urlopen(Request(url+'/api/mttr/import',data=shifted_body,headers={'Content-Type':'multipart/form-data; boundary='+boundary},method='POST'))
+            self.assertTrue(json.load(error.exception)['details']['requiresMapping'])
+            mapped_body=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="shift.csv"\r\n\r\n').encode()+shifted+(f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="mapping"\r\n\r\n').encode()+mapping_json+f'\r\n--{boundary}--\r\n'.encode()
+            with urlopen(Request(url+'/api/mttr/import',data=mapped_body,headers={'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')) as response:
+                mapped=json.load(response);self.assertEqual(mapped['columnMapping'],SHIFTED_MAPPING);self.assertEqual(mapped['totalTickets'],2)
+
 
             with self.assertRaises(HTTPError) as error:urlopen(Request(url+'/api/mttr',method='DELETE',headers={'Origin':'http://other.example'}))
             self.assertEqual(error.exception.code,403)

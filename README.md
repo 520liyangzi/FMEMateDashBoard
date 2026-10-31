@@ -4,7 +4,7 @@
 
 ## 快速启动
 
-1. 解压完整目录，保留 `dist/`、`server.py`、`ai_service.py` 和启动脚本的相对位置。
+1. 解压完整目录，保留 `dist/`、`server.py`、`ai_service.py`、`mttr_import.py` 和启动脚本的相对位置。
 2. 安装 **Python 3.10 或更高版本**。运行服务不需要 Node.js，也不需要安装 pip 依赖。
 3. Windows 双击 `start.bat`；macOS / Linux 在目录中执行 `bash start.sh`。也可以执行：
 
@@ -221,7 +221,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.8.1。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.8.2。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -259,28 +259,37 @@ Overview and User analytics always explain the user-count methodology. A logging
 Date filters apply to visit counts, visit days and photo totals independently of Scene. Click photos to view them in full. Excel includes visit text and photo counts; use offline HTML or Print / Save PDF to share photos. Offline HTML embeds the complete visit archive and images, remains read-only, and excludes real visits from demo exports. Local persistence and ZIP backups include visits/photos; old backups without visits remain compatible. Clearing application logs preserves site visits.
 
 
-### 成效统计 / Effectiveness (v1.8.1)
+### 成效统计 / Effectiveness (v1.8.2)
 
 “成效统计”集中展示 MTTR、窗口留存和周期复用。用户分析仍保留排行；概览保留简要留存。
 
 - 工单表：独立于用户日志导入，支持 `.xlsx`（第一个工作表）或 UTF-8 CSV，单次请求最大 128 MB。旧 `.xls` 请另存为 `.xlsx`。在服务端流式读取工作表，页面仅接收每日数量和总时长。
-- 固定列：B 为工单 ID（必填），从物理第 2 行开始；U 为 `Radio-OSP` / `Radio-ISP`，S（`tt_status_description`）为 `CLOSE`；匹配忽略大小写及首尾空白。F 为创建时间、J 为关闭时间。支持 `2026/10/2 6:40:38` 和 Excel 日期单元格。
-- 按 **关闭日期** 归属周期，处理时长 = J − F，包含夜间、周末及周期开始前的时间。总体 MTTR = 总时长 ÷ 工单数，不平均每日均值。无效时间和负时长剔除并显示数量，0 时长有效。
+- 列识别：第 1 行为表头，从物理第 2 行开始读取。按表头唯一匹配工单 ID、创建时间、关闭时间、状态、分类；无法可靠识别时页面展示五个下拉框，选择真实字段后重试。分类只取 `Radio-OSP` / `Radio-ISP`，状态只取 `CLOSE`，支持 `2026/10/2 6:40:38` 和 Excel 日期单元格。不会因为位置为 J 就把 `assign_date`（分派时间）当关闭时间，也不会把 `*_by`（操作人）当状态、分类或时间。
+- 按 **关闭日期** 归属周期，处理时长 = 所选关闭时间 − 所选创建时间，包含夜间、周末及周期开始前的时间。总体 MTTR = 总时长 ÷ 工单数，不平均每日均值。无效时间和负时长剔除并显示数量，0 时长有效。
 - 两个期间可分别选择，也可选择最近 3 天 vs 前 3 天、最近完整周 vs 前一周（以已导入的最新关闭日为锚点，周一至周日），或前后切换等长周期。
 - 减少率 =（基准期 MTTR − 对比期 MTTR）÷ 基准期 MTTR × 100%。例如 10 小时降至 8 小时，减少率 20%；上升至 12 小时则为 −20%。没有工单或基准均值为 0 时不计算减少率。
-- 支持一次选择多个文件，按顺序导入；以 B 列工单 ID 累积去重（去除首尾空白、区分大小写），同文件或重复上传均不重复计数，首次有效记录保留；B 为空的行剔除。无效或尚未 CLOSE 的记录不占用 ID。显示累计唯一工单数，以及最近文件新增、重复跳过及缺 ID 数量。解析失败或没有有效工单不会改变已有数据；批量导入中途失败时，之前成功的文件仍保留。
+- 支持一次选择多个文件，按顺序导入；以所选工单 ID 字段累积去重（去除首尾空白、区分大小写），同文件或重复上传均不重复计数，首次有效记录保留；ID 为空的行剔除。无效或尚未 CLOSE 的记录不占用 ID。显示累计唯一工单数，以及最近文件新增、重复跳过及缺 ID 数量。解析失败或没有有效工单不会改变已有数据；批量导入中途失败时，之前成功的文件仍保留。
 - MTTR 两期日期单独保存；页面顶部日期和 Scene 仅筛选日志留存/复用，不改变 MTTR。周期重叠或长度不同会提示。比较仅反映已导入的整体工单变化，不单独证明由 FMEMate 带来的因果提升。
 - Excel 包含 MTTR 对比及每日汇总；离线 HTML 保留汇总与日期设置、可再次调整期间；PDF 可打印当前页；AI 总结提示词包含这两期的均值、数量、减少率和口径。旧的每日总结文本不会自动改写。完整备份包含 MTTR 汇总及用于去重的最少工单记录（ID、创建/关闭时间、时长）；离线网页只携带汇总，不携带工单 ID。旧备份可正常恢复。
 
-The **Effectiveness** page combines MTTR, window retention and period repeat usage. Import a separate ticket workbook (`.xlsx`, first worksheet, or UTF-8 CSV; 128 MB request limit). It retains only column U = Radio-OSP/Radio-ISP and column S = CLOSE. Resolution time is column J minus column F using the original timestamps, grouped by **close date**. Overall MTTR is total elapsed time divided by valid ticket count, including nights and weekends. Invalid timestamps and negative durations are excluded; zero duration is valid.
+The **Effectiveness** page combines MTTR, window retention and period repeat usage. Import a separate ticket workbook (`.xlsx`, first worksheet, or UTF-8 CSV; 128 MB request limit). It identifies columns by unique header aliases or explicit user mapping. Only category = Radio-OSP/Radio-ISP and status = CLOSE qualify. Resolution time is the selected close timestamp minus the selected creation timestamp, grouped by **close date**. Overall MTTR is total elapsed time divided by valid ticket count, including nights and weekends. Invalid timestamps and negative durations are excluded; zero duration is valid.
 
-Select any two date periods, use the latest three-day/full-week shortcuts, or shift both periods. Reduction = (baseline mean − comparison mean) / baseline mean × 100%; positive means shorter, negative means longer. Missing samples or a zero baseline leave the percentage unavailable. Overlap and unequal lengths are flagged. Starting at physical row 2, imports accumulate by trimmed, case-sensitive B-column ticket ID and keep the first valid row across files/uploads. Missing IDs are excluded; invalid or not-yet-closed rows do not reserve an ID. Multiple files are processed sequentially, and completed files remain if a later file fails. A minimal ticket ledger (ID, creation/close timestamps and duration) persists for deduplication; only aggregates are sent to the browser and offline exports. Exports, offline reports, backups and AI prompts include the MTTR comparison. Overall changes alone do not establish a causal FMEMate benefit. Demo exports omit real MTTR aggregates.
+Select any two date periods, use the latest three-day/full-week shortcuts, or shift both periods. Reduction = (baseline mean − comparison mean) / baseline mean × 100%; positive means shorter, negative means longer. Missing samples or a zero baseline leave the percentage unavailable. Overlap and unequal lengths are flagged. Starting at physical row 2, imports accumulate by trimmed, case-sensitive ticket ID from the detected or selected ID column and keep the first valid row across files/uploads. Missing IDs are excluded; invalid or not-yet-closed rows do not reserve an ID. Multiple files are processed sequentially, and completed files remain if a later file fails. A minimal ticket ledger (ID, creation/close timestamps and duration) persists for deduplication; only aggregates are sent to the browser and offline exports. Exports, offline reports, backups and AI prompts include the MTTR comparison. Overall changes alone do not establish a causal FMEMate benefit. Demo exports omit real MTTR aggregates.
 
 
 #### 工单去重升级与导入诊断 / Ticket deduplication upgrade
 
 1.8.0 只保存了每日汇总，没有工单 ID，无法和新文件进行可靠去重。因此旧汇总会保留至新文件成功导入；首次升级导入将用该文件重建工单库，请先上传覆盖已有历史的完整文件，之后可继续追加其他 Excel。旧数据导入失败时保持不变。
 
-没有有效工单时，错误会显示当前工作表、从第 2 行读取的数量、U 分类匹配数、S 状态匹配数、联合匹配数、缺 ID、时间无效和负时长数量，并提供有限列值示例。请检查工作簿第一个工作表是否为工单明细，U/S/F/J/B 是否仍在约定位置。匹配兼容常见 Unicode 横线、全角字符及不间断空白；日期兼容秒可选及 Excel 数值时间，不改变分类/状态要求。
+没有有效工单时，错误会显示当前工作表、从第 2 行读取的数量、所选分类匹配数、状态匹配数、联合匹配数、缺 ID、时间无效和负时长数量，并提供有限列值示例。请检查工作簿第一个工作表是否为工单明细，五个字段是否正确对应；列顺序变化时按提示选择，不必在 Excel 内搬动列。匹配兼容常见 Unicode 横线及不间断空白；日期兼容秒可选及 Excel 数值时间，不改变分类/状态要求。
 
 Legacy 1.8.0 aggregates have no ticket IDs. The first successful new-format import rebuilds the ledger from that file; start with a complete historical export, then append other files. Failed imports preserve the legacy snapshot. Import diagnostics report worksheet/header values and filtering/date/ID counts so that column mismatches can be distinguished from timestamp errors.
+
+
+#### 不同列顺序 / Reordered exports (v1.8.2)
+
+若诊断显示 S=`jb_history_close_by`、U=`jb_history_depart_by`，这两列是人员信息，并非状态/分类；J=`jb_history_assign_date` 是分派时间，不是关闭时间。新版不再盲用原列号。表头清晰且唯一时自动识别；字段不明或存在多个候选时，保留待导入文件并显示字段选择卡片，可查看各列样例。选择五个不同的实际列后点“按所选列导入”，当前文件成功后会继续处理剩余文件。取消则停止后续文件，已成功文件保留。每个文件独立识别列，不把前一份文件的列号强行用于下一份。
+
+原 B/F/J/S/U 仅为规范角色代码（ID / 创建 / 关闭 / 状态 / 分类），`columnMapping` 保存实际列号，`headerColumns` 保存所选表头。页面、Excel、离线报表和 AI 提示词均显示实际映射；旧备份中缺少映射信息仍兼容。只有所有表头为空时才沿用原 B/F/J/S/U 默认位置。
+
+Reordered CSV/XLSX exports use exact, unique header aliases or manual column selection. Unknown or ambiguous fields pause the batch for explicit mapping; personnel and assignment fields are not treated as closure timestamps. Manual selections apply only to that file; later files resolve their own headers. Existing unique-ticket data remains unchanged until a fully validated import succeeds.

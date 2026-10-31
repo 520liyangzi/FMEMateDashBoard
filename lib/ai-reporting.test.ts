@@ -273,7 +273,7 @@ test('MTTR facts use independent weighted close-date periods and include no raw 
   assert.equal(mttr.dataQuality!.negativeDurations, 1);
   assert.equal(report.range.from, '2026-10-22', 'MTTR dates are independent of app dates');
   assert.ok(!JSON.stringify(report).includes('PRIVATE-TICKET-NAME'));
-  assert.match(mttr.definition, /J close date/);
+  assert.match(mttr.definition, /selected close date/);
   assert.match(mttr.limitations, /does not establish FMEMate causation/);
 });
 
@@ -305,7 +305,7 @@ test('MTTR v2 facts distinguish accumulated unique tickets from latest-file coun
   assert.equal(mttr.dataQuality!.addedRows, 2);
   assert.equal(mttr.dataQuality!.duplicateRows, 7);
   assert.equal(mttr.dataQuality!.missingIds, 1);
-  assert.equal(mttr.dataQuality!.deduplication, 'B-ticket-id-trimmed-case-sensitive-first-valid-wins');
+  assert.equal(mttr.dataQuality!.deduplication, 'selected-ticket-id-trimmed-case-sensitive-first-valid-wins');
   assert.match(mttr.dataQuality!.countsScope, /latest imported file only/);
   assert.match(mttr.limitations, /repeated valid IDs within or across files are skipped/);
   assert.ok(!mttr.limitations.includes('replaces the previous dataset'));
@@ -314,4 +314,24 @@ test('MTTR v2 facts distinguish accumulated unique tickets from latest-file coun
   assert.equal(old.dataQuality!.totalTickets, null, 'never infer unique totals from legacy row counts');
   assert.equal(old.dataQuality!.deduplication, 'legacy-unverified-reimport-required');
   assert.match(old.limitations, /Reimport the source Excel/);
+});
+
+test('MTTR facts preserve selected column mapping and bounded header labels without assuming fixed positions', () => {
+  const report = facts({ mttr: {
+    filename: 'private-source.csv', importedAt: '2026-10-31T09:00:00Z', formatVersion: 2,
+    totalTickets: 2, sourceRows: 2, matchedRows: 2, validRows: 2, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    earliestDate: '2026-10-22', latestDate: '2026-10-23',
+    columnMapping: { B: 'D', F: 'A', J: 'Q', S: 'L', U: 'C' },
+    headerColumns: { B: 'Ticket number', F: 'creation_date', J: 'actual_close_time', S: 'ticket_status', U: 'classification' + 'x'.repeat(500) },
+    days: [{ date: '2026-10-22', count: 1, totalSeconds: 3600 }, { date: '2026-10-23', count: 1, totalSeconds: 1800 }],
+  } });
+  const data = report.effectiveness.mttr;
+  assert.deepEqual(data.dataQuality!.columnMapping, { B: 'D', F: 'A', J: 'Q', S: 'L', U: 'C' });
+  assert.equal(data.dataQuality!.headerColumns!.J, 'actual_close_time');
+  assert.match(data.dataQuality!.headerColumns!.U, /\[truncated\]/);
+  assert.equal(report.evidence.truncatedStrings, 1);
+  assert.match(data.definition, /canonical role keys, not promises of physical file positions/);
+  assert.match(data.definition, /Do not substitute assign_date/);
+  const noMapping = facts().effectiveness.mttr;
+  assert.equal(noMapping.dataQuality, null);
 });

@@ -158,7 +158,7 @@ test('MTTR reporting requires explicit periods and counts without attributing wh
   assert.equal(data.effectiveness.mttr.status, 'no_dataset');
   assert.match(prompt, /MTTR 减少率=\(基准期 meanSeconds−对比期 meanSeconds\)÷基准期 meanSeconds×100%/);
   assert.match(prompt, /基准期和对比期的具体起止日期、各期有效关闭工单数/);
-  assert.match(prompt, /按 J 的关闭日期归属周期/);
+  assert.match(prompt, /按所选关闭日期归属周期/);
   assert.match(prompt, /禁止对每日均值取简单平均/);
   assert.match(prompt, /零耗时有效/);
   assert.match(prompt, /overlap=true 必须说明周期重叠/);
@@ -171,11 +171,20 @@ test('MTTR reporting requires explicit periods and counts without attributing wh
 
 test('MTTR prompt distinguishes incremental unique-ticket totals, latest import statistics and legacy data', () => {
   const prompt = buildAiReportPrompt(facts());
-  assert.match(prompt, /B 列工单 ID 去首尾空格后按区分大小写的值去重/);
+  assert.match(prompt, /所选工单 ID 去首尾空格后按区分大小写的值去重/);
   assert.match(prompt, /同文件及跨文件的相同 ID 只保留首条有效工单/);
   assert.match(prompt, /重复导入不增加工单数量/);
   assert.match(prompt, /累计去重工单总数只用 totalTickets/);
   assert.match(prompt, /最近一次导入文件的行数，不是累计工单数/);
   assert.match(prompt, /历史数据尚未验证 ID 去重、需要重新导入/);
   assert.ok(!prompt.includes('latest import replaces the previous dataset'));
+});
+
+test('MTTR prompt refers to mapped actual columns and never assumes assign_date is closure time', () => {
+  const prompt = buildAiReportPrompt(facts());
+  assert.match(prompt, /实际列取 columnMapping，表头取 headerColumns/);
+  assert.match(prompt, /不假定固定为 U\/S\/F\/J\/B 列/);
+  assert.match(prompt, /有歧义时由用户选择/);
+  assert.match(prompt, /不得擅自将 assign_date 或其他时间字段当成关闭时间/);
+  assert.match(prompt, /完整耗时=所选关闭时间−所选创建时间/);
 });

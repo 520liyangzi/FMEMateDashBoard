@@ -1,6 +1,9 @@
 /** Only filtered, valid, closed tickets are included in these daily aggregates. */
 export type MttrDay = { date: string; count: number; totalSeconds: number };
+export type MttrColumnMapping = {B:string;F:string;J:string;S:string;U:string};
 export type MttrDataset = {
+  /** Canonical roles (ID/create/close/status/category) mapped to actual workbook columns. */
+  columnMapping?: MttrColumnMapping;
   /** V2 counts refer to the latest file; days/totalTickets cover all unique saved ticket IDs. */
   formatVersion?: 2;
   totalTickets?: number;

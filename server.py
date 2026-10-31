@@ -26,7 +26,7 @@ from ai_service import AiError, AiService, make_prompt
 from mttr_import import stage_mttr, finish_dataset, aggregate_tickets, validate_dataset, MttrImportError
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.8.1'
+APP_VERSION = '1.8.2'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -190,10 +190,18 @@ class Store:
             return json.loads(row['data']) if row else None
 
     def import_mttr(self, fields):
-        if set(fields) != {'file'} or not fields['file'].get('filename'):
+        if 'file' not in fields or not set(fields)<={'file','mapping'} or not fields['file'].get('filename'):
             raise ApiError(400, 'Select one ticket export in the file field.')
+        mapping = None
+        if 'mapping' in fields:
+            try:
+                mapping = json.loads(fields['mapping'].get('value',''))
+            except (ValueError,TypeError):
+                raise ApiError(400, 'Column mapping must be a JSON object.')
+            if mapping is None:
+                raise ApiError(400, 'Column mapping must specify all five fields.')
         try:
-            with stage_mttr(fields['file']['data'], fields['file']['filename']) as (summary, staged):
+            with stage_mttr(fields['file']['data'], fields['file']['filename'],mapping) as (summary, staged):
                 with self.lock, self.connect() as db:
                     db.execute('ATTACH DATABASE ? AS incoming_mttr', (staged,))
                     existing = db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()

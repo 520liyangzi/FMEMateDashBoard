@@ -40,6 +40,90 @@ def category(value):
     return re.sub(r'\s*-\s*', '-', value).upper()
 
 
+ROLES = ('B','F','J','S','U')
+DEFAULT_MAPPING = {key:key for key in ROLES}
+HEADER_ALIASES = {
+    'B': {'tt_id','ticket_id','ticketid','ttid','tt_number','ticket_number'},
+    'F': {'tt_create_date','tt_created_date','tt_creation_date','tt_create_time','tt_created_time','tt_creation_time','tt_created_at','tt_create_datetime','ticket_create_date','ticket_created_date','ticket_created_at','created_time','created_at','create_date','created_date','creation_time','creation_date'},
+    'J': {'tt_close_date','tt_closed_date','tt_close_time','tt_closed_time','tt_closed_at','tt_close_datetime','ticket_close_date','ticket_closed_date','ticket_closed_at','closed_time','close_time','close_date','closed_date','closed_at'},
+    'S': {'tt_status_description','tt_status','ticket_status_description','ticket_status','status_description','status'},
+    'U': {'tt_domain','tt_domain_description','ticket_domain','domain','domain_name','domain_description','network_domain','tt_category','ticket_category','category','network_category'},
+}
+
+def header_key(value):
+    return re.sub(r'[^a-z0-9]+', '_', normalized(value).casefold()).strip('_')
+
+def column_index(value):
+    if not isinstance(value,str) or not re.fullmatch(r'[A-Z]{1,3}',value):
+        return None
+    number = 0
+    for letter in value:
+        number = number * 26 + ord(letter)-64
+    return number if number <= 16384 else None
+
+def column_name(number):
+    result = ''
+    while number:
+        number, digit = divmod(number-1,26)
+        result = chr(digit+65)+result
+    return result
+
+def valid_mapping(value, available=None):
+    return (isinstance(value,dict) and set(value)==set(ROLES)
+            and all(column_index(v) is not None for v in value.values())
+            and len(set(value.values()))==5
+            and (available is None or all(v in available for v in value.values())))
+
+def mapping_preview(headers, preview, suggestions, sheet_name, reason):
+    columns = set(headers)
+    for row in preview:
+        columns.update(key for key in row if key != '_row')
+    samples = {key: [] for key in columns}
+    hidden = {'B'} | {key for key,value in headers.items() if header_key(value) in HEADER_ALIASES['B']}
+    for row in preview:
+        for key in columns - hidden:
+            value = normalized(row.get(key,''))[:80]
+            if value and value not in samples[key] and len(samples[key]) < 3:
+                samples[key].append(value)
+    # Values can help a person select the category, but never auto-authorize an
+    # unknown column. A human must confirm the entire mapping in this case.
+    if 'U' not in suggestions:
+        candidates = [key for key,values in samples.items() if any(category(v) in ('RADIO-OSP','RADIO-ISP') for v in values)]
+        if len(candidates)==1:
+            suggestions = {**suggestions,'U':candidates[0]}
+    details = {'requiresMapping': True, 'sheetName': sheet_name, 'previewRows': len(preview),
+               'availableColumns': [{'column': key, 'header': normalized(headers.get(key,''))[:200], 'samples': samples[key]} for key in sorted(columns,key=lambda key:column_index(key) or 16385)],
+               'suggestedMapping': suggestions}
+    return MttrImportError('请确认工单字段映射 / Confirm ticket column mapping. '+reason+' 原数据未改变 / Existing data unchanged.', details)
+
+def prepare_mapping(rows, result, requested):
+    first = next(rows,None)
+    headers = {key:value for key,value in (first or {}).items() if key != '_row'} if first and first['_row']==1 else {}
+    initial = [] if not first or first['_row']==1 else [first]
+    candidates = {role:[key for key,value in headers.items() if header_key(value) in HEADER_ALIASES[role]] for role in ROLES}
+    suggested = {role:columns[0] for role,columns in candidates.items() if len(columns)==1}
+    nonblank = any(normalized(value) for value in headers.values())
+    automatic = suggested if nonblank else DEFAULT_MAPPING.copy()
+    if requested is None and valid_mapping(automatic):
+        return automatic, headers, initial
+    # A mapping failure previews no more than 20 data rows and never modifies
+    # either the temporary ticket ledger or the live database.
+    preview = list(initial)
+    while len(preview)<20:
+        row = next(rows,None)
+        if row is None:
+            break
+        preview.append(row)
+    available = set(headers)
+    for row in preview:
+        available.update(key for key in row if key != '_row')
+    if requested is not None and valid_mapping(requested,available):
+        return dict(requested), headers, preview
+    reason = ('Choose five distinct existing columns for ticket ID, creation time, closing time, status and category.'
+              if requested is not None else 'Headers are missing or ambiguous; job initiation/assignment times and operator fields are not ticket closing times.')
+    raise mapping_preview(headers,preview,suggested,result['sheetName'],reason)
+
+
 class SafeXML:
     def __init__(self, stream):
         self.stream, self.tail = stream, b''
@@ -175,6 +259,8 @@ def xlsx_rows(content):
                                 if ref is None:
                                     raise MttrImportError('An Excel cell has no valid column reference.')
                                 column = ref[1]
+                                if column_index(column) is None:
+                                    raise MttrImportError('Invalid Excel column reference.')
                                 raw = next((v.text or '' for v in cell if local(v.tag) == 'v'), '')
                                 kind = cell.attrib.get('t', '')
                                 if kind == 'inlineStr':
@@ -186,9 +272,8 @@ def xlsx_rows(content):
                                 if len(value) > MAX_TEXT:
                                     raise MttrImportError('An Excel cell is too long.')
                                 nonempty = nonempty or bool(value.strip())
-                                if column in ('B', 'F', 'J', 'S', 'U'):
-                                    # Excel errors must not be interpreted as normal values.
-                                    values[column] = '' if kind in ('e', 'b') else value
+                                # Read every source column for header mapping.
+                                values[column] = '' if kind in ('e', 'b') else value
                             # Preserve physical row 1 even when blank; never treat
                             # the first nonempty data row as a header.
                             if nonempty or row_number == 1:
@@ -209,10 +294,12 @@ def csv_rows(content):
     for index, row in enumerate(csv.reader(stream)):
         if index >= MAX_ROWS:
             raise MttrImportError('The CSV has more than 2,000,000 rows.')
+        if len(row)>16384:
+            raise MttrImportError('The CSV has more columns than Excel supports.')
         if any(len(v) > MAX_TEXT for v in row):
             raise MttrImportError('A CSV cell is too long.')
         if index == 0 or any(v.strip() for v in row):
-            yield {'_row': index + 1, **{key: row[col] if col < len(row) else '' for key, col in (('B', 1), ('F', 5), ('J', 9), ('S', 18), ('U', 20))}}
+            yield {'_row': index + 1, **{column_name(col+1):value for col,value in enumerate(row)}}
 
 def aggregate_tickets(db, table='tickets'):
     return [{'date': r[0], 'count': r[1], 'totalSeconds': r[2]} for r in db.execute(
@@ -227,14 +314,15 @@ def finish_dataset(result, days, added):
 def no_valid_error(result, examples):
     details = {k: result[k] for k in ('sourceRows', 'matchedRows', 'validRows', 'missingIds', 'invalidDates', 'negativeDurations', 'excludedRows', 'headerColumns', 'diagnostics', 'sheetName')}
     details['examples'] = examples
-    headers = '; '.join(f'{k}={v or "(blank)"}' for k,v in result['headerColumns'].items())
+    details['columnMapping'] = result.get('columnMapping',DEFAULT_MAPPING)
+    headers = '; '.join(f'{k}→{result.get("columnMapping",DEFAULT_MAPPING)[k]}={v or "(blank)"}' for k,v in result['headerColumns'].items())
     observed = '; '.join(f'{k}={json.dumps(v,ensure_ascii=False)}' for k,v in examples.items())
     message = (f'没有可导入工单 / No valid tickets. 工作表 / Sheet: {result["sheetName"]}; '
                f'从第2行读取 / Start row 2; 数据 / Rows {result["sourceRows"]}; '
-               f'U分类匹配 / Category {result["diagnostics"]["categoryMatches"]}; '
-               f'S状态CLOSE / Status {result["diagnostics"]["statusMatches"]}; '
+               f'分类匹配 / Category {result["diagnostics"]["categoryMatches"]}; '
+               f'状态CLOSE / Status {result["diagnostics"]["statusMatches"]}; '
                f'同时匹配 / Both {result["matchedRows"]}; '
-               f'缺少B列ID / Missing IDs {result["missingIds"]}; '
+               f'缺少工单ID / Missing ticket IDs {result["missingIds"]}; '
                f'日期无效 / Invalid dates {result["invalidDates"]}; '
                f'负时长 / Negative durations {result["negativeDurations"]}. '
                f'第1行表头 / Headers: {headers}. 示例 / Examples: {observed}. '
@@ -242,7 +330,7 @@ def no_valid_error(result, examples):
     return MttrImportError(message, details)
 
 @contextmanager
-def stage_mttr(content, filename):
+def stage_mttr(content, filename, mapping=None):
     filename = str(filename or '').replace('\\', '/').rsplit('/', 1)[-1][:255]
     suffix = PurePosixPath(filename).suffix.lower()
     if suffix not in ('.xlsx', '.csv'):
@@ -262,10 +350,15 @@ def stage_mttr(content, filename):
             try:
                 metadata = next(rows)
                 result['sheetName'] = metadata['sheetName']
-                for row in rows:
-                    if row['_row'] == 1:
-                        result['headerColumns'] = {k: normalized(row.get(k,''))[:200] for k in ('B','F','J','S','U')}
+                chosen, headers, preview = prepare_mapping(rows,result,mapping)
+                result['columnMapping'] = chosen
+                result['headerColumns'] = {role: normalized(headers.get(column,''))[:200] for role,column in chosen.items()}
+                # The preview is bounded; all remaining rows stream from the file.
+                from itertools import chain
+                for source in chain(preview,rows):
+                    if source['_row'] == 1:
                         continue
+                    row = {role:source.get(column,'') for role,column in chosen.items()}
                     result['sourceRows'] += 1
                     for key in examples:
                         value = normalized(row.get(key,''))[:100]
@@ -308,9 +401,9 @@ def stage_mttr(content, filename):
             db.close()
         yield result, path
 
-def import_mttr(content, filename):
+def import_mttr(content, filename, mapping=None):
     """Standalone preview, deduplicated within this file. Store performs the merge."""
-    with stage_mttr(content, filename) as (result, path):
+    with stage_mttr(content, filename, mapping) as (result, path):
         with closing(sqlite3.connect(path)) as db:
             days = aggregate_tickets(db)
         return finish_dataset(result, days, sum(d['count'] for d in days))
@@ -318,7 +411,7 @@ def import_mttr(content, filename):
 def validate_dataset(value):
     """Validate compact aggregates when restoring an untrusted backup."""
     v2 = isinstance(value, dict) and value.get('formatVersion') == 2
-    if not isinstance(value, dict) or set(value) != (V2_FIELDS if v2 else set(LEGACY_FIELDS)):
+    if not isinstance(value, dict) or (set(value)-({'columnMapping'} if v2 else set())) != (V2_FIELDS if v2 else set(LEGACY_FIELDS)):
         raise MttrImportError('Invalid MTTR dataset fields.')
     for key, limit in (('filename', 255), ('sheetName', 200), ('importedAt', 100)):
         if not isinstance(value[key], str) or not value[key] or len(value[key]) > limit:
@@ -333,6 +426,8 @@ def validate_dataset(value):
     if value['sourceRows'] != value['matchedRows'] + value['excludedRows'] or value['matchedRows'] != value['validRows'] + value['invalidDates'] + value['negativeDurations'] + (value['missingIds'] if v2 else 0):
         raise MttrImportError('Inconsistent MTTR row counts.')
     if v2:
+        if 'columnMapping' in value and not valid_mapping(value['columnMapping']):
+            raise MttrImportError('Invalid MTTR column mapping.')
         for key in ('totalTickets','addedRows','duplicateRows','missingIds'):
             if type(value[key]) is not int or value[key] < 0 or value[key] > 9007199254740991:
                 raise MttrImportError('Invalid MTTR deduplication counts.')

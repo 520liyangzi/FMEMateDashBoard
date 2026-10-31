@@ -10,7 +10,7 @@ import FailureReason from './FailureReason';
 import PrintTrendChart from './PrintTrendChart';
 import RetentionPanel from './RetentionPanel';
 import MttrPanel from './MttrPanel';
-import {compareMttr,previousMttrPeriod,isValidMttrPeriod,type MttrDataset,type MttrPeriod} from '../lib/mttr';
+import {compareMttr,previousMttrPeriod,isValidMttrPeriod,type MttrDataset,type MttrPeriod,type MttrColumnMapping} from '../lib/mttr';
 import RepeatUsagePanel, {RepeatUsageThreshold} from './RepeatUsagePanel';
 import {analyzeRetention,analyzeRepeatUsage,normalizeRepeatDays,normalizeRepeatMode,normalizeRetentionDays} from '../lib/retention';
 import AiReportTab from './AiReportTab';
@@ -67,17 +67,18 @@ function App(){
  const retention=useMemo(()=>analyzeRetention(source,from,to,scene,retentionDays),[source,from,to,scene,retentionDays]);
  const repeatUsage=useMemo(()=>analyzeRepeatUsage(source,from,to,scene,minimumActiveDays,repeatMode),[source,from,to,scene,minimumActiveDays,repeatMode]);
  const aiFacts=useMemo(()=>tab==='ai'?buildAiFacts({records:source,presets:state.presets,groups:demo?demoGroups:state.groups,feedback:demo?[]:state.feedback,failureNotes:demo?{}:state.failureNotes,from,to,scene,demo,minimumActiveDays,retentionDays,repeatMode,mttr:demo?null:mttr,mttrBaseline,mttrCurrent}):null,[tab,source,state.presets,state.groups,state.feedback,state.failureNotes,from,to,scene,demo,minimumActiveDays,retentionDays,repeatMode,mttr,mttrBaseline,mttrCurrent]);
- async function importMttr(file:File){const body=new FormData();body.append('file',file);const data:MttrDataset=await api('/api/mttr/import',{method:'POST',body});setMttr(data);setDemo(false);if(!isValidMttrPeriod(mttrCurrent)||!isValidMttrPeriod(mttrBaseline)){const p=defaultMttrPeriods(data.latestDate);setMttrCurrent(p.current);setMttrBaseline(p.baseline)}notify(t('工单数据已保存，MTTR 统计已更新。','Ticket dataset saved. MTTR statistics updated.'))}
+ async function importMttr(file:File,mapping?:MttrColumnMapping){const body=new FormData();body.append('file',file);if(mapping)body.append('mapping',JSON.stringify(mapping));const data:MttrDataset=await api('/api/mttr/import',{method:'POST',body});setMttr(data);setDemo(false);if(!isValidMttrPeriod(mttrCurrent)||!isValidMttrPeriod(mttrBaseline)){const p=defaultMttrPeriods(data.latestDate);setMttrCurrent(p.current);setMttrBaseline(p.baseline)}notify(t('工单数据已保存，MTTR 统计已更新。','Ticket dataset saved. MTTR statistics updated.'))}
  async function clearMttr(){await api('/api/mttr',{method:'DELETE'});setMttr(null);notify(t('工单汇总数据已清除','Ticket aggregates cleared'))}
  function mttrRows(){const c=compareMttr(demo?null:mttr,mttrBaseline,mttrCurrent);return [
  {[t('指标','Metric')]:'MTTR', [t('周期','Period')]:t('基准期','Baseline'),From:c.baseline.from,To:c.baseline.to,[t('工单数','Closed tickets')]:c.baseline.count,[t('平均时长（小时）','Mean hours')]:c.baseline.meanSeconds===null?'':c.baseline.meanSeconds/3600},
  {[t('指标','Metric')]:'MTTR', [t('周期','Period')]:t('对比期','Comparison'),From:c.current.from,To:c.current.to,[t('工单数','Closed tickets')]:c.current.count,[t('平均时长（小时）','Mean hours')]:c.current.meanSeconds===null?'':c.current.meanSeconds/3600},
  {[t('指标','Metric')]:t('MTTR 减少率 (%)','MTTR reduction (%)'),[t('数值','Value')]:c.reductionRate===null?'':c.reductionRate,[t('数据状态','Data status')]:c.status},
  {[t('指标','Metric')]:t('每单平均减少时长（小时）','Mean reduction per ticket (hours)'),[t('数值','Value')]:c.savedSeconds===null?'':c.savedSeconds/3600},
- {[t('指标','Metric')]:t('口径','Methodology'),[t('数值','Value')]:t('U=Radio-OSP/Radio-ISP，S=CLOSE；按关闭日期分组，平均 J−F（自然经过时长），(基准均值−对比均值)/基准均值；整体工单变化，不证明项目因果成效。','U=Radio-OSP/Radio-ISP, S=CLOSE; grouped by close date, mean elapsed J−F; (baseline mean−comparison mean)/baseline mean. Overall ticket changes do not establish project causation.')},
+ {[t('指标','Metric')]:t('口径','Methodology'),[t('数值','Value')]:t('分类=Radio-OSP/Radio-ISP，状态=CLOSE；以表头识别或手动选择的列计算，按关闭日期分组，平均关闭−创建（自然经过时长）；整体工单变化，不证明项目因果成效。','Category=Radio-OSP/Radio-ISP, status=CLOSE; use detected or manually selected columns, grouped by close date, mean elapsed close−creation. Overall ticket changes do not establish project causation.')},
+ {[t('指标','Metric')]:t('工单列映射','Ticket column mapping'),[t('数值','Value')]:!demo&&mttr?.columnMapping?Object.entries(mttr.columnMapping).map(([role,col])=>`${role}→${col} (${mttr.headerColumns?.[role]||''})`).join('; '):''},
  {[t('指标','Metric')]:t('累计唯一工单','Accumulated unique tickets'),[t('数值','Value')]:!demo&&mttr?.formatVersion===2?mttr.totalTickets:''},
  {[t('指标','Metric')]:t('最近文件新增 / 重复跳过 / 缺少ID','Latest file added / duplicates / missing IDs'),[t('数值','Value')]:!demo&&mttr?.formatVersion===2?`${mttr.addedRows} / ${mttr.duplicateRows} / ${mttr.missingIds}`:''},
- {[t('指标','Metric')]:t('工单去重规则','Ticket deduplication'),[t('数值','Value')]:t('从第2行开始，按B列工单ID（去除首尾空白，区分大小写）累积去重；第一次有效记录保留。旧版无ID汇总需重新导入后重建。','Read from physical row 2; accumulate distinct trimmed, case-sensitive B-column ticket IDs, keeping the first valid record. Legacy aggregates need a reimport to rebuild the ID ledger.')},
+ {[t('指标','Metric')]:t('工单去重规则','Ticket deduplication'),[t('数值','Value')]:t('从第2行开始，按识别或选择的工单ID列累积去重（去除首尾空白，区分大小写）；首次有效记录保留。旧版无ID汇总需重建。','Read from physical row 2; accumulate distinct trimmed, case-sensitive IDs from the detected or selected ticket ID column, keeping the first valid record. Legacy aggregates need a reimport to rebuild the ledger.')},
  {[t('指标','Metric')]:t('周期提示','Period warnings'),[t('数值','Value')]:[c.overlap?t('周期重叠','Overlapping periods'):'',c.unequalDays?t('周期长度不同','Unequal period lengths'):'',t('导入完整性未确认','Import completeness unconfirmed')].filter(Boolean).join('; ')}]}
  const repeatDaysZh=repeatMode==='consecutive'?`连续 ${minimumActiveDays} 个自然日`:`任意 ${minimumActiveDays} 个不同日期`;
  const repeatDaysEn=repeatMode==='consecutive'?`${minimumActiveDays} consecutive calendar days`:`${minimumActiveDays} distinct dates`;
