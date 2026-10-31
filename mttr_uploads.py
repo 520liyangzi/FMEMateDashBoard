@@ -154,8 +154,10 @@ class MttrUploads:
             return {'received':received+len(content),'total':size}
 
     def finish(self,upload_id,payload,importer):
-        if not isinstance(payload,dict) or not set(payload)<={'ttMapping','jobMapping'}:
+        if not isinstance(payload,dict) or not set(payload)<={'ttMapping','jobMapping','updateExistingJobs'}:
             raise MttrUploadError(400,'导入映射字段无效 / Invalid import mapping fields.')
+        if 'updateExistingJobs' in payload and type(payload['updateExistingJobs']) is not bool:
+            raise MttrUploadError(400,'updateExistingJobs must be a JSON boolean.')
         with self._session(upload_id) as session:
             fields={}
             for source in ('tt','job'):

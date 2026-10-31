@@ -5,7 +5,7 @@ export type MttrColumnMapping = {B:string;F:string;J:string;S:string;U:string};
 export type MttrTtMapping = { ttId: string; category: string };
 export type MttrJobMapping = { jobId: string; ttId: string; created: string; finished: string; assignee: string; status: string };
 /** A caller may supply one mapping while retaining defaults for the other source. */
-export type MttrPairMappings = { tt?: MttrTtMapping; job?: MttrJobMapping };
+export type MttrPairMappings = { tt?: MttrTtMapping; job?: MttrJobMapping; updateExistingJobs?: boolean };
 export type MttrSourceInfo = {
   filename: string; sheetName: string; importedAt: string; sourceRows: number;
 };
@@ -23,6 +23,8 @@ export type MttrDataset = {
   formatVersion?: 2 | 3;
   /** V3 durations/counts are FINISHED Jobs joined to the filtered TT ID set. */
   totalJobs?: number;
+  updatedJobs?: number;
+  duplicatePolicy?: 'keep'|'update';
   storedJobs?: number;
   storedTtIds?: number;
   personDays?: MttrPersonDay[];

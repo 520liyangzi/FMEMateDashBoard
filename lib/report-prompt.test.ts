@@ -173,7 +173,7 @@ test('MTTR prompt distinguishes joined unique Jobs, TT catalog counts and legacy
   const prompt = buildAiReportPrompt(facts());
   assert.match(prompt, /先筛 TT 的分类为 Radio-OSP 或 Radio-ISP，不过滤 TT 状态/);
   assert.match(prompt, /仅取 JOB 状态 Done 或 Close/);
-  assert.match(prompt, /重复上传不增加相同 JOB 数量/);
+  assert.match(prompt, /重复上传不增加相同 JOB 的唯一数量/);
   assert.match(prompt, /totalJobs 是当前有效关联唯一 JOB 总数/);
   assert.match(prompt, /totalTickets 只是与 totalJobs 相等的兼容别名，不是 TT 数/);
   assert.match(prompt, /formatVersion 不是 3 时属于旧单表口径/);

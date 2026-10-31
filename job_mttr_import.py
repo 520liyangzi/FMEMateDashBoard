@@ -206,7 +206,14 @@ def validate_v3(value):
     if total>value['storedJobs']:
         raise MttrImportError('Matched Job count exceeds stored history.')
     if type(value['totalJobs']) is not int or type(value['totalTickets']) is not int or value['totalJobs']!=total or value['totalTickets']!=total or sum(d['count'] for d in value['personDays'])!=total:raise MttrImportError('Inconsistent job totals.')
+    if 'duplicatePolicy' in value and value['duplicatePolicy'] not in ('keep','update'):
+        raise MttrImportError('Invalid duplicate Job policy.')
+    if 'updatedJobs' in value:
+        if type(value['updatedJobs']) is not int or not 0<=value['updatedJobs']<=min(value['storedJobs'],job['duplicates']) or (value['updatedJobs']>0 and value.get('duplicatePolicy')!='update'):
+            raise MttrImportError('Invalid updated Job count.')
     summary={k:value[k] for k in ('sources','mappings','sourceHeaders','importedAt','storedJobs','storedTtIds')}
+    summary.update({k:value[k] for k in ('updatedJobs','duplicatePolicy') if k in value})
+
     rebuilt=finish_pair(summary,value['days'],value['personDays'])
     if set(rebuilt)!=set(value) or any(value[k]!=v for k,v in rebuilt.items()):raise MttrImportError('Inconsistent TT/Job summary.')
     return value

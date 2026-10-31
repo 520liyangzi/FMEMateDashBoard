@@ -28,7 +28,7 @@ from job_mttr_import import stage_pair, joined_aggregates, finish_pair, validate
 from mttr_uploads import MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.9.1'
+APP_VERSION = '1.9.2'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -195,6 +195,47 @@ class Store:
             row = db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()
             return json.loads(row['data']) if row else None
 
+    @staticmethod
+    def require_job_mttr(db):
+        row=db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()
+        dataset=json.loads(row['data']) if row else None
+        if not dataset or dataset.get('formatVersion')!=3:
+            raise ApiError(409,'需要 TT + Job 数据 / Import TT + Job data before auditing stored Job timestamps.')
+        return dataset
+
+    def get_mttr_jobs(self, date_from, date_to, assignee=None, offset=0, limit=100):
+        require_date(date_from);require_date(date_to)
+        if date_from>date_to:raise ApiError(400,'开始日期不能晚于结束日期 / Start date must not be after end date.')
+        if type(offset) is not int or not 0<=offset<=9007199254740991 or type(limit) is not int or not 1<=limit<=1000:
+            raise ApiError(400,'分页参数无效 / Offset must be nonnegative and limit must be between 1 and 1000.')
+        if assignee is not None and (not isinstance(assignee,str) or len(assignee)>1000):
+            raise ApiError(400,'Invalid assignee filter.')
+        where=f'FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO} AND substr(j.finishedAt,1,10)>=? AND substr(j.finishedAt,1,10)<=?'
+        values=[date_from,date_to]
+        if assignee is not None:
+            where+=' AND j.assignee=?';values.append(assignee)
+        with self.lock,self.connect() as db:
+            self.require_job_mttr(db)
+            total=db.execute('SELECT count(*) '+where,values).fetchone()[0]
+            records=[dict(row) for row in db.execute('SELECT j.jobId,j.ttId,j.assignee,j.status,j.createdAt,j.finishedAt,j.durationSeconds '+where+' ORDER BY j.finishedAt,j.jobId LIMIT ? OFFSET ?',values+[limit,offset])]
+        return {'total':total,'offset':offset,'limit':limit,'records':records}
+
+    def get_mttr_date_audit(self):
+        with self.lock,self.connect() as db:
+            dataset=self.require_job_mttr(db)
+            join=f'FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO}'
+            bounds=db.execute('SELECT count(*),min(j.createdAt),max(j.createdAt),min(j.finishedAt),max(j.finishedAt) '+join).fetchone()
+            daily=[{'date':row[0],'count':row[1],'totalSeconds':row[2]} for row in db.execute('SELECT substr(j.finishedAt,1,10),count(*),sum(j.durationSeconds) '+join+' GROUP BY substr(j.finishedAt,1,10) ORDER BY 1')]
+            stored=db.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]
+        return {'storedJobs':stored,'matchedJobs':bounds[0],
+                'earliestCreatedAt':bounds[1],'latestCreatedAt':bounds[2],
+                'earliestFinishedAt':bounds[3],'latestFinishedAt':bounds[4],
+                'daily':daily,'scope':'Radio-OSP/Radio-ISP joined Jobs; bounds and daily totals use matched Jobs.',
+                'latestMappings':{'mappings':dataset['mappings'],'sourceHeaders':dataset['sourceHeaders'],'importedAt':dataset['importedAt'],'filenames':{source:dataset['sources'][source]['filename'] for source in ('tt','job')}},
+                'warning':(('最近一次导入明确更新了重复 Job，修改数量：'+str(dataset.get('updatedJobs',0))+'。 / Latest import explicitly updated existing Job IDs; changed records: '+str(dataset.get('updatedJobs',0))+'. ')
+                           if dataset.get('duplicatePolicy')=='update' else '默认保留已有记录，重复 Job ID 保留首条有效记录；此前明确确认的更新不会撤销。 / Existing records are retained by default: the first valid record is kept unless an earlier explicit update was confirmed. ')
+                          +'累计历史的字段映射可能不同于最新一次上传。这里展示解析后存储的时间，未保留原始 Excel 单元格文本。 / Latest upload mappings do not describe every historical row. These are parsed stored timestamps; original Excel cell text is not retained.'}
+
     def import_mttr(self, fields):
         if 'file' not in fields or not set(fields)<={'file','mapping'} or not fields['file'].get('filename'):
             raise ApiError(400, 'Select one ticket export in the file field.')
@@ -227,8 +268,12 @@ class Store:
             raise ApiError(400, str(exc), exc.details)
 
     def import_mttr_pair(self, fields):
-        if not {'ttFile','jobFile'}<=set(fields) or not set(fields)<={'ttFile','jobFile','ttMapping','jobMapping'} or any(not fields[k].get('filename') for k in ('ttFile','jobFile')):
+        if not {'ttFile','jobFile'}<=set(fields) or not set(fields)<={'ttFile','jobFile','ttMapping','jobMapping','updateExistingJobs'} or any(not fields[k].get('filename') for k in ('ttFile','jobFile')):
             raise ApiError(400, 'Select both TT and Job export files.')
+        repair_value=fields.get('updateExistingJobs',{}).get('value','false')
+        if repair_value not in ('true','false'):
+            raise ApiError(400,'更新已有 Job 标记无效 / updateExistingJobs must be true or false.')
+        update_existing=repair_value=='true'
         mappings={}
         for key in ('ttMapping','jobMapping'):
             if key in fields:
@@ -244,8 +289,15 @@ class Store:
                     if existing and json.loads(existing['data']).get('formatVersion')!=3:
                         db.execute('DELETE FROM mttr_tt');db.execute('DELETE FROM mttr_jobs')
                     db.execute('INSERT INTO mttr_tt(ttId,category) SELECT ttId,category FROM incoming_jobs.tt WHERE 1 ON CONFLICT(ttId) DO UPDATE SET category=excluded.category')
-                    db.execute('INSERT OR IGNORE INTO mttr_jobs SELECT jobId,ttId,createdAt,finishedAt,assignee,status,durationSeconds FROM incoming_jobs.jobs')
-                    added=db.execute('SELECT changes()').fetchone()[0]
+                    added=db.execute('SELECT count(*) FROM incoming_jobs.jobs n LEFT JOIN mttr_jobs e ON n.jobId=e.jobId WHERE e.jobId IS NULL').fetchone()[0]
+                    changed=0
+                    if update_existing:
+                        changed=db.execute('SELECT count(*) FROM incoming_jobs.jobs n JOIN mttr_jobs e ON n.jobId=e.jobId WHERE e.ttId IS NOT n.ttId OR e.createdAt IS NOT n.createdAt OR e.finishedAt IS NOT n.finishedAt OR e.assignee IS NOT n.assignee OR e.status IS NOT n.status OR e.durationSeconds IS NOT n.durationSeconds').fetchone()[0]
+                        db.execute('INSERT INTO mttr_jobs SELECT jobId,ttId,createdAt,finishedAt,assignee,status,durationSeconds FROM incoming_jobs.jobs WHERE 1 ON CONFLICT(jobId) DO UPDATE SET ttId=excluded.ttId,createdAt=excluded.createdAt,finishedAt=excluded.finishedAt,assignee=excluded.assignee,status=excluded.status,durationSeconds=excluded.durationSeconds')
+                    else:
+                        db.execute('INSERT OR IGNORE INTO mttr_jobs SELECT jobId,ttId,createdAt,finishedAt,assignee,status,durationSeconds FROM incoming_jobs.jobs')
+                    summary['updatedJobs']=changed
+                    summary['duplicatePolicy']='update' if update_existing else 'keep'
                     if not db.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]:
                         raise MttrImportError('没有有效的 Done/Close Job / No valid Done/Close jobs are available. Existing data unchanged.',{'source':'job','sources':summary['sources']})
                     summary['sources']['job']['addedRows']=added
@@ -922,6 +974,16 @@ class Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             path = unquote(url.path)
             params = parse_qs(url.query)
+            if path == '/api/mttr/jobs':
+                audit_params=parse_qs(url.query,keep_blank_values=True)
+                if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit'} or any(len(values)!=1 for values in audit_params.values()):
+                    raise ApiError(400,'请指定唯一的开始和结束日期 / Specify one from and to date, with optional assignee, offset and limit.')
+                try:
+                    offset=int(audit_params.get('offset',['0'])[0]);limit=int(audit_params.get('limit',['100'])[0])
+                except ValueError:raise ApiError(400,'Invalid Job audit pagination.')
+                return self.json(self.server.store.get_mttr_jobs(audit_params['from'][0],audit_params['to'][0],audit_params.get('assignee',[None])[0],offset,limit))
+            if path == '/api/mttr/date-audit':
+                return self.json(self.server.store.get_mttr_date_audit())
             if path == '/api/mttr':
                 return self.json(self.server.store.get_mttr())
             if path == '/api/state':

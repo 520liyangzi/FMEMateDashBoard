@@ -221,7 +221,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.1。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.2。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -278,16 +278,16 @@ Date filters apply to visit counts, visit days and photo totals independently of
 
 - **处理时长 = jb_finish_date − jb_create_date**，按完成日期归属所选期间，包含夜间、周末及周期开始前的完整自然经过时间，不转换时区。整体 MTTR = Job 总处理时长 ÷ Job 数；不平均每天均值、个人均值或个人减少率。
 - TT 分类先筛为 Radio-OSP / Radio-ISP，再以去重后的 tt_id 匹配 Job，TT 重复行不会放大 Job 数量。同一 TT 下多个不同 Job 分别统计。TT 表同文件重复 ID 中，只要有一行符合分类，该 ID 即符合条件；后续文件对该 TT 的分类更新会重新筛选所有已保存 Job。
-- 按 `jb_id` 在文件内及历史上传中去重，保留第一次通过状态、ID、时间校验的记录；Done、Close 以外、缺 ID、无效或负时长的记录不占用有效 Job ID，0 时长有效。处理人为空的 Job 计入整体，并单列“未分配”。
+- 按 `jb_id` 在文件内及历史上传中去重，默认保留第一次通过状态、ID、时间校验的记录；显式勾选“按本次文件更新”后，可用本次有效记录修正已保存 Job，数量仍按唯一 ID 统计；Done、Close 以外、缺 ID、无效或负时长的记录不占用有效 Job ID，0 时长有效。处理人为空的 Job 计入整体，并单列“未分配”。
 - 有效但暂未匹配 TT 的 Job 会保存，供后续 TT 数据补充后重新关联。当前匹配结果可为 0：显示无可计算样本，不显示 0% 或虚构提升。结构或字段错误会回滚，两份表一起成功或保持原状；没有任何有效 Job 且没有历史 Job 时拒绝导入并给出诊断。
-- 两期日期独立选择，支持最近 3 天、完整周及等长周期前后切换。**减少率 =（基准期均值 − 对比期均值）÷ 基准期均值 × 100%**；正数表示缩短，负数表示变慢。例如 10h→6h 为 40%。没有样本或基准为 0 时百分比不可用。
+- 两期日期默认使用电脑本地当天：最近 7 天（含今天）与前 7 天，支持独立手动选择、最近数据的 3 天/完整周及等长周期前后切换。**减少率 =（基准期均值 − 对比期均值）÷ 基准期均值 × 100%**；正数表示缩短，负数表示变慢。例如 10h→6h 为 40%。没有样本或基准为 0 时百分比不可用。
 - “处理人”可选整体、任一 `jb_assign_to` 或未分配；人员排行始终比较所有人员在相同两期的结果，按减少率从高到低排序。两期均至少 1 个有效 Job、基准均值大于 0、姓名非空才编号；并列共享名次。仅一期有数据、基准为 0 和未分配置后，显示两期数量及均值。请结合样本数解读。
 - 页面、Excel（MTTR 成效、每日汇总、人员排行）、打印、离线 HTML 和 AI 总结采用同一口径；导出会保留整体以及当前选中人员的对比、两期日期和人员选择。日志日期/Scene 筛选不改变 MTTR。整体工单变化本身不证明由 FMEMate 带来的因果提升。
 - 完整备份包含 TT 分类目录、最少 Job 记录及汇总，旧备份仍可恢复。新口径首次成功导入后旧单表导入接口不再覆盖 Job 数据。清除 MTTR 会清除 TT/Job 记录，不影响 App 用户日志；旧每日总结文本不会自动改写。
 
 The **Effectiveness** page combines Job MTTR, window retention and repeat usage. Select two files: **TT** and **Job**. TT provides eligible `tt_id` values from Radio-OSP/Radio-ISP categories, without a TT status filter. Jobs must match those TT IDs and have `jb_status` Done or Close. Duration is **jb_finish_date − jb_create_date**, grouped by the Job finish date. Defaults are Job B (tt_id), G (created), I (finished), AG (assignee), AR (status), with `jb_id` identified by its header. Headers can resolve reordered exports; ambiguous fields require explicit mapping. Both tables start at physical row 2.
 
-Jobs deduplicate by `jb_id`, so multiple distinct Jobs under one TT remain separate. First valid Job records are retained across imports. Unmatched valid Jobs persist for later TT joins. TT classification updates recalculate the current join; an empty result remains unavailable rather than an invented improvement. Paired imports are atomic and preserve previous data on structural errors.
+Jobs deduplicate by `jb_id`, so multiple distinct Jobs under one TT remain separate. First valid Job records are retained across imports by default; explicitly selecting Update existing Jobs applies the current file’s valid records without increasing the unique-ID count. Unmatched valid Jobs persist for later TT joins. TT classification updates recalculate the current join; an empty result remains unavailable rather than an invented improvement. Paired imports are atomic and preserve previous data on structural errors.
 
 Choose any baseline/comparison periods, then view overall or one assignee. Overall MTTR is total eligible Job duration divided by Job count. Reduction is (baseline mean − comparison mean) / baseline mean × 100%; positive means shorter. Individual ranks use the same periods, require samples in both and a positive baseline, and sort highest percentage first. Unassigned Jobs count in the overall mean but never rank as a person. Counts and both means accompany every result. Missing periods and zero baselines remain unavailable. The comparison alone does not establish FMEMate causation.
 
@@ -311,3 +311,31 @@ python server.py --mttr-max-file-mb 2048
 ```
 
 The web app stages each source using 4 MiB binary chunks, then parses disk-backed CSV/XLSX sources with bounded memory. The default per-file upload cap is 1 GiB and can be changed with `--mttr-max-file-mb`. Existing report data changes only after the paired import validates and commits. Mapping retries reuse uploaded files. Upload cancellation is available before server-side parsing begins; once parsing starts, wait for its atomic result. Successful uploads clean up staging, and expired sessions are removed on startup or new uploads. Staged source files are excluded from backups and offline exports.
+
+
+### 搜索统计对象 / Search assignees (v1.9.2)
+
+成效统计的“统计对象”支持输入姓名片段查找处理人，中英文界面均可使用，忽略大小写及搜索词首尾空白。“整体”和已有的“未分配”选项保留。输入搜索词只过滤选项，选择姓名后才改变个人 MTTR；没有匹配结果时不会自动改为其他人员。支持键盘方向键、Enter 选择和 Escape 关闭。当前选中人员沿用已有保存、Excel 和离线网页逻辑，搜索词仅用于当前页面查找。
+
+The Scope picker supports partial-name search, ignoring case and surrounding query whitespace. Overall and existing Unassigned choices remain available. Typing only filters options; a click or Enter confirms a selection. No results never changes the current scope. Arrow keys navigate, Escape closes, and the selected assignee continues to persist and export as before.
+
+
+### 自动更新 MTTR 日期 / Automatic MTTR dates
+
+实时页面默认按用户电脑的本地日期，对比近 7 个自然日（含当天）与紧邻的前 7 天。自动模式在重新打开、回到页面以及跨日时更新；不会一直复用旧的 2026-12-14 等缓存日期。旧版日期缓存升级后会重置为自动模式一次。
+
+修改日期输入、点击最新数据快捷范围或前后切换，会进入“手动日期”并保存选择；点“按今天更新”恢复自动模式。自动范围、手动范围均以页面实际显示日期为准，无数据时指标不可用，不自动换成历史日期。最新数据的 3 天/完整周快捷按钮仍以导入数据最新完成日为锚点，页面已明确标注。离线网页保留导出时的日期快照，不会随打开日期静默改变；仍可手动筛选。
+
+Live MTTR dates default to the device's local today: the last seven inclusive calendar days against the preceding seven. Auto mode refreshes on reopening, returning to the page and across midnight. Editing dates or choosing data-based shortcuts switches to saved manual mode; Use today restores automatic dates. Legacy saved dates migrate once to automatic mode. Offline reports preserve the exported date snapshot.
+
+
+### 核对异常日期及显式修正 / Audit and repair saved dates
+
+`2026/10/31  18:04:00` 会按 2026-10-31 18:04:00 解析。若界面在 12 月仍显示 Job，需要核对实际保存记录，而不能仅更改默认日期或隐藏未来日期：
+
+- 点“核对日期数据”查看所有符合条件 Job 的已存创建/完成日期范围、按完成日期的数量，以及最近一次上传的列映射。晚于设备日期的完成记录会提示，但不会被静默删除。
+- 点各期“查看计算明细”或某个日期的“查看该日 Job”，可分页查看 Job ID、TT ID、处理人、状态、已存创建/完成时间和耗时，支持导出当前页。这里是解析后的存储值，历史上传的原始单元格文本未保留；请用 Job ID 回查 Job 原表 G、I 列。日期核对功能需要在线本地服务，不包含在离线报告中。
+- 默认重复 ID 不覆盖首次有效记录。因此，以前保存为 12 月的 Job，即使后来上传同 ID 的 10 月记录，默认也不会自动改正。核对原表后，可勾选“按本次文件更新已存在的 Job”，再上传两表；更新已有 Job 的创建/完成时间、关联 TT、人员和状态，不增加唯一 Job 数。不勾选则保持旧行为；同一文件内仍保留首条有效记录。
+- 更新是明确的选项，默认关闭，更换文件会重置。`updatedJobs` 记录本次实际变化的旧 Job 数（完全相同的不计更新），`duplicatePolicy` 记录 keep/update；字段确认重试保留该选项，备份兼容旧版无此元数据的数据。
+
+Saved-date auditing exposes parsed ledger values and the exact Job IDs behind a period. It does not reconstruct original workbook text or establish an unseen file’s parsing cause. The default duplicate policy keeps prior records; an explicit Update existing Jobs option applies corrected valid data from the current file while preserving unique Job counts. Future dates remain visible for inspection rather than silently removed.

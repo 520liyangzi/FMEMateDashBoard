@@ -405,3 +405,24 @@ test('v3 MTTR AI facts keep global overall/ranking separate from person scope wi
   assert.equal(legacy.people.ranking.length, 0);
   assert.equal(legacy.selectedScope.requestedLegacyAssigneeUnavailable, true);
 });
+
+test('MTTR AI evidence reports explicit repair counts and defaults missing policy to keep without inventing date causes', () => {
+  const mttr = { formatVersion: 3 as const, filename: '', importedAt: '', totalJobs: 2, totalTickets: 2,
+    sourceRows: 2, matchedRows: 2, validRows: 2, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    earliestDate: '2026-10-31', latestDate: '2026-12-14',
+    days: [{ date: '2026-10-31', count: 1, totalSeconds: 7200 }, { date: '2026-12-14', count: 1, totalSeconds: 3600 }],
+  };
+  const input = { mttr, mttrBaseline: { from: '2026-10-31', to: '2026-10-31' }, mttrCurrent: { from: '2026-12-14', to: '2026-12-14' } };
+  const original = facts(input).effectiveness.mttr;
+  assert.equal(original.dataQuality!.duplicatePolicy, 'keep');
+  assert.equal(original.dataQuality!.updatedJobs, 0);
+  assert.equal(original.current.to, '2026-12-14', 'future-looking imported dates are not silently hidden');
+  assert.equal(original.reductionRate, 50);
+  const repaired = facts({ ...input, mttr: { ...mttr, duplicatePolicy: 'update', updatedJobs: 1 } }).effectiveness.mttr;
+  assert.equal(repaired.dataQuality!.duplicatePolicy, 'update');
+  assert.equal(repaired.dataQuality!.updatedJobs, 1);
+  assert.equal(repaired.dataQuality!.totalJobs, 2, 'updated records are not new Jobs');
+  assert.match(repaired.definition, /Within each file, the first valid occurrence wins/);
+  assert.match(repaired.definition, /only an explicit update policy replaces an existing Job/);
+  assert.match(repaired.limitations, /not why their prior dates differed/);
+});

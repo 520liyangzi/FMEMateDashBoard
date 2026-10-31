@@ -60,3 +60,8 @@ test('once parsing begins an external abort does not falsely report that an atom
   const mock=server(),uploader=createMttrUploader(mock.api),pair=files(),controller=new AbortController();
   const result=await uploader.importPair(pair.tt,pair.job,{},p=>{if(p.phase==='parse')controller.abort();},controller.signal);assert.equal(result.totalJobs,2);assert.ok(!mock.calls.some(c=>c.options?.method==='DELETE'));
 });
+
+test('explicit update policy survives a mapping retry without uploading the file pair again',async()=>{
+  const mock=server(),uploader=createMttrUploader(mock.api),pair=files();mock.setFailure(Object.assign(new Error('Confirm mapping'),{details:{requiresMapping:true,source:'tt'}}));await assert.rejects(uploader.importPair(pair.tt,pair.job,{updateExistingJobs:true}));const before=mock.calls.length;mock.setFailure(null);
+  await uploader.importPair(pair.tt,pair.job,{tt:{ttId:'B',category:'U'},updateExistingJobs:true});assert.equal(mock.calls.length,before+1);assert.deepEqual(JSON.parse(mock.calls.at(-1)?.options?.body as string),{ttMapping:{ttId:'B',category:'U'},updateExistingJobs:true});
+});

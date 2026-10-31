@@ -59,7 +59,7 @@ export function createMttrUploader(api:MttrUploadApi){
       checkAbort();parsing=true;
       onProgress?.({phase:'parse',loaded:total,total});
       // Parsing may commit atomically on the server. Do not imply cancellation by aborting this request.
-      const dataset=await api(`/api/mttr/uploads/${encodeURIComponent(current.id)}/import`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ttMapping:mappings.tt,jobMapping:mappings.job})});
+      const dataset=await api(`/api/mttr/uploads/${encodeURIComponent(current.id)}/import`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ttMapping:mappings.tt,jobMapping:mappings.job,updateExistingJobs:mappings.updateExistingJobs})});
       if(session?.id===current.id)session=null;
       return dataset as MttrDataset;
     }catch(error){
