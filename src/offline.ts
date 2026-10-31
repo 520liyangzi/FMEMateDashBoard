@@ -4,6 +4,7 @@ type MutableSnapshot = Record<string, unknown> & {
   lang?: Language;
   state?: Record<string, unknown> & {
     feedback?: (Record<string, unknown> & { imageUrl?: string })[];
+    siteVisits?: {photos:string[]}[];
   };
 };
 
@@ -55,7 +56,7 @@ export function createOfflineDocument(snapshot: unknown, lang: Language, js: str
 function asDataUri(blob: Blob, lang: Language): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    const fail = () => reject(new Error(message(lang, '无法读取反馈截图，离线报表尚未生成。', 'A feedback screenshot could not be read. The offline report was not generated.')));
+    const fail = () => reject(new Error(message(lang, '无法读取报表图片，离线报表尚未生成。', 'A report image could not be read. The offline report was not generated.')));
     reader.onload = () => typeof reader.result === 'string' && reader.result.startsWith('data:') ? resolve(reader.result) : fail();
     reader.onerror = fail;
     reader.onabort = fail;
@@ -90,6 +91,7 @@ export async function downloadOfflineReport(snapshot: unknown, lang: Language): 
   if (copy.demo && copy.state) {
     // A synthetic preview must never carry production screenshots into a file.
     copy.state.feedback = [];
+    copy.state.siteVisits = [];
     copy.state.failureNotes = {};
     copy.state.aiReports = [];
     copy.state.aiReportsTotal = 0;
@@ -101,33 +103,40 @@ export async function downloadOfflineReport(snapshot: unknown, lang: Language): 
       if (!loaded.has(url)) loaded.set(url, (async () => {
         let image: Response;
         try { image = await fetch(url, { cache: 'no-store' }); }
-        catch { throw new Error(message(lang, '反馈截图下载失败，离线报表尚未生成，请重试。', 'A feedback screenshot could not be downloaded. No offline report was generated. Please try again.')); }
+        catch { throw new Error(message(lang, '报表图片下载失败，离线报表尚未生成，请重试。', 'A report image could not be downloaded. No offline report was generated. Please try again.')); }
         if (!image.ok) {
-          throw new Error(message(lang, '反馈截图无法读取，离线报表尚未生成。请确认截图仍可正常打开。', 'A feedback screenshot is unavailable. No offline report was generated. Check that the screenshot can still be opened.'));
+          throw new Error(message(lang, '报表图片无法读取，离线报表尚未生成。请确认截图仍可正常打开。', 'A report image is unavailable. No offline report was generated. Check that the screenshot can still be opened.'));
         }
         const blob = await image.blob();
         if (!blob.size || (blob.type && !blob.type.startsWith('image/'))) {
-          throw new Error(message(lang, '反馈截图内容无效，离线报表尚未生成。', 'A feedback screenshot is invalid. No offline report was generated.'));
+          throw new Error(message(lang, '报表图片内容无效，离线报表尚未生成。', 'A report image is invalid. No offline report was generated.'));
         }
         return asDataUri(blob, lang);
       })());
       return loaded.get(url)!;
     };
+    const photoEntries = [...feedback];
+    for (const visit of copy.state?.siteVisits ?? []) {
+      for (let index = 0; index < visit.photos.length; index++) {
+        const url = visit.photos[index];
+        photoEntries.push({get imageUrl(){return url},set imageUrl(value:string|undefined){if(value)visit.photos[index]=value}});
+      }
+    }
     let next = 0;
     const embedImages = async () => {
-      while (next < feedback.length) {
-        const entry = feedback[next++];
+      while (next < photoEntries.length) {
+        const entry = photoEntries[next++];
         const url = entry.imageUrl;
         if (!url) continue;
-        if (typeof url !== 'string') throw new Error(message(lang, '反馈截图地址无效，无法导出离线报表。', 'A feedback screenshot URL is invalid. The offline report cannot be exported.'));
+        if (typeof url !== 'string') throw new Error(message(lang, '报表图片地址无效，无法导出离线报表。', 'A report image URL is invalid. The offline report cannot be exported.'));
         if (url.startsWith('data:image/')) continue;
         if (!url.startsWith('/uploads/')) {
-          throw new Error(message(lang, '反馈截图不是本地上传文件，无法完整导出离线报表。', 'A feedback screenshot is not a local upload and cannot be embedded in the offline report.'));
+          throw new Error(message(lang, '报表图片不是本地上传文件，无法完整导出离线报表。', 'A report image is not a local upload and cannot be embedded in the offline report.'));
         }
         entry.imageUrl = await loadImage(url);
       }
     };
-    await Promise.all(Array.from({ length: Math.min(4, feedback.length) }, embedImages));
+    await Promise.all(Array.from({ length: Math.min(4, photoEntries.length) }, embedImages));
   }
 
   const html = createOfflineDocument(copy, lang, assets.js, assets.css);

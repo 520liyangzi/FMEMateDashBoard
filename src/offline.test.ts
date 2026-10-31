@@ -77,7 +77,7 @@ test('offline downloader embeds and caches screenshots without changing live sna
 test('missing feedback screenshots stop the download instead of producing an incomplete report', async () => {
   await browserMock(async context => {
     context.setFetch((async (input: RequestInfo | URL) => String(input) === '/api/offline-assets' ? Response.json({ js: 'console.log(1)', css: 'body{}' }) : new Response('missing', { status: 404 })) as typeof fetch);
-    await assert.rejects(downloadOfflineReport({ state: { feedback: [{ imageUrl: '/uploads/missing.png' }] } }, 'en'), /screenshot is unavailable/);
+    await assert.rejects(downloadOfflineReport({ state: { feedback: [{ imageUrl: '/uploads/missing.png' }] } }, 'en'), /report image is unavailable/);
     assert.equal(context.generated(), undefined);
   });
 });
@@ -113,5 +113,24 @@ test('real failure causes, AI reports and full daily archives remain offline whi
     assert.equal(demo.state.failureNotes.task1,'PRIVATE_CAUSE_ONLY_IN_LIVE_STATE');
     assert.equal(demo.state.aiReportsTotal,1);
     assert.equal(demo.state.dailySummaries.length,1);
+  });
+});
+
+test('offline visits embed all photos, preserve metadata, and strip private visits from demo exports', async () => {
+  await browserMock(async context => {
+    let reads=0;
+    context.setFetch((async (input:RequestInfo|URL)=>{
+      if(String(input)==='/api/offline-assets')return Response.json({js:'console.log(1)',css:'body{}'});
+      reads++;return new Response(new Uint8Array([137,80,78,71]),{headers:{'Content-Type':'image/png'}});
+    }) as typeof fetch);
+    const visit={id:'v1',date:'2026-10-31',site:'PRIVATE_SITE',description:'Field description',photos:['/uploads/a.png','/uploads/b.png']};
+    const snapshot={demo:false,tab:'visits',state:{siteVisits:[visit],feedback:[{imageUrl:'/uploads/a.png'}]}};
+    await downloadOfflineReport(snapshot,'en');
+    const exported=JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.equal(reads,2);assert.equal(exported.tab,'visits');assert.equal(exported.state.siteVisits[0].description,'Field description');
+    assert.ok(exported.state.siteVisits[0].photos.every((url:string)=>url.startsWith('data:image/png;base64,')));
+    assert.deepEqual(visit.photos,['/uploads/a.png','/uploads/b.png']);
+    await downloadOfflineReport({...snapshot,demo:true},'en');
+    assert.ok(!(await context.generated()!.text()).includes('PRIVATE_SITE'));
   });
 });

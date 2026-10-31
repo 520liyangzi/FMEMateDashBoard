@@ -24,7 +24,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.5.1'
+APP_VERSION = '1.6.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY, date TEXT NOT NULL, au
 CREATE TABLE IF NOT EXISTS failure_notes (taskId TEXT PRIMARY KEY, reason TEXT NOT NULL, updatedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ai_reports (id TEXT PRIMARY KEY, createdAt TEXT NOT NULL, dateFrom TEXT NOT NULL, dateTo TEXT NOT NULL, scene TEXT NOT NULL, model TEXT NOT NULL, demo INTEGER NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS daily_summaries (date TEXT PRIMARY KEY, title TEXT NOT NULL, zh TEXT NOT NULL, en TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS site_visits (id TEXT PRIMARY KEY, date TEXT NOT NULL, site TEXT NOT NULL, description TEXT NOT NULL, photos TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0);
 """
 
@@ -174,8 +175,130 @@ class Store:
                     'failureNotes': {r['taskId']: r['reason'] for r in db.execute('SELECT taskId,reason FROM failure_notes')},
                     'aiReports': [self.ai_report_row(r) for r in db.execute('SELECT * FROM ai_reports ORDER BY createdAt DESC,rowid DESC LIMIT 20')],
                     'aiReportsTotal': db.execute('SELECT count(*) FROM ai_reports').fetchone()[0],
+                    'siteVisits': [self.visit_row(r) for r in db.execute('SELECT * FROM site_visits ORDER BY date DESC,createdAt DESC,id')],
                     'dailySummaries': [dict(r) for r in db.execute('SELECT date,title,zh,en,createdAt,updatedAt FROM daily_summaries ORDER BY date DESC')],
                     'total': db.execute('SELECT count(*) FROM logs').fetchone()[0]}
+
+    @staticmethod
+    def visit_row(row):
+        return {**{key: row[key] for key in ('id', 'date', 'site', 'description', 'createdAt', 'updatedAt')},
+                'photos': ['/uploads/' + image for image in json.loads(row['photos'])]}
+
+    @staticmethod
+    def validate_visit(row):
+        clean = {'id': require_string(row.get('id'), 'visit id', 100, True),
+                 'date': require_date(row.get('date')),
+                 'site': require_string(row.get('site', ''), 'site name', 200).strip(),
+                 'description': require_string(row.get('description', ''), 'visit description', 20000).strip()}
+        photos = row.get('photos')
+        if not isinstance(photos, list) or len(photos) > 10 or any(not isinstance(x, str) or not IMAGE_NAME.fullmatch(x) for x in photos) or len(photos) != len(set(photos)):
+            raise ApiError(400, 'Use at most 10 distinct visit photos.')
+        if not photos and not clean['description']:
+            raise ApiError(400, 'Add a visit description or at least one photo.')
+        clean['photos'] = photos
+        stamps = []
+        for key in ('createdAt', 'updatedAt'):
+            value = require_string(row.get(key), key, 100, True)
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                raise ApiError(400, 'Invalid visit timestamp.')
+            if parsed.tzinfo is None:
+                raise ApiError(400, 'Visit timestamps must include a timezone.')
+            clean[key] = value
+            stamps.append(parsed)
+        if stamps[0] > stamps[1]:
+            raise ApiError(400, 'Invalid visit timestamp order.')
+        return clean
+
+    def cleanup_visit_photos(self, images):
+        # Keep any image still referenced elsewhere, including restored backups.
+        with self.connect() as db:
+            used = {r[0] for r in db.execute("SELECT image FROM feedback WHERE image != ''")}
+            for row in db.execute('SELECT photos FROM site_visits'):
+                used.update(json.loads(row[0]))
+        for image in set(images) - used:
+            if IMAGE_NAME.fullmatch(image):
+                try:
+                    (self.uploads / image).unlink(missing_ok=True)
+                except OSError:
+                    pass  # Saved record is authoritative; stale files are not exported.
+
+    def save_visit(self, fields):
+        try:
+            payload = json.loads(fields.get('metadata', {}).get('value', ''))
+        except (ValueError, TypeError):
+            raise ApiError(400, 'Invalid visit metadata.')
+        if not isinstance(payload, dict) or 'expectedUpdatedAt' not in payload:
+            raise ApiError(400, 'Visit metadata must include expectedUpdatedAt.')
+        item_id = payload.get('id')
+        if item_id is not None:
+            require_string(item_id, 'visit id', 100, True)
+        expected = payload['expectedUpdatedAt']
+        if expected is not None:
+            require_string(expected, 'expected visit timestamp', 100, True)
+        keep = payload.get('keepPhotos', [])
+        if not isinstance(keep, list) or len(keep) > 10 or any(not isinstance(x, str) or not x.startswith('/uploads/') or not IMAGE_NAME.fullmatch(x[9:]) for x in keep) or len(keep) != len(set(keep)):
+            raise ApiError(400, 'Invalid retained visit photos.')
+        incoming = []
+        for key, part in fields.items():
+            if key == 'metadata':
+                continue
+            if not re.fullmatch(r'photo_[0-9]', key):
+                raise ApiError(400, 'Invalid visit photo field.')
+            raw = part.get('data', b'')
+            if not raw or len(raw) > MAX_IMAGE:
+                raise ApiError(413, 'Each photo must be nonempty and 10 MB or smaller.')
+            incoming.append((uuid.uuid4().hex + '.' + image_extension(raw), raw))
+        photos = [x[9:] for x in keep] + [x[0] for x in incoming]
+        stamp = datetime.now(timezone.utc).isoformat()
+        clean = self.validate_visit({**payload, 'id': item_id or uuid.uuid4().hex, 'photos': photos, 'createdAt': stamp, 'updatedAt': stamp})
+        written = []
+        with self.lock:
+            old_photos = []
+            try:
+                with self.connect() as db:
+                    existing = db.execute('SELECT * FROM site_visits WHERE id=?', (clean['id'],)).fetchone()
+                    if item_id and not existing:
+                        raise ApiError(404, 'Visit no longer exists. Reload before editing.')
+                    if existing and existing['updatedAt'] != expected:
+                        raise ApiError(409, 'Visit changed in another window. Reload before saving.')
+                    if not existing and expected is not None:
+                        raise ApiError(409, 'New visits require expectedUpdatedAt: null.')
+                    old_photos = json.loads(existing['photos']) if existing else []
+                    if not set(x[9:] for x in keep) <= set(old_photos):
+                        raise ApiError(400, 'Retained photos must belong to this visit.')
+                    if existing:
+                        clean['createdAt'] = existing['createdAt']
+                        previous = datetime.fromisoformat(existing['updatedAt'])
+                        if datetime.fromisoformat(clean['updatedAt']) <= previous:
+                            clean['updatedAt'] = (previous + timedelta(microseconds=1)).isoformat()
+                    for image, raw in incoming:
+                        written.append(image)
+                        (self.uploads / image).write_bytes(raw)
+                    db.execute('INSERT INTO site_visits(id,date,site,description,photos,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET date=excluded.date,site=excluded.site,description=excluded.description,photos=excluded.photos,updatedAt=excluded.updatedAt',
+                               (clean['id'], clean['date'], clean['site'], clean['description'], json.dumps(photos), clean['createdAt'], clean['updatedAt']))
+            except Exception:
+                for image in written:
+                    (self.uploads / image).unlink(missing_ok=True)
+                raise
+            self.cleanup_visit_photos(old_photos)
+        return {'visit': {**clean, 'photos': ['/uploads/' + x for x in photos]}}
+
+    def delete_visit(self, item_id, expected):
+        require_string(item_id, 'visit id', 100, True)
+        require_string(expected, 'expected visit timestamp', 100, True)
+        with self.lock:
+            with self.connect() as db:
+                row = db.execute('SELECT * FROM site_visits WHERE id=?', (item_id,)).fetchone()
+                if not row:
+                    raise ApiError(404, 'Visit no longer exists.')
+                if row['updatedAt'] != expected:
+                    raise ApiError(409, 'Visit changed in another window. Reload before deleting.')
+                photos = json.loads(row['photos'])
+                db.execute('DELETE FROM site_visits WHERE id=?', (item_id,))
+            self.cleanup_visit_photos(photos)
+        return {'ok': True, 'id': item_id}
 
     @staticmethod
     def validate_daily_summary(row):
@@ -371,6 +494,8 @@ class Store:
                 z.write(db_copy, 'report.db')
                 with self.connect() as db:
                     images = {r[0] for r in db.execute("SELECT image FROM feedback WHERE image != ''")}
+                    for row in db.execute('SELECT photos FROM site_visits'):
+                        images.update(json.loads(row[0]))
                 for image in images:
                     if IMAGE_NAME.fullmatch(image) and (self.uploads / image).is_file():
                         z.write(self.uploads / image, 'uploads/' + image)
@@ -411,7 +536,7 @@ class Store:
                 required_tables = {'logs', 'settings', 'groups', 'feedback', 'history'}
                 tables = {r['name'] for r in schema if r['type'] == 'table'}
                 # Legacy backups may omit either of the subsequently added tables.
-                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
+                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
                     raise ApiError(400, 'Backup database contains unsupported schema objects.')
                 if 'failure_notes' in tables and {r['name'] for r in source.execute('PRAGMA table_info(failure_notes)')} != {'taskId', 'reason', 'updatedAt'}:
                     raise ApiError(400, 'Backup failure reason columns are invalid.')
@@ -419,10 +544,23 @@ class Store:
                     raise ApiError(400, 'Backup AI report columns are invalid.')
                 if 'daily_summaries' in tables and {r['name'] for r in source.execute('PRAGMA table_info(daily_summaries)')} != {'date', 'title', 'zh', 'en', 'createdAt', 'updatedAt'}:
                     raise ApiError(400, 'Backup daily summary columns are invalid.')
+                if 'site_visits' in tables and {r['name'] for r in source.execute('PRAGMA table_info(site_visits)')} != {'id', 'date', 'site', 'description', 'photos', 'createdAt', 'updatedAt'}:
+                    raise ApiError(400, 'Backup site visit columns are invalid.')
                 if source.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise ApiError(400, 'Backup database integrity check failed.')
                 with self.connect(new_db) as dest:
                     dest.executescript(SCHEMA)
+                    if 'site_visits' in tables:
+                        for row in source.execute('SELECT * FROM site_visits'):
+                            clean = self.validate_visit({**dict(row), 'photos': json.loads(row['photos'])})
+                            for image in clean['photos']:
+                                if 'uploads/' + image not in names:
+                                    raise ApiError(400, 'A backup visit photo is missing.')
+                                raw = archive.read('uploads/' + image)
+                                if len(raw) > MAX_IMAGE or image.rsplit('.', 1)[1] != image_extension(raw):
+                                    raise ApiError(400, 'Invalid backup visit photo.')
+                                (new_uploads / image).write_bytes(raw)
+                            dest.execute('INSERT INTO site_visits VALUES(?,?,?,?,?,?,?)', (clean['id'], clean['date'], clean['site'], clean['description'], json.dumps(clean['photos']), clean['createdAt'], clean['updatedAt']))
                     if 'daily_summaries' in tables:
                         for row in source.execute('SELECT date,title,zh,en,createdAt,updatedAt FROM daily_summaries'):
                             clean = self.validate_daily_summary(dict(row))
@@ -677,6 +815,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(store.validate_ai_request(self.json_body()))
             if path == '/api/ai/generate':
                 return self.json(store.generate_ai_report(self.json_body()))
+            if path == '/api/site-visits':
+                return self.json(store.save_visit(self.multipart()))
             if path == '/api/daily-summaries':
                 return self.json(store.save_daily_summary(self.json_body()))
             if path == '/api/import':
@@ -722,6 +862,8 @@ class Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             params = parse_qs(url.query)
             store = self.server.store
+            if url.path == '/api/site-visits':
+                return self.json(store.delete_visit(params.get('id', [''])[0], params.get('expectedUpdatedAt', [''])[0]))
             if url.path == '/api/daily-summaries':
                 return self.json(store.delete_daily_summary(params.get('date', [''])[0], params.get('expectedUpdatedAt', [''])[0]))
             if url.path == '/api/groups':

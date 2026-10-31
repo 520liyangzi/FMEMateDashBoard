@@ -234,7 +234,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.5.1。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.6.0。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -257,3 +257,16 @@ Failure causes are stored by Task Id and included in full backups. Existing data
 概览和用户分析固定展示“人数统计说明”，Top 用户排行旁也说明 `browser` 未计入人数。日志缺陷会把不同用户统一记为 `browser`，无法区分真实人数；因此页面和 Excel 使用“可识别活跃用户”命名，相关使用次数仍计入总量。例如当前只有 `browser` 和 `yangzi` 时，可识别账号数为 1，实际使用总人数无法从这些日志确定，不能理解为只有 1 人使用。中英文页面、离线报表、PDF 打印和 Excel 均采用相同展示口径。
 
 Overview and User analytics always explain the user-count methodology. A logging bug merges multiple users into `browser`; that ID is excluded from people counts and rankings while its interactions stay in usage totals. The displayed **identifiable active users** count is not the actual total number of users. The explanation is also included in Excel and offline reports.
+
+
+## 上站记录 / Site visits
+
+在「上站记录」中选择上站日期，填写站点或区域（选填）与现场简介，并添加照片。支持同一天多条记录、补录历史日期、编辑与删除；保存后日期筛选会扩展以显示刚保存的记录。支持 JPG、PNG、WebP、GIF，每条最多 10 张、每张不超过 10 MB。手机 HEIC 照片请先转为 JPG。文字简介与照片至少填写一项。界面支持中英文切换，用户输入内容保留原文。
+
+照片点击可查看原图。按当前日期范围统计上站天数、记录数和照片数，Scene 筛选不影响上站记录。Excel 导出日期、站点、简介和照片数；图片请通过离线 HTML 或打印 / 保存 PDF 分享。离线网页包含全部上站记录及嵌入照片，可切换日期查看，不能修改。演示数据导出不携带真实上站记录。
+
+记录与照片保存在本地 data 目录，重启后保留；ZIP 备份与恢复包含上站记录及照片，兼容旧版无上站记录的备份。清空应用日志不会删除上站记录。请使用新版本恢复含上站记录的新备份。
+
+**Site visits** supports a visit date, optional site/area, description and up to 10 photos per entry. Multiple visits on the same day and historical backfills are supported. Edit or delete saved entries; competing edits are detected before overwriting. JPG, PNG, WebP and GIF are accepted, up to 10 MB each; convert HEIC to JPG first. Include a description or at least one photo. User-authored text retains its original language.
+
+Date filters apply to visit counts, visit days and photo totals independently of Scene. Click photos to view them in full. Excel includes visit text and photo counts; use offline HTML or Print / Save PDF to share photos. Offline HTML embeds the complete visit archive and images, remains read-only, and excludes real visits from demo exports. Local persistence and ZIP backups include visits/photos; old backups without visits remain compatible. Clearing application logs preserves site visits.
