@@ -221,7 +221,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.3。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.4。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -350,3 +350,14 @@ Saved-date auditing exposes parsed ledger values and the exact Job IDs behind a 
 The Effectiveness page adds **Exclude cross-day Jobs**, off by default and remembered in the browser. When enabled, only Jobs whose source creation and finish timestamps share a calendar date enter MTTR calculations. No timezone conversion is applied. A Job from 23:59 to next-day 00:01 is excluded even though it lasts less than 24 hours. Finish dates still determine the reporting period. Overall and assignee comparisons, rankings, calculation details, Excel, print/PDF, offline reports and AI prompts use the selected policy and disclose excluded counts.
 
 The option preserves all saved Jobs and existing TT/status/deduplication rules. Raw date audits and import quality counters remain unfiltered. Existing V3 server data works after updating without reuploading source files. Older offline snapshots lack the subset; export a new report rather than infer it from averages. Saved daily-summary and AI-report text is unchanged.
+
+
+### 可选时长过滤 / Optional duration threshold (v1.9.4)
+
+“成效统计”新增“过滤 ≥ X 小时的 Job”，默认关闭，初始值为 24 小时。X 可填写大于 0 的小数，如 0.5、8、12。启用后只保留耗时 **严格小于 X 小时** 的 Job，恰好 X 小时也排除。该条件与“过滤跨天 Job”可独立启用或同时启用；同时启用时必须同时满足两个条件。页面显示两期按所选条件排除的总数，同一 Job 不重复计数。阈值为空、0 或无效时暂停计算并提示，不会悄悄切回完整统计。
+
+浏览器记住开关与 X。整体、指定人员、排名、计算明细、Excel、打印 / PDF、离线 HTML 和 AI 提示词使用一致的阈值。筛选基于每条 Job 的原始耗时，先筛选再算平均，不按每日或个人均值筛选；不会删除已保存 Job。已有 V3 数据更新服务后即可使用。新离线报表保留调整阈值所需的数据；旧快照缺少这些数据时会明确提示不可用，请从更新后的服务重新导出。
+
+**Exclude Jobs lasting ≥ X hours** is off by default, with an initial value of 24 hours. Enter any valid positive number of hours, including decimals such as 0.5. When enabled, only Jobs lasting **strictly less than X hours** remain; equality is excluded. The calendar-day and duration filters work independently or together using AND. Combined exclusions count each Job once. Blank, zero or invalid thresholds make calculations unavailable with a clear message.
+
+The browser remembers both the option and X. Overall/assignee MTTR, ranking, calculation details, Excel, print/PDF, offline reports and AI prompts use the same rule. Individual Job durations are filtered before weighted means are calculated. History is preserved. Existing V3 server data requires no source reupload. New offline reports support changing X; old snapshots without duration data require a new export.

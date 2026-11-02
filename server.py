@@ -24,11 +24,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
 from mttr_import import stage_mttr, finish_dataset, aggregate_tickets, validate_dataset, MttrImportError
-from job_mttr_import import stage_pair, joined_aggregates, finish_pair, validate_v3, RADIO
+from job_mttr_import import stage_pair, joined_aggregates, duration_groups, finish_pair, validate_v3, RADIO
 from mttr_uploads import MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.9.3'
+APP_VERSION = '1.9.4'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -199,6 +199,8 @@ class Store:
             if dataset and dataset.get('formatVersion')==3 and 'sameDay' not in dataset:
                 days,people=joined_aggregates(db,True)
                 dataset['sameDay']={'days':days,'personDays':people}
+            if dataset and dataset.get('formatVersion')==3 and 'durationGroups' not in dataset:
+                dataset['durationGroups']=duration_groups(db)
             return dataset
 
     @staticmethod
@@ -209,7 +211,7 @@ class Store:
             raise ApiError(409,'需要 TT + Job 数据 / Import TT + Job data before auditing stored Job timestamps.')
         return dataset
 
-    def get_mttr_jobs(self, date_from, date_to, assignee=None, offset=0, limit=100, exclude_cross_day=False):
+    def get_mttr_jobs(self, date_from, date_to, assignee=None, offset=0, limit=100, exclude_cross_day=False, max_hours=None):
         require_date(date_from);require_date(date_to)
         if date_from>date_to:raise ApiError(400,'开始日期不能晚于结束日期 / Start date must not be after end date.')
         if type(offset) is not int or not 0<=offset<=9007199254740991 or type(limit) is not int or not 1<=limit<=1000:
@@ -217,9 +219,15 @@ class Store:
         if assignee is not None and (not isinstance(assignee,str) or len(assignee)>1000):
             raise ApiError(400,'Invalid assignee filter.')
         if type(exclude_cross_day) is not bool:raise ApiError(400,'Invalid cross-day Job filter.')
+        if max_hours is not None:
+            try:valid_hours=type(max_hours) in (int,float) and math.isfinite(max_hours) and max_hours>0 and math.isfinite(max_hours*3600)
+            except OverflowError:valid_hours=False
+            if not valid_hours:raise ApiError(400,'maxHours must be a finite positive number.')
         where=f'FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO} AND substr(j.finishedAt,1,10)>=? AND substr(j.finishedAt,1,10)<=?'
         if exclude_cross_day:where+=' AND substr(j.createdAt,1,10)=substr(j.finishedAt,1,10)'
         values=[date_from,date_to]
+        # "X hours or above" is inclusive exclusion: exact-boundary Jobs go out.
+        if max_hours is not None:where+=' AND j.durationSeconds<?';values.append(max_hours*3600)
         if assignee is not None:
             where+=' AND j.assignee=?';values.append(assignee)
         with self.lock,self.connect() as db:
@@ -316,6 +324,7 @@ class Store:
                     days,people=joined_aggregates(db)
                     same_days,same_people=joined_aggregates(db,True)
                     summary['sameDay']={'days':same_days,'personDays':same_people}
+                    summary['durationGroups']=duration_groups(db)
                     dataset=finish_pair(summary,days,people)
                     db.execute('DELETE FROM mttr_tickets')
                     db.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',(json.dumps(dataset,ensure_ascii=False,allow_nan=False),))
@@ -781,6 +790,8 @@ class Store:
                             same_days,same_people=joined_aggregates(dest,True)
                             if not same_aggregates(same_days,mttr_snapshot['sameDay']['days']) or not same_aggregates(same_people,mttr_snapshot['sameDay']['personDays'],True):
                                 raise ApiError(400,'Backup TT/Job ledgers do not match same-day MTTR statistics.')
+                        if 'durationGroups' in mttr_snapshot and duration_groups(dest)!=mttr_snapshot['durationGroups']:
+                            raise ApiError(400,'Backup TT/Job ledgers do not match MTTR duration groups.')
                     elif dest.execute('SELECT count(*) FROM mttr_tt').fetchone()[0] or dest.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]:
                         raise ApiError(400,'Backup TT/Job ledger has no matching V3 statistics.')
                     if 'site_visits' in tables:
@@ -990,14 +1001,20 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(url.query)
             if path == '/api/mttr/jobs':
                 audit_params=parse_qs(url.query,keep_blank_values=True)
-                if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit','excludeCrossDay'} or any(len(values)!=1 for values in audit_params.values()):
+                if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit','excludeCrossDay','maxHours'} or any(len(values)!=1 for values in audit_params.values()):
                     raise ApiError(400,'请指定唯一的开始和结束日期 / Specify one from and to date, with optional assignee, offset and limit.')
                 try:
                     offset=int(audit_params.get('offset',['0'])[0]);limit=int(audit_params.get('limit',['100'])[0])
                 except ValueError:raise ApiError(400,'Invalid Job audit pagination.')
                 exclude_value=audit_params.get('excludeCrossDay',['false'])[0]
                 if exclude_value not in ('true','false'):raise ApiError(400,'excludeCrossDay must be true or false.')
-                return self.json(self.server.store.get_mttr_jobs(audit_params['from'][0],audit_params['to'][0],audit_params.get('assignee',[None])[0],offset,limit,exclude_value=='true'))
+                max_hours=None
+                if 'maxHours' in audit_params:
+                    text=audit_params['maxHours'][0]
+                    if not re.fullmatch(r'(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?',text):raise ApiError(400,'maxHours must be a finite positive decimal number.')
+                    max_hours=float(text)
+                    if not math.isfinite(max_hours) or max_hours<=0 or not math.isfinite(max_hours*3600):raise ApiError(400,'maxHours must be a finite positive decimal number.')
+                return self.json(self.server.store.get_mttr_jobs(audit_params['from'][0],audit_params['to'][0],audit_params.get('assignee',[None])[0],offset,limit,exclude_value=='true',max_hours))
             if path == '/api/mttr/date-audit':
                 return self.json(self.server.store.get_mttr_date_audit())
             if path == '/api/mttr':

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeMttrPeople, compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, selectMttrDayScope, type MttrDataset } from './mttr.ts';
+import { analyzeMttrPeople, compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, selectMttrDayScope, selectMttrScope, parseMttrMaxHours, type MttrDataset } from './mttr.ts';
 
 const dataset = (days: MttrDataset['days']): MttrDataset => ({
   filename: 'tickets.xlsx', importedAt: '2026-10-31T00:00:00Z', sourceRows: 0, matchedRows: 0,
@@ -167,4 +167,36 @@ test('same-day scope distinguishes missing old aggregates from a valid empty sub
   assert.equal(compareMttr(filtered, baseline, current).status, 'no_baseline_tickets');
   assert.deepEqual(analyzeMttrPeople(filtered, baseline, current), []);
   assert.equal(selectMttrDayScope({ ...d, formatVersion: 2 }, true), null);
+});
+
+test('duration threshold excludes equality, keeps exact fractional boundaries and counts groups by weight', () => {
+  const d = peopleDataset();
+  d.durationGroups = [
+    { date: '2026-10-01', assignee: 'Alex', durationSeconds: 1800, count: 2, sameDay: true },
+    { date: '2026-10-01', assignee: 'Alex', durationSeconds: 3600, count: 7, sameDay: true },
+    { date: '2026-10-04', assignee: 'Alex', durationSeconds: 900, count: 1, sameDay: true },
+    { date: '2026-10-04', assignee: 'Alex', durationSeconds: 120, count: 1, sameDay: false },
+  ];
+  const filtered = selectMttrScope(d, false, 1)!;
+  assert.equal(filtered.totalJobs, 4);
+  assert.equal(compareMttr(filtered, baseline, current).baseline.meanSeconds, 1800);
+  assert.equal(compareMttr(filtered, baseline, current).current.meanSeconds, 510);
+  const combined = selectMttrScope(d, true, 1)!;
+  assert.equal(combined.totalJobs, 3);
+  assert.equal(analyzeMttrPeople(combined, baseline, current)[0].comparison.reductionRate, 50);
+  assert.equal(selectMttrScope(d, false, .5)!.totalJobs, 2);
+  assert.equal(selectMttrScope(d, false, 1 / 30)!.totalJobs, 0, 'exact 120 seconds is excluded');
+  assert.equal(d.durationGroups.length, 4);
+});
+
+test('duration threshold validity and old snapshots never silently substitute full statistics', () => {
+  const d = peopleDataset();
+  assert.equal(parseMttrMaxHours(false, ''), undefined);
+  assert.equal(parseMttrMaxHours(true, '0.5'), .5);
+  assert.equal(parseMttrMaxHours(true, ' 8 '), 8);
+  for (const input of ['', '0', '-1', 'NaN', 'Infinity', '0x10', '1e309']) assert.equal(parseMttrMaxHours(true, input), null);
+  for (const threshold of [null, 0, -1, Infinity, NaN, 8]) assert.equal(selectMttrScope(d, false, threshold), null);
+  assert.equal(selectMttrScope(d, false), d);
+  d.durationGroups = [];
+  assert.equal(selectMttrScope(d, false, 8)!.totalJobs, 0, 'known empty groups are available');
 });

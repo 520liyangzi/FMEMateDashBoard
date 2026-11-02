@@ -75,6 +75,7 @@ class CrossDayTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(backup)) as archive:dbpath.write_bytes(archive.read('report.db'))
         with sqlite3.connect(dbpath) as db:
             value=json.loads(db.execute('SELECT data FROM mttr_dataset').fetchone()[0])
+            value.pop('durationGroups',None) # Isolate same-day ledger validation.
             value['sameDay']={'days':[],'personDays':[]};validate_v3(value)
             db.execute('UPDATE mttr_dataset SET data=?',(json.dumps(value),))
         out=io.BytesIO()

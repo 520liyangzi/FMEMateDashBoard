@@ -1,6 +1,8 @@
 /** Filtered, valid work items: closed tickets in legacy data; matched FINISHED Jobs in V3. */
 export type MttrDay = { date: string; count: number; totalSeconds: number };
 export type MttrPersonDay = MttrDay & { assignee: string };
+/** Exact-duration groups, not rounded histogram bins; preserve threshold boundaries. */
+export type MttrDurationGroup = { date: string; assignee: string; durationSeconds: number; count: number; sameDay: boolean };
 export type MttrColumnMapping = {B:string;F:string;J:string;S:string;U:string};
 export type MttrTtMapping = { ttId: string; category: string };
 export type MttrJobMapping = { jobId: string; ttId: string; created: string; finished: string; assignee: string; status: string };
@@ -30,6 +32,7 @@ export type MttrDataset = {
   personDays?: MttrPersonDay[];
   /** Eligible Jobs whose source creation and finish timestamps share a calendar date. */
   sameDay?: { days: MttrDay[]; personDays: MttrPersonDay[] };
+  durationGroups?: MttrDurationGroup[];
   sources?: MttrSources;
   mappings?: { tt: MttrTtMapping; job: MttrJobMapping };
   sourceHeaders?: { tt: Record<string, string>; job: Record<string, string> };
@@ -67,6 +70,35 @@ export function selectMttrDayScope(dataset: MttrDataset | null, excludeCrossDay:
     ...dataset, days, personDays, totalJobs: total, totalTickets: total,
     earliestDate: days[0]?.date ?? '', latestDate: days.at(-1)?.date ?? '',
   };
+}
+/** Undefined is off; null is enabled with an invalid/incomplete threshold. */
+export function parseMttrMaxHours(enabled: boolean, hours: string): number | null | undefined {
+  if (!enabled) return undefined;
+  const value = typeof hours === 'string' ? hours.trim() : '';
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value)) return null;
+  const number = Number(value);
+  return validMttrMaxHours(number) ? number : null;
+}
+function validMttrMaxHours(hours: unknown): hours is number {
+  return typeof hours === 'number' && Number.isFinite(hours) && hours > 0 && Number.isFinite(hours * 3600);
+}
+/** Both optional conditions apply to each Job before the weighted mean is computed. */
+export function selectMttrScope(dataset: MttrDataset | null, excludeCrossDay: boolean, maxHours?: number | null): MttrDataset | null {
+  if (maxHours === undefined) return selectMttrDayScope(dataset, excludeCrossDay);
+  if (!dataset || !validMttrMaxHours(maxHours) || dataset.formatVersion !== 3 || !Array.isArray(dataset.durationGroups)) return null;
+  const days = new Map<string, MttrDay>(), people = new Map<string, MttrPersonDay>();
+  for (const group of dataset.durationGroups) {
+    if (group.durationSeconds >= maxHours * 3600 || (excludeCrossDay && !group.sameDay)) continue;
+    const day = days.get(group.date) ?? { date: group.date, count: 0, totalSeconds: 0 };
+    day.count += group.count; day.totalSeconds += group.durationSeconds * group.count; days.set(group.date, day);
+    const key = JSON.stringify([group.assignee, group.date]);
+    const person = people.get(key) ?? { assignee: group.assignee, date: group.date, count: 0, totalSeconds: 0 };
+    person.count += group.count; person.totalSeconds += group.durationSeconds * group.count; people.set(key, person);
+  }
+  const dates = [...days.values()].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const personDays = [...people.values()].sort((a, b) => a.assignee < b.assignee ? -1 : a.assignee > b.assignee ? 1 : a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const total = dates.reduce((sum, day) => sum + day.count, 0);
+  return { ...dataset, days: dates, personDays, totalJobs: total, totalTickets: total, earliestDate: dates[0]?.date ?? '', latestDate: dates.at(-1)?.date ?? '' };
 }
 export type MttrAggregate = MttrPeriod & {
   /** Inclusive calendar dates in the selected period. */

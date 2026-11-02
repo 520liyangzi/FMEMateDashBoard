@@ -499,3 +499,92 @@ test('missing same-day aggregates never become invented filtered rates or rankin
   assert.equal(missing.people.available, false);
   assert.deepEqual(missing.people.ranking, []);
 });
+
+function durationFactsFixture() {
+  const durationGroups = [
+    { date: '2026-10-21', assignee: 'A', durationSeconds: 14400, count: 1, sameDay: true },
+    { date: '2026-10-21', assignee: 'A', durationSeconds: 120, count: 1, sameDay: false },
+    { date: '2026-10-21', assignee: 'B', durationSeconds: 28800, count: 1, sameDay: true },
+    { date: '2026-10-22', assignee: 'A', durationSeconds: 7200, count: 1, sameDay: true },
+    { date: '2026-10-22', assignee: 'A', durationSeconds: 3600, count: 1, sameDay: false },
+    { date: '2026-10-22', assignee: 'B', durationSeconds: 21600, count: 1, sameDay: true },
+  ];
+  const aggregate = (groups: typeof durationGroups) => {
+    const people = new Map<string, { date: string; assignee: string; count: number; totalSeconds: number }>();
+    const days = new Map<string, { date: string; count: number; totalSeconds: number }>();
+    for (const group of groups) {
+      const key = `${group.date}:${group.assignee}`, p = people.get(key) ?? { date: group.date, assignee: group.assignee, count: 0, totalSeconds: 0 };
+      const d = days.get(group.date) ?? { date: group.date, count: 0, totalSeconds: 0 };
+      p.count += group.count; p.totalSeconds += group.count * group.durationSeconds;
+      d.count += group.count; d.totalSeconds += group.count * group.durationSeconds;
+      people.set(key, p); days.set(group.date, d);
+    }
+    return { days: [...days.values()], personDays: [...people.values()] };
+  };
+  const mttr = { formatVersion: 3 as const, filename: '', importedAt: '', totalJobs: 6, totalTickets: 6,
+    sourceRows: 6, matchedRows: 6, validRows: 6, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    earliestDate: '2026-10-21', latestDate: '2026-10-22', ...aggregate(durationGroups),
+    sameDay: aggregate(durationGroups.filter(group => group.sameDay)), durationGroups,
+  };
+  return { mttr, mttrBaseline: { from: '2026-10-21', to: '2026-10-21' }, mttrCurrent: { from: '2026-10-22', to: '2026-10-22' }, mttrAssignee: 'A' };
+}
+
+test('MTTR duration facts apply inclusive X-hour exclusion to means, selected person and rankings', () => {
+  const input = durationFactsFixture(), before = JSON.stringify(input.mttr);
+  const report = facts({ ...input, mttrMaxHours: 8 }).effectiveness.mttr;
+  assert.equal(report.durationFilter.enabled, true);
+  assert.equal(report.durationFilter.maxHours, 8);
+  assert.equal(report.reportFilters.status, 'available');
+  assert.equal(report.overall.baseline.count, 2, 'eight-hour Job exactly at the threshold is excluded');
+  assert.equal(report.overall.current.count, 3);
+  assert.equal(report.baseline.count, 2);
+  assert.equal(report.current.count, 2);
+  assert.equal(report.current.meanSeconds, 5400);
+  assert.deepEqual(report.reportFilters.overallExcludedJobs, { baseline: 1, current: 0 });
+  assert.equal(report.people.ranking[0].assignee, 'A');
+  assert.equal(report.people.unrankedExamples.find(row => row.assignee === 'B')!.comparison.status, 'no_baseline_tickets');
+  assert.match(report.durationFilter.boundary, /Equality is excluded/);
+  assert.equal(report.dataQuality!.totalJobs, 6, 'import diagnostics stay unfiltered');
+  assert.equal(JSON.stringify(input.mttr), before);
+});
+
+test('combined duration and calendar filters count exclusions once and decimal hours remain exact', () => {
+  const input = durationFactsFixture();
+  const report = facts({ ...input, mttrMaxHours: 8, mttrExcludeCrossDay: true }).effectiveness.mttr;
+  assert.equal(report.baseline.meanSeconds, 14400);
+  assert.equal(report.current.meanSeconds, 7200);
+  assert.equal(report.reductionRate, 50);
+  assert.equal(report.overall.baseline.count, 1);
+  assert.equal(report.overall.current.count, 2);
+  assert.deepEqual(report.calendarDayFilter.overallExcludedJobs, { baseline: 1, current: 1 }, 'calendar filter retains its day-only count');
+  assert.deepEqual(report.reportFilters.overallExcludedJobs, { baseline: 2, current: 1 }, 'combined exclusion count does not sum overlapping failures');
+  assert.deepEqual(report.reportFilters.selectedExcludedJobs, { baseline: 1, current: 1 });
+  const equality = facts({ ...input, mttrMaxHours: 1 }).effectiveness.mttr;
+  assert.equal(equality.current.count, 0, 'one-hour current Job is excluded at equality');
+  const decimal = facts({ ...input, mttrMaxHours: 0.5 }).effectiveness.mttr;
+  assert.equal(decimal.baseline.count, 1);
+  assert.equal(decimal.baseline.meanSeconds, 120, 'two-minute cross-day Job remains when day filter is off');
+  assert.equal(decimal.current.meanSeconds, null);
+});
+
+test('missing exact duration data or an invalid enabled threshold never fabricates a filtered report', () => {
+  const input = durationFactsFixture();
+  const { durationGroups, ...old } = input.mttr;
+  const missing = facts({ ...input, mttr: old, mttrMaxHours: 8 }).effectiveness.mttr;
+  assert.equal(missing.reportFilters.status, 'duration_groups_unavailable');
+  assert.equal(missing.durationFilter.maxHours, 8);
+  assert.equal(missing.reductionRate, null);
+  assert.equal(missing.overall.reductionRate, null);
+  assert.deepEqual(missing.reportFilters.overallExcludedJobs, { baseline: null, current: null });
+  assert.deepEqual(missing.people.ranking, []);
+  assert.match(missing.reportFilters.unavailableReason!, /export again/);
+  for (const threshold of [null, 0, -1, NaN, Infinity]) {
+    const invalid = facts({ ...input, mttrMaxHours: threshold }).effectiveness.mttr;
+    assert.equal(invalid.reportFilters.status, 'invalid_duration_threshold');
+    assert.equal(invalid.reportFilters.maxHours, null);
+    assert.equal(invalid.reductionRate, null);
+    assert.deepEqual(invalid.reportFilters.selectedExcludedJobs, { baseline: null, current: null });
+    assert.deepEqual(invalid.people.ranking, []);
+  }
+  assert.equal(facts(input).effectiveness.mttr.durationFilter.enabled, false);
+});

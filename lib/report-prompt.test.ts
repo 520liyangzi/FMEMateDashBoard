@@ -204,3 +204,14 @@ test('MTTR writing rules disclose same-day subset, scoped exclusions and missing
   assert.match(prompt, /不能表述为全部 JOB 成效/);
   assert.match(prompt, /不得认定跨天 JOB 没有价值或归因 FMEMate/);
 });
+
+test('MTTR prompt discloses duration equality, combined exclusions and unavailable exact data', () => {
+  const prompt = buildAiReportPrompt(facts());
+  assert.match(prompt, /durationFilter.enabled=true/);
+  assert.match(prompt, /耗时 ≥ X 小时（含等于）全部排除，仅保留 < X 小时/);
+  assert.match(prompt, /时长筛选与同日条件按 AND 组合/);
+  assert.match(prompt, /同一 JOB 即使同时跨天且超时，也只能排除计数一次/);
+  assert.match(prompt, /duration_groups_unavailable/);
+  assert.match(prompt, /invalid_duration_threshold/);
+  assert.match(prompt, /不能从日均值推算或回退到全量结果/);
+});

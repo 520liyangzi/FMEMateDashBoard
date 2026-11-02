@@ -157,3 +157,24 @@ test('offline report preserves the captured cross-day selection and exact same-d
     assert.ok(!('sameDay' in oldExported.mttr), 'two-minute duration alone cannot establish a same-calendar-day Job');
   });
 });
+
+test('offline snapshots preserve editable duration threshold and exact duration groups without inventing old data', async () => {
+  await browserMock(async context => {
+    context.setFetch((async () => Response.json({ js: 'console.log(1)', css: 'body{}' })) as typeof fetch);
+    const durationGroups = [{ date: '2026-10-31', assignee: 'A', durationSeconds: 1800, count: 2, sameDay: true }];
+    const snapshot = { demo: false, mttrDurationLimitEnabled: true, mttrDurationLimitHours: '0.5', mttrExcludeCrossDay: true,
+      mttr: { formatVersion: 3, durationGroups }, state: { feedback: [] } };
+    await downloadOfflineReport(snapshot, 'en');
+    const exported = JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.equal(exported.mttrDurationLimitEnabled, true);
+    assert.equal(exported.mttrDurationLimitHours, '0.5');
+    assert.equal(exported.mttrExcludeCrossDay, true);
+    assert.deepEqual(exported.mttr.durationGroups, durationGroups);
+    assert.equal(snapshot.mttrDurationLimitHours, '0.5');
+    await downloadOfflineReport({ demo: false, mttr: { formatVersion: 3, days: [] }, state: { feedback: [] } }, 'en');
+    const old = JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.ok(!('durationGroups' in old.mttr));
+    assert.ok(!('mttrDurationLimitEnabled' in old));
+    assert.ok(!('mttrDurationLimitHours' in old));
+  });
+});

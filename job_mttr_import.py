@@ -156,6 +156,14 @@ def joined_aggregates(db,exclude_cross_day=False):
     people=[{'assignee':r[0],'date':r[1],'count':r[2],'totalSeconds':r[3]} for r in db.execute('SELECT j.assignee,substr(j.finishedAt,1,10),count(*),sum(j.durationSeconds) '+join+' GROUP BY j.assignee,substr(j.finishedAt,1,10) ORDER BY 1,2')]
     return days,people
 
+def duration_groups(db):
+    """Exact duration groups, not rounded bins, support arbitrary offline limits."""
+    query=f'''SELECT substr(j.finishedAt,1,10),j.assignee,j.durationSeconds,count(*),
+                     substr(j.createdAt,1,10)=substr(j.finishedAt,1,10)
+              FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO}
+              GROUP BY 1,2,3,5 ORDER BY 1,2,3,5'''
+    return [{'date':r[0],'assignee':r[1],'durationSeconds':r[2],'count':r[3],'sameDay':bool(r[4])} for r in db.execute(query)]
+
 def finish_pair(summary,days,people):
     tt,job=summary['sources']['tt'],summary['sources']['job']
     total=sum(d['count'] for d in days)
@@ -221,6 +229,35 @@ def validate_v3(value):
             total[0]+=row['count'];total[1]+=row['totalSeconds']
         if set(person_totals)!={row['date'] for row in subset['days']} or any(person_totals[row['date']][0]!=row['count'] or not math.isclose(person_totals[row['date']][1],row['totalSeconds'],rel_tol=1e-12,abs_tol=1e-5) for row in subset['days']):
             raise MttrImportError('Inconsistent same-day person totals.')
+    if 'durationGroups' in value:
+        groups=value['durationGroups']
+        if not isinstance(groups,list):raise MttrImportError('Invalid duration groups.')
+        totals={False:({},{}),True:({},{})};previous=None
+        for row in groups:
+            if not isinstance(row,dict) or set(row)!={'date','assignee','durationSeconds','count','sameDay'}:
+                raise MttrImportError('Invalid duration group fields.')
+            day=row['date'];seconds=row['durationSeconds'];count=row['count']
+            if not isinstance(day,str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',day):raise MttrImportError('Invalid duration group date.')
+            datetime.fromisoformat(day)
+            if not isinstance(row['assignee'],str) or len(row['assignee'])>1000 or type(row['sameDay']) is not bool:
+                raise MttrImportError('Invalid duration group assignee or date flag.')
+            try:valid_values=type(seconds) in (int,float) and math.isfinite(seconds) and seconds>=0 and type(count) is int and 0<count<=9007199254740991 and math.isfinite(seconds*count)
+            except OverflowError:valid_values=False
+            if not valid_values:raise MttrImportError('Invalid duration group values.')
+            key=(day,row['assignee'],seconds,row['sameDay'])
+            if previous is not None and key<=previous:raise MttrImportError('Invalid duration group order.')
+            previous=key
+            for same in (False,True):
+                if same and not row['sameDay']:continue
+                for target,key in ((totals[same][0],day),(totals[same][1],(row['assignee'],day))):
+                    total=target.setdefault(key,[0,0]);total[0]+=count;total[1]+=seconds*count
+        def matches(rows,actual,person=False):
+            key=lambda row:(row['assignee'],row['date']) if person else row['date']
+            return set(actual)=={key(r) for r in rows} and all(actual[key(r)][0]==r['count'] and math.isclose(actual[key(r)][1],r['totalSeconds'],rel_tol=1e-12,abs_tol=1e-5) for r in rows)
+        if not matches(value['days'],totals[False][0]) or not matches(value['personDays'],totals[False][1],True):
+            raise MttrImportError('Duration groups do not match complete Job statistics.')
+        if 'sameDay' in value and (not matches(value['sameDay']['days'],totals[True][0]) or not matches(value['sameDay']['personDays'],totals[True][1],True)):
+            raise MttrImportError('Duration groups do not match same-day Job statistics.')
     if any(type(value.get(k)) is not int or not 0<value[k]<=9007199254740991 for k in ('storedJobs','storedTtIds')):
         raise MttrImportError('Invalid stored TT/Job history counts.')
     total=sum(d['count'] for d in value['days'])
@@ -233,7 +270,7 @@ def validate_v3(value):
         if type(value['updatedJobs']) is not int or not 0<=value['updatedJobs']<=min(value['storedJobs'],job['duplicates']) or (value['updatedJobs']>0 and value.get('duplicatePolicy')!='update'):
             raise MttrImportError('Invalid updated Job count.')
     summary={k:value[k] for k in ('sources','mappings','sourceHeaders','importedAt','storedJobs','storedTtIds')}
-    summary.update({k:value[k] for k in ('updatedJobs','duplicatePolicy','sameDay') if k in value})
+    summary.update({k:value[k] for k in ('updatedJobs','duplicatePolicy','sameDay','durationGroups') if k in value})
 
     rebuilt=finish_pair(summary,value['days'],value['personDays'])
     if set(rebuilt)!=set(value) or any(value[k]!=v for k,v in rebuilt.items()):raise MttrImportError('Inconsistent TT/Job summary.')
