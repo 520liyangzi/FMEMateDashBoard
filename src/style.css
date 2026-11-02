@@ -12,3 +12,7 @@
 @media screen{.sidebar{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#375462 #142e3d}.sidebar>.brand,.sidebar>.workspace-label,.sidebar>.nav-separator,.sidebar>nav,.sidebar>.sidebar-bottom{flex-shrink:0}.presentation .daily-summary-manage,.presentation .daily-summary-toolbar>.btn{display:none}}
 
 .daily-active-chart{margin-bottom:22px}
+
+.trend-date-range{margin-bottom:18px;display:grid;gap:12px}.trend-date-range h2{display:flex;align-items:center;gap:8px}.trend-date-range p{font-size:12px;color:#687f8c;line-height:1.6;margin-top:5px}.trend-date-inputs{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.trend-date-inputs label{display:grid;gap:6px;font-size:12px;color:#405664}.trend-date-inputs input[type=date]{border:1px solid #dce5e8;border-radius:7px;padding:9px 10px;max-width:none;background:white;font-size:13px;width:160px}.trend-date-inputs input[aria-invalid=true]{border-color:#bd4747}.trend-chart-scope{font-size:12px;color:#687f8c;margin:0 0 12px;line-height:1.6}@media print{.trend-chart-scope{font-size:8pt;margin-bottom:2mm}}
+
+.trend-weekend-option{display:flex;align-items:center;gap:8px;font-size:13px}.trend-weekend-option input{accent-color:#0d8d7c;width:16px;height:16px}

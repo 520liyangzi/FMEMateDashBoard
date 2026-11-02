@@ -1,6 +1,8 @@
 type Language = 'zh' | 'en';
 type MutableSnapshot = Record<string, unknown> & {
   demo?: boolean;
+  trendExcludeWeekends?: boolean;
+  trendRange?: {from:string;to:string}|null;
   lang?: Language;
   /** Preserve the captured MTTR subset selection; old snapshots default to all Jobs. */
   mttrExcludeCrossDay?: boolean;

@@ -380,3 +380,13 @@ Apply Job-level day/duration conditions first. Assess the exclusion cohort once 
 Overview now includes a separate DAU chart using the selected date and scene filters. Each identifiable Client ID counts once per day; browser activity is excluded from user counts. The chart is included in print/PDF and offline HTML reports.
 
 概览新增独立日活图，跟随日期和 Scene 筛选，每日按 Client ID 去重，排除 browser 人数。打印/PDF 和离线 HTML 同步包含该图。
+
+### v1.9.7 — Trend date range / 趋势时间范围
+
+The usage and DAU charts share an inclusive From–To selector. They follow the page dates by default; custom chart dates leave other page metrics unchanged and still respect the scene filter. Shortcuts (7/30 days or all log dates) end on the latest imported log date. Chart ranges appear in print/PDF, are preserved and editable in offline HTML, and have separate data/scope sheets in Excel exports.
+
+使用趋势和日活图支持共用的起止日期（含起止当天），默认跟随页面日期；自定义只影响两张图，仍应用 Scene 筛选。近 7/30 天以最新日志日期为结束日。打印/PDF 标注图表范围，离线 HTML 保留并支持修改范围，Excel 新增趋势图数据和范围工作表。
+
+An optional **Exclude weekends** checkbox removes Saturday/Sunday points from both charts and their Excel data. It uses the date shown in the source log, without timezone shifts; the selection is captured in offline reports.
+
+可勾选“排除周末”：按日志中的自然日期剔除周六、周日，仅影响两张趋势图及对应 Excel 数据，并在离线报表中保留选项。
