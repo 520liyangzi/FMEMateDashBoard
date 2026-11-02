@@ -374,3 +374,9 @@ The browser remembers both the option and X. Overall/assignee MTTR, ranking, cal
 The optional **Exclude assignees with MTTR gap ≥ X hours** filter is off by default (initial X: 8). It compares each named assignee’s baseline and comparison arithmetic means. If their absolute difference is at least X hours, that assignee is excluded from both ranking and overall aggregation, symmetrically for shorter and longer durations.
 
 Apply Job-level day/duration conditions first. Assess the exclusion cohort once using both selected periods, then recompute overall MTTR from retained Job durations and counts. Never average personal means or iteratively remove people. Selection of one assignee does not change the cohort. Named assignees missing a period and unassigned Jobs remain in overall figures without a gap decision; zero-baseline means can be compared for absolute gaps but percentage reduction stays unavailable. The page and exports disclose exclusions, sample counts and means. This screen does not control ticket complexity or establish causal project benefits. Saved history and import-quality counters remain unchanged.
+
+### v1.9.6 — Daily active users / 每日活跃用户
+
+Overview now includes a separate DAU chart using the selected date and scene filters. Each identifiable Client ID counts once per day; browser activity is excluded from user counts. The chart is included in print/PDF and offline HTML reports.
+
+概览新增独立日活图，跟随日期和 Scene 筛选，每日按 Client ID 去重，排除 browser 人数。打印/PDF 和离线 HTML 同步包含该图。

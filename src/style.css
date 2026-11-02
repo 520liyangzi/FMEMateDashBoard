@@ -10,3 +10,5 @@
 
 .daily-export-bar{display:flex;justify-content:flex-end;margin:-8px 0 18px}@media print{.daily-export-bar{display:none!important}}
 @media screen{.sidebar{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#375462 #142e3d}.sidebar>.brand,.sidebar>.workspace-label,.sidebar>.nav-separator,.sidebar>nav,.sidebar>.sidebar-bottom{flex-shrink:0}.presentation .daily-summary-manage,.presentation .daily-summary-toolbar>.btn{display:none}}
+
+.daily-active-chart{margin-bottom:22px}
