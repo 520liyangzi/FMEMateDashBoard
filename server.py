@@ -28,7 +28,7 @@ from job_mttr_import import stage_pair, joined_aggregates, finish_pair, validate
 from mttr_uploads import MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.9.2'
+APP_VERSION = '1.9.3'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -193,7 +193,13 @@ class Store:
     def get_mttr(self):
         with self.lock, self.connect() as db:
             row = db.execute('SELECT data FROM mttr_dataset WHERE id=1').fetchone()
-            return json.loads(row['data']) if row else None
+            dataset=json.loads(row['data']) if row else None
+            # Old V3 databases already retain timestamps. Supply the new view
+            # without requiring a reimport or changing their stored history.
+            if dataset and dataset.get('formatVersion')==3 and 'sameDay' not in dataset:
+                days,people=joined_aggregates(db,True)
+                dataset['sameDay']={'days':days,'personDays':people}
+            return dataset
 
     @staticmethod
     def require_job_mttr(db):
@@ -203,14 +209,16 @@ class Store:
             raise ApiError(409,'需要 TT + Job 数据 / Import TT + Job data before auditing stored Job timestamps.')
         return dataset
 
-    def get_mttr_jobs(self, date_from, date_to, assignee=None, offset=0, limit=100):
+    def get_mttr_jobs(self, date_from, date_to, assignee=None, offset=0, limit=100, exclude_cross_day=False):
         require_date(date_from);require_date(date_to)
         if date_from>date_to:raise ApiError(400,'开始日期不能晚于结束日期 / Start date must not be after end date.')
         if type(offset) is not int or not 0<=offset<=9007199254740991 or type(limit) is not int or not 1<=limit<=1000:
             raise ApiError(400,'分页参数无效 / Offset must be nonnegative and limit must be between 1 and 1000.')
         if assignee is not None and (not isinstance(assignee,str) or len(assignee)>1000):
             raise ApiError(400,'Invalid assignee filter.')
+        if type(exclude_cross_day) is not bool:raise ApiError(400,'Invalid cross-day Job filter.')
         where=f'FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO} AND substr(j.finishedAt,1,10)>=? AND substr(j.finishedAt,1,10)<=?'
+        if exclude_cross_day:where+=' AND substr(j.createdAt,1,10)=substr(j.finishedAt,1,10)'
         values=[date_from,date_to]
         if assignee is not None:
             where+=' AND j.assignee=?';values.append(assignee)
@@ -306,6 +314,8 @@ class Store:
                     summary['storedJobs']=db.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]
                     summary['storedTtIds']=db.execute('SELECT count(*) FROM mttr_tt').fetchone()[0]
                     days,people=joined_aggregates(db)
+                    same_days,same_people=joined_aggregates(db,True)
+                    summary['sameDay']={'days':same_days,'personDays':same_people}
                     dataset=finish_pair(summary,days,people)
                     db.execute('DELETE FROM mttr_tickets')
                     db.execute('INSERT INTO mttr_dataset(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',(json.dumps(dataset,ensure_ascii=False,allow_nan=False),))
@@ -767,6 +777,10 @@ class Store:
                         def same_aggregates(actual,expected,person=False):
                             return len(actual)==len(expected) and all(a['date']==b['date'] and (not person or a['assignee']==b['assignee']) and a['count']==b['count'] and math.isclose(a['totalSeconds'],b['totalSeconds'],rel_tol=1e-12,abs_tol=1e-5) for a,b in zip(actual,expected))
                         if not same_aggregates(days,mttr_snapshot['days']) or not same_aggregates(people,mttr_snapshot['personDays'],True):raise ApiError(400,'Backup TT/Job ledgers do not match MTTR statistics.')
+                        if 'sameDay' in mttr_snapshot:
+                            same_days,same_people=joined_aggregates(dest,True)
+                            if not same_aggregates(same_days,mttr_snapshot['sameDay']['days']) or not same_aggregates(same_people,mttr_snapshot['sameDay']['personDays'],True):
+                                raise ApiError(400,'Backup TT/Job ledgers do not match same-day MTTR statistics.')
                     elif dest.execute('SELECT count(*) FROM mttr_tt').fetchone()[0] or dest.execute('SELECT count(*) FROM mttr_jobs').fetchone()[0]:
                         raise ApiError(400,'Backup TT/Job ledger has no matching V3 statistics.')
                     if 'site_visits' in tables:
@@ -976,12 +990,14 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(url.query)
             if path == '/api/mttr/jobs':
                 audit_params=parse_qs(url.query,keep_blank_values=True)
-                if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit'} or any(len(values)!=1 for values in audit_params.values()):
+                if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit','excludeCrossDay'} or any(len(values)!=1 for values in audit_params.values()):
                     raise ApiError(400,'请指定唯一的开始和结束日期 / Specify one from and to date, with optional assignee, offset and limit.')
                 try:
                     offset=int(audit_params.get('offset',['0'])[0]);limit=int(audit_params.get('limit',['100'])[0])
                 except ValueError:raise ApiError(400,'Invalid Job audit pagination.')
-                return self.json(self.server.store.get_mttr_jobs(audit_params['from'][0],audit_params['to'][0],audit_params.get('assignee',[None])[0],offset,limit))
+                exclude_value=audit_params.get('excludeCrossDay',['false'])[0]
+                if exclude_value not in ('true','false'):raise ApiError(400,'excludeCrossDay must be true or false.')
+                return self.json(self.server.store.get_mttr_jobs(audit_params['from'][0],audit_params['to'][0],audit_params.get('assignee',[None])[0],offset,limit,exclude_value=='true'))
             if path == '/api/mttr/date-audit':
                 return self.json(self.server.store.get_mttr_date_audit())
             if path == '/api/mttr':

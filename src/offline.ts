@@ -2,6 +2,8 @@ type Language = 'zh' | 'en';
 type MutableSnapshot = Record<string, unknown> & {
   demo?: boolean;
   lang?: Language;
+  /** Preserve the captured MTTR subset selection; old snapshots default to all Jobs. */
+  mttrExcludeCrossDay?: boolean;
   state?: Record<string, unknown> & {
     feedback?: (Record<string, unknown> & { imageUrl?: string })[];
     siteVisits?: {photos:string[]}[];

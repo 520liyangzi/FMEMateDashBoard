@@ -136,3 +136,24 @@ test('offline visits embed all photos, preserve metadata, and strip private visi
     assert.ok(!(await context.generated()!.text()).includes('PRIVATE_SITE'));
   });
 });
+
+test('offline report preserves the captured cross-day selection and exact same-day aggregates without inventing old snapshot data', async () => {
+  await browserMock(async context => {
+    context.setFetch((async () => Response.json({ js: 'console.log(1)', css: 'body{}' })) as typeof fetch);
+    const sameDay = {
+      days: [{ date: '2026-10-31', count: 1, totalSeconds: 7200 }],
+      personDays: [{ assignee: 'A', date: '2026-10-31', count: 1, totalSeconds: 7200 }],
+    };
+    const snapshot = { demo: false, mttrExcludeCrossDay: true, mttr: { formatVersion: 3, sameDay }, state: { feedback: [] } };
+    await downloadOfflineReport(snapshot, 'en');
+    const exported = JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.equal(exported.mttrExcludeCrossDay, true);
+    assert.deepEqual(exported.mttr.sameDay, sameDay);
+    assert.equal(snapshot.mttrExcludeCrossDay, true);
+    const oldSnapshot = { demo: false, mttr: { formatVersion: 3, days: [{ date: '2026-10-31', count: 1, totalSeconds: 120 }] }, state: { feedback: [] } };
+    await downloadOfflineReport(oldSnapshot, 'en');
+    const oldExported = JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.ok(!('mttrExcludeCrossDay' in oldExported));
+    assert.ok(!('sameDay' in oldExported.mttr), 'two-minute duration alone cannot establish a same-calendar-day Job');
+  });
+});

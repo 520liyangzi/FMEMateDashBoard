@@ -147,8 +147,11 @@ def stage_pair(tt_content,tt_name,job_content,job_name,tt_mapping=None,job_mappi
         finally:db.close()
         yield {'sources':{'tt':tt,'job':job},'mappings':{'tt':tm,'job':jm},'sourceHeaders':{'tt':{r:normalized(th.get(c,''))[:200] for r,c in tm.items()},'job':{r:normalized(jh.get(c,''))[:200] for r,c in jm.items()}},'importedAt':stamp},path
 
-def joined_aggregates(db):
+def joined_aggregates(db,exclude_cross_day=False):
     join=f'FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO}'
+    # Use the source calendar dates, rather than a duration threshold or a
+    # timezone conversion. Even a two-minute interval can cross midnight.
+    if exclude_cross_day:join+=' AND substr(j.createdAt,1,10)=substr(j.finishedAt,1,10)'
     days=[{'date':r[0],'count':r[1],'totalSeconds':r[2]} for r in db.execute('SELECT substr(j.finishedAt,1,10),count(*),sum(j.durationSeconds) '+join+' GROUP BY substr(j.finishedAt,1,10) ORDER BY 1')]
     people=[{'assignee':r[0],'date':r[1],'count':r[2],'totalSeconds':r[3]} for r in db.execute('SELECT j.assignee,substr(j.finishedAt,1,10),count(*),sum(j.durationSeconds) '+join+' GROUP BY j.assignee,substr(j.finishedAt,1,10) ORDER BY 1,2')]
     return days,people
@@ -200,6 +203,24 @@ def validate_v3(value):
             if previous is not None and key<=previous:raise MttrImportError('Invalid aggregate order.')
             previous=key
     checked(value['days']);checked(value['personDays'],True)
+    if 'sameDay' in value:
+        subset=value['sameDay']
+        if not isinstance(subset,dict) or set(subset)!={'days','personDays'} or any(not isinstance(subset[k],list) for k in subset):
+            raise MttrImportError('Invalid same-day aggregate groups.')
+        checked(subset['days']);checked(subset['personDays'],True)
+        for group,person in (('days',False),('personDays',True)):
+            key=lambda row:(row['assignee'],row['date']) if person else row['date']
+            full={key(row):row for row in value[group]}
+            for row in subset[group]:
+                parent=full.get(key(row))
+                if parent is None or row['count']>parent['count'] or row['totalSeconds']>parent['totalSeconds']+1e-5:
+                    raise MttrImportError('Same-day aggregates exceed complete Job statistics.')
+        person_totals={}
+        for row in subset['personDays']:
+            total=person_totals.setdefault(row['date'],[0,0])
+            total[0]+=row['count'];total[1]+=row['totalSeconds']
+        if set(person_totals)!={row['date'] for row in subset['days']} or any(person_totals[row['date']][0]!=row['count'] or not math.isclose(person_totals[row['date']][1],row['totalSeconds'],rel_tol=1e-12,abs_tol=1e-5) for row in subset['days']):
+            raise MttrImportError('Inconsistent same-day person totals.')
     if any(type(value.get(k)) is not int or not 0<value[k]<=9007199254740991 for k in ('storedJobs','storedTtIds')):
         raise MttrImportError('Invalid stored TT/Job history counts.')
     total=sum(d['count'] for d in value['days'])
@@ -212,7 +233,7 @@ def validate_v3(value):
         if type(value['updatedJobs']) is not int or not 0<=value['updatedJobs']<=min(value['storedJobs'],job['duplicates']) or (value['updatedJobs']>0 and value.get('duplicatePolicy')!='update'):
             raise MttrImportError('Invalid updated Job count.')
     summary={k:value[k] for k in ('sources','mappings','sourceHeaders','importedAt','storedJobs','storedTtIds')}
-    summary.update({k:value[k] for k in ('updatedJobs','duplicatePolicy') if k in value})
+    summary.update({k:value[k] for k in ('updatedJobs','duplicatePolicy','sameDay') if k in value})
 
     rebuilt=finish_pair(summary,value['days'],value['personDays'])
     if set(rebuilt)!=set(value) or any(value[k]!=v for k,v in rebuilt.items()):raise MttrImportError('Inconsistent TT/Job summary.')

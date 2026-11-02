@@ -191,3 +191,16 @@ test('MTTR prompt refers to actual TT and JOB mappings and separates selected pe
   assert.match(prompt, /百分比减少最多不等于绝对平均耗时缩短最多/);
   assert.match(prompt, /Top 是有限样例/);
 });
+
+test('MTTR writing rules disclose same-day subset, scoped exclusions and missing legacy aggregates', () => {
+  const prompt = buildAiReportPrompt(facts());
+  assert.match(prompt, /calendarDayFilter.excludeCrossDay=true/);
+  assert.match(prompt, /23:59 至次日 00:01 也会排除/);
+  assert.match(prompt, /不能按小于 24 小时替代/);
+  assert.match(prompt, /selectedExcludedJobs 是当前人员范围两期排除数/);
+  assert.match(prompt, /overallExcludedJobs 是整体范围排除数/);
+  assert.match(prompt, /same_day_aggregates_unavailable/);
+  assert.match(prompt, /不能从全量均值还原筛选值/);
+  assert.match(prompt, /不能表述为全部 JOB 成效/);
+  assert.match(prompt, /不得认定跨天 JOB 没有价值或归因 FMEMate/);
+});

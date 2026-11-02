@@ -221,7 +221,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.2。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.3。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -339,3 +339,14 @@ Live MTTR dates default to the device's local today: the last seven inclusive ca
 - 更新是明确的选项，默认关闭，更换文件会重置。`updatedJobs` 记录本次实际变化的旧 Job 数（完全相同的不计更新），`duplicatePolicy` 记录 keep/update；字段确认重试保留该选项，备份兼容旧版无此元数据的数据。
 
 Saved-date auditing exposes parsed ledger values and the exact Job IDs behind a period. It does not reconstruct original workbook text or establish an unseen file’s parsing cause. The default duplicate policy keeps prior records; an explicit Update existing Jobs option applies corrected valid data from the current file while preserving unique Job counts. Future dates remain visible for inspection rather than silently removed.
+
+
+### 过滤跨天 Job / Exclude cross-day Jobs (v1.9.3)
+
+成效统计新增“过滤跨天 Job”，默认关闭，并记住当前浏览器的选择。打开后，只有原表 `jb_create_date` 与 `jb_finish_date` 的自然日期相同的 Job 参与计算，不转换时区。例如当日 23:59 到次日 00:01 也会排除，不能按耗时小于 24 小时替代。两期仍按完成日期归属，整体、指定人员、人员排名、计算明细、Excel、打印 / PDF、离线报表和 AI 提示词均使用该选择，并展示两期排除数量。
+
+该选择只改变统计范围，不删除历史记录，不影响 TT 分类、Done / Close、ID 去重规则和原始日期核对。导入质量计数保留全部数据口径。已保存的 V3 TT + Job 数据更新服务后可直接使用，无需重新上传；旧离线快照没有同日汇总时不会推算或展示未经筛选的结果，请从新版服务重新导出。已有每日总结和 AI 汇报文本不会自动改写。
+
+The Effectiveness page adds **Exclude cross-day Jobs**, off by default and remembered in the browser. When enabled, only Jobs whose source creation and finish timestamps share a calendar date enter MTTR calculations. No timezone conversion is applied. A Job from 23:59 to next-day 00:01 is excluded even though it lasts less than 24 hours. Finish dates still determine the reporting period. Overall and assignee comparisons, rankings, calculation details, Excel, print/PDF, offline reports and AI prompts use the selected policy and disclose excluded counts.
+
+The option preserves all saved Jobs and existing TT/status/deduplication rules. Raw date audits and import quality counters remain unfiltered. Existing V3 server data works after updating without reuploading source files. Older offline snapshots lack the subset; export a new report rather than infer it from averages. Saved daily-summary and AI-report text is unchanged.

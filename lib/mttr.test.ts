@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeMttrPeople, compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, type MttrDataset } from './mttr.ts';
+import { analyzeMttrPeople, compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, selectMttrDayScope, type MttrDataset } from './mttr.ts';
 
 const dataset = (days: MttrDataset['days']): MttrDataset => ({
   filename: 'tickets.xlsx', importedAt: '2026-10-31T00:00:00Z', sourceRows: 0, matchedRows: 0,
@@ -140,4 +140,31 @@ test('ties use deterministic competition ranks and invalid ranges do not create 
   assert.deepEqual(analyzeMttrPeople(d, baseline, current).map(r => [r.assignee, r.rank]), [['Aaron', 1], ['Alex', 1], ['Blake', 3], ['', null]]);
   const rows = analyzeMttrPeople(d, { from: '', to: '' }, current);
   assert.equal(rows.every(r => r.rank === null && r.comparison.reductionRate === null), true);
+});
+
+test('same-calendar-day scope changes weighted means and people without mutating history', () => {
+  const d = peopleDataset();
+  const personDays = d.personDays!.filter(day => day.assignee === 'Alex');
+  d.sameDay = { days: personDays.map(({ assignee, ...day }) => day), personDays };
+  const before = JSON.stringify(d), filtered = selectMttrDayScope(d, true)!;
+  assert.equal(selectMttrDayScope(d, false), d);
+  assert.equal(filtered.totalJobs, 2);
+  assert.equal(compareMttr(filtered, baseline, current).reductionRate, 50);
+  assert.equal(compareMttr(d, baseline, current).reductionRate, 41.25);
+  assert.deepEqual(analyzeMttrPeople(filtered, baseline, current).map(p => [p.assignee, p.rank]), [['Alex', 1]]);
+  assert.equal(compareMttr(filtered, baseline, current, '').reductionRate, null);
+  assert.equal(JSON.stringify(d), before);
+});
+
+test('same-day scope distinguishes missing old aggregates from a valid empty subset', () => {
+  const d = peopleDataset();
+  assert.equal(selectMttrDayScope(d, true), null);
+  assert.equal(selectMttrDayScope(null, true), null);
+  d.sameDay = { days: [], personDays: [] };
+  const filtered = selectMttrDayScope(d, true)!;
+  assert.equal(filtered.totalJobs, 0);
+  assert.equal(filtered.latestDate, '');
+  assert.equal(compareMttr(filtered, baseline, current).status, 'no_baseline_tickets');
+  assert.deepEqual(analyzeMttrPeople(filtered, baseline, current), []);
+  assert.equal(selectMttrDayScope({ ...d, formatVersion: 2 }, true), null);
 });

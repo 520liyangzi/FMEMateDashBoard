@@ -1,5 +1,5 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
-import { compareMttr, previousMttrPeriod, analyzeMttrPeople, type MttrDataset, type MttrPeriod } from './mttr.ts';
+import { compareMttr, previousMttrPeriod, analyzeMttrPeople, selectMttrDayScope, type MttrDataset, type MttrPeriod } from './mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -31,6 +31,7 @@ export type AiFactsInput = {
   mttrBaseline?: MttrPeriod;
   mttrCurrent?: MttrPeriod;
   mttrAssignee?: string;
+  mttrExcludeCrossDay?: boolean;
 };
 
 const LIMITS = {
@@ -50,10 +51,19 @@ export function buildAiFacts(input: AiFactsInput) {
   const mttrCurrent = input.mttrCurrent ?? { from, to };
   const mttrBaseline = input.mttrBaseline ?? previousMttrPeriod(mttrCurrent) ?? { from: '', to: '' };
   const mttrV3 = input.mttr?.formatVersion === 3;
-  const mttrOverall = compareMttr(mttrV3 ? input.mttr! : null, mttrBaseline, mttrCurrent);
+  const mttrExcludeCrossDay = input.mttrExcludeCrossDay === true;
+  const mttrAllData = mttrV3 ? input.mttr! : null;
+  const mttrScopedData = selectMttrDayScope(mttrAllData, mttrExcludeCrossDay);
+  const mttrOverall = compareMttr(mttrScopedData, mttrBaseline, mttrCurrent);
   const selectedMttrAssignee = mttrV3 ? input.mttrAssignee : undefined;
-  const mttrComparison = compareMttr(mttrV3 ? input.mttr! : null, mttrBaseline, mttrCurrent, selectedMttrAssignee);
-  const mttrPeople = mttrV3 ? analyzeMttrPeople(input.mttr!, mttrBaseline, mttrCurrent) : [];
+  const mttrComparison = compareMttr(mttrScopedData, mttrBaseline, mttrCurrent, selectedMttrAssignee);
+  const mttrUnfilteredOverall = compareMttr(mttrAllData, mttrBaseline, mttrCurrent);
+  const mttrUnfilteredSelected = compareMttr(mttrAllData, mttrBaseline, mttrCurrent, selectedMttrAssignee);
+  const excludedJobs = (unfiltered: typeof mttrOverall, filtered: typeof mttrOverall) => ({
+    baseline: mttrScopedData ? unfiltered.baseline.count - filtered.baseline.count : null,
+    current: mttrScopedData ? unfiltered.current.count - filtered.current.count : null,
+  });
+  const mttrPeople = mttrScopedData ? analyzeMttrPeople(mttrScopedData, mttrBaseline, mttrCurrent) : [];
   const mttrRanked = mttrPeople.filter(person => person.rank !== null);
   const mttrUnranked = mttrPeople.filter(person => person.rank === null);
   // Retention cohorts are useful in the interactive dashboard; the writing
@@ -203,13 +213,23 @@ export function buildAiFacts(input: AiFactsInput) {
         ...mttrComparison,
         businessRule: mttrV3 ? 'TT-category-filter-joined-to-completed-JOB-by-TT-ID' : 'legacy-single-table-reimport-TT-and-JOB-required',
         overall: mttrOverall,
+        calendarDayFilter: {
+          excludeCrossDay: mttrExcludeCrossDay,
+          policy: mttrExcludeCrossDay ? 'same-calendar-date' : 'all-dates',
+          available: !!mttrScopedData,
+          status: !mttrV3 ? 'no_joined_dataset' : !mttrScopedData ? 'same_day_aggregates_unavailable' : 'available',
+          selectedExcludedJobs: excludedJobs(mttrUnfilteredSelected, mttrComparison),
+          overallExcludedJobs: excludedJobs(mttrUnfilteredOverall, mttrOverall),
+          definition: 'When enabled, keep only Jobs whose selected created and finished timestamps have the same source calendar date. A Job from 23:59 to 00:01 on the following date is cross-day and excluded even though its duration is under 24 hours. Both compared periods, the selected assignee, overall metrics and person ranking use the same option. The option never deletes saved Jobs. Excluded counts are within each finish-date period and their stated assignee scope. When disabled all eligible Jobs remain included.',
+          unavailableReason: mttrV3 && !mttrScopedData ? 'This snapshot has no same-day aggregates. Open the updated live app and export again, or turn off the cross-day filter; never infer the subset from daily means or a 24-hour threshold.' : null,
+        },
         selectedScope: {
           type: selectedMttrAssignee === undefined ? 'overall' : 'assignee',
           assignee: selectedMttrAssignee === undefined ? null : text(selectedMttrAssignee, LIMITS.identifierCharacters, 'effectiveness.mttr.selectedScope.assignee'),
           requestedLegacyAssigneeUnavailable: !mttrV3 && input.mttrAssignee !== undefined,
         },
         people: {
-          available: mttrV3,
+          available: !!mttrScopedData,
           totalAssignees: mttrPeople.length,
           rankedCount: mttrRanked.length,
           unrankedCount: mttrUnranked.length,
@@ -217,13 +237,13 @@ export function buildAiFacts(input: AiFactsInput) {
           rankingCoverage: coverage(mttrRanked.length, mttrRanking.length, 'Highest signed percentage reduction first, across all eligible named assignees; unaffected by selected assignee'),
           unrankedExamples: mttrUnrankedExamples,
           unrankedCoverage: coverage(mttrUnranked.length, mttrUnrankedExamples.length, 'Unranked assignees sorted by exact name; examples only'),
-          definition: 'Each named assignee is compared against their own baseline and current period means. Both periods need at least one valid completed Job and a positive baseline mean. Unassigned, missing-period and zero-baseline groups are unranked. Ties share competition rank. Signed percentage reduction sorts descending; the highest percentage does not necessarily have the largest absolute mean-time reduction or total time saved. Overall uses all valid joined Jobs, including unassigned, and is not an average of person rates.',
+          definition: 'Each named assignee is compared against their own baseline and current period means. Both periods need at least one valid completed Job and a positive baseline mean. Unassigned, missing-period and zero-baseline groups are unranked. Ties share competition rank. Signed percentage reduction sorts descending; the highest percentage does not necessarily have the largest absolute mean-time reduction or total time saved. Overall uses all valid joined Jobs remaining after the selected calendar-day filter, including unassigned, and is not an average of person rates.',
         },
         source: 'Imported TT and JOB system aggregates when businessRule is joined; legacy single-table aggregates otherwise. Independent of app logs and Scene filters.',
         importedAt: input.mttr?.importedAt ?? null,
         dataQuality: input.mttr ? {
           formatVersion: input.mttr.formatVersion ?? 1,
-          countsScope: mttrV3 ? 'sources.tt and sources.job contain their own latest import diagnostics. totalJobs is the accumulated valid joined unique jb_id count used by MTTR; totalTickets is a compatibility alias equal to totalJobs, not a TT count. storedJobs counts all stored valid unique Jobs including unmatched/non-Radio Jobs; storedTtIds counts all IDs in the stored TT catalog, not only eligible Radio TT IDs.' : 'sourceRows/matchedRows/validRows/excludedRows/invalidDates/negativeDurations/addedRows/duplicateRows/missingIds describe the latest imported file only; totalTickets describes legacy accumulated unique tickets.',
+          countsScope: mttrV3 ? 'sources.tt and sources.job contain their own latest import diagnostics. totalJobs is the accumulated valid joined unique jb_id count before the optional cross-day filter; totalTickets is a compatibility alias equal to totalJobs, not a TT count. storedJobs counts all stored valid unique Jobs including unmatched/non-Radio Jobs; storedTtIds counts all IDs in the stored TT catalog, not only eligible Radio TT IDs.' : 'sourceRows/matchedRows/validRows/excludedRows/invalidDates/negativeDurations/addedRows/duplicateRows/missingIds describe the latest imported file only; totalTickets describes legacy accumulated unique tickets.',
           totalJobs: input.mttr.totalJobs ?? null,
           updatedJobs: Number.isSafeInteger(input.mttr.updatedJobs) && input.mttr.updatedJobs! >= 0 ? input.mttr.updatedJobs! : 0,
           duplicatePolicy: input.mttr.duplicatePolicy === 'update' ? 'update' : 'keep',
@@ -264,10 +284,11 @@ export function buildAiFacts(input: AiFactsInput) {
         } : null,
         definition: mttrV3
           ? 'Filter TT category to Radio-OSP or Radio-ISP, without filtering TT status. Join eligible TT IDs to JOB.tt_id. Include JOB status Done or Close only. Duration is selected JOB finished minus JOB created timestamp; defaults are G created, I finished, AG assignee and AR status, but actual mappings and sourceHeaders govern. Assign to the JOB finished date inclusively. Count each valid unique jb_id once: multiple Jobs for one TT are separate observations. Within each file, the first valid occurrence wins. Across uploads, duplicatePolicy defaults to keep, preserving saved Jobs; only an explicit update policy replaces an existing Job from a valid current-file record. updatedJobs is the latest import count of existing Jobs updated, not new Jobs, and the resulting dates, durations, associations, assignees and aggregates are recomputed. The latest TT catalog recomputes membership for all saved valid Jobs, including previously unmatched Jobs. Divide total elapsed seconds by valid joined Job count, not TT count or the number of assignees. Do not use TT creation/closure times or assign_date in place of JOB timestamps.'
+          + (mttrExcludeCrossDay ? ' The selected calendar-day filter includes only Jobs created and finished on the same source calendar date. Its rates are conditional on this subset; cross-day exclusions are not evidence those Jobs lack business value.' : ' The calendar-day filter is off; eligible cross-day Jobs remain included.')
           : 'LEGACY SINGLE-TABLE DATA: old single-table percentages and means are deliberately withheld because they do not represent the new TT-category-to-JOB join. Reimport both TT and JOB sources before reporting the new business metric or person ranking. Version 2 uses first-valid selected ticket-ID deduplication; version 1 lacks verified ID deduplication.',
         units: 'meanSeconds, totalSeconds and savedSeconds are seconds. reductionRate is percentage: (baseline mean - current mean) / baseline mean × 100. Positive means shorter mean duration; negative means longer. savedSeconds is the difference in mean elapsed time per observation, not total work-hours saved.',
         limitations: 'Observed completed-Job comparison for v3, with no Job-to-app-use or app-user linkage. It does not establish FMEMate causation, labor time saved, ROI or comparable Job difficulty. Imported coverage is unconfirmed. Missing periods, invalid ranges or a zero baseline mean make rates unavailable, never an invented 0% or 100%. Overlapping or unequal-length periods must be disclosed. Individual scope does not filter the overall comparison or overall person ranking. ' + (mttrV3
-          ? 'The denominator is valid joined unique Jobs, including unassigned Jobs in the overall scope. A high percentage reduction need not imply the largest absolute time gain. Diagnostic row counts describe their source imports and are not interchangeable with totalJobs. Report actual selected periods and imported date evidence; do not silently hide future dates or claim an unverified date-error root cause. Explicit repair metadata only shows that existing records were updated, not why their prior dates differed. totalTickets is only a compatibility alias for totalJobs; storedJobs and storedTtIds describe complete ledgers, not eligible matched-job denominators.'
+          ? 'The denominator is valid joined unique Jobs, including unassigned Jobs in the overall scope. A high percentage reduction need not imply the largest absolute time gain. Diagnostic row counts describe their source imports and are not interchangeable with totalJobs. Report actual selected periods and imported date evidence; do not silently hide future dates or claim an unverified date-error root cause. Explicit repair metadata only shows that existing records were updated, not why their prior dates differed. totalTickets is only a compatibility alias for totalJobs; storedJobs and storedTtIds describe complete ledgers, not eligible matched-job denominators. The optional same-calendar-date filter changes both periods and rankings; filtered results describe that subset only and may differ in Job mix. Missing same-day aggregates must not be reconstructed from duration < 24 hours or reported as a zero rate.'
           : 'Legacy data is not the new TT/JOB joined business rule. Reimport both TT and JOB tables before making joined-Job or assignee-ranking claims. Version 1 additionally needs ID verification; version 2 ticket deduplication does not establish Job deduplication.'),
       },
     },
@@ -304,6 +325,7 @@ export function buildAiFacts(input: AiFactsInput) {
       `Window retention is not a first-use or registration cohort. It uses baseline-day identifiable accounts and counts each account once if it returns on ANY of the following ${retention.windowDays} calendar days. The baseline is windowDays before the selected end. The baseline day is excluded from follow-up; new later accounts do not enter the numerator. It does not require activity exactly on day N or on every day. Scene filtering is consistent and browser is excluded.`,
       'retention.latest describes the selected end date and its preceding window, not an average over the selected period. Always state previousDate (baseline), windowStart, date (window end), windowDays and retainedUsers/previousUsers. Missing baseline or any unobserved follow-up date makes rate null. Present logs are not confirmed complete; absent observations do not establish churn.',
       'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for the baseline and every follow-up day, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
+      'The MTTR calendarDayFilter option applies to all MTTR scopes. When excludeCrossDay=true, only Jobs with equal source creation and finish calendar dates remain; a short interval crossing midnight is excluded. Always disclose this selected subset and available excluded Job counts. Import diagnostic counters and totalJobs remain all-data counts before this optional filter. When same-day aggregates are unavailable, report the limitation and no filtered rate; do not substitute the unfiltered comparison.',
       'MTTR is independent of app log metrics, Scene filtering and app reporting dates. V3 joins Radio-OSP/Radio-ISP TT IDs to completed JOBs (Done/Close); TT status is not filtered. Use selected JOB finish-create elapsed time, finish-date grouping and unique jb_id denominators, allowing multiple Jobs per TT. State both ranges/counts/means and the reduction sign. Overall comparison and global person ranking stay independent of the selected person; never average person percentages or daily means. Do not infer total labor hours saved or FMEMate causation. Legacy v1/v2 is not this rule and requires reimporting both tables.',
       'Preset matching ignores case, whitespace, punctuation and symbols. MML records are always excluded from custom questions. Empty MML answers are normal.',
       'Only answers containing Sorry (case-insensitive) count as logged failures. Absence of Sorry is not proof of success, resolution, satisfaction, time saved or business value.',

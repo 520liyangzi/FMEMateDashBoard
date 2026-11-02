@@ -28,6 +28,8 @@ export type MttrDataset = {
   storedJobs?: number;
   storedTtIds?: number;
   personDays?: MttrPersonDay[];
+  /** Eligible Jobs whose source creation and finish timestamps share a calendar date. */
+  sameDay?: { days: MttrDay[]; personDays: MttrPersonDay[] };
   sources?: MttrSources;
   mappings?: { tt: MttrTtMapping; job: MttrJobMapping };
   sourceHeaders?: { tt: Record<string, string>; job: Record<string, string> };
@@ -51,6 +53,21 @@ export type MttrDataset = {
   latestDate: string;
 };
 export type MttrPeriod = { from: string; to: string };
+/**
+ * Select a reporting view without changing the imported history. Old snapshots
+ * contain only finish-date totals, so a same-day subset cannot be reconstructed
+ * from their averages. Return null rather than silently report all Jobs.
+ */
+export function selectMttrDayScope(dataset: MttrDataset | null, excludeCrossDay: boolean): MttrDataset | null {
+  if (!dataset || !excludeCrossDay) return dataset;
+  if (dataset.formatVersion !== 3 || !dataset.sameDay) return null;
+  const { days, personDays } = dataset.sameDay;
+  const total = days.reduce((sum, day) => sum + day.count, 0);
+  return {
+    ...dataset, days, personDays, totalJobs: total, totalTickets: total,
+    earliestDate: days[0]?.date ?? '', latestDate: days.at(-1)?.date ?? '',
+  };
+}
 export type MttrAggregate = MttrPeriod & {
   /** Inclusive calendar dates in the selected period. */
   days: number;

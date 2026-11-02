@@ -426,3 +426,76 @@ test('MTTR AI evidence reports explicit repair counts and defaults missing polic
   assert.match(repaired.definition, /only an explicit update policy replaces an existing Job/);
   assert.match(repaired.limitations, /not why their prior dates differed/);
 });
+
+test('MTTR same-calendar-day facts share the selected subset across overall, selected person and ranking', () => {
+  const personDays = [
+    { assignee: 'A', date: '2026-10-21', count: 2, totalSeconds: 93600 },
+    { assignee: 'A', date: '2026-10-22', count: 2, totalSeconds: 39600 },
+    { assignee: 'B', date: '2026-10-21', count: 1, totalSeconds: 14400 },
+    { assignee: 'B', date: '2026-10-22', count: 1, totalSeconds: 10800 },
+  ];
+  const sameDayPeople = [
+    { assignee: 'A', date: '2026-10-21', count: 1, totalSeconds: 7200 },
+    { assignee: 'A', date: '2026-10-22', count: 1, totalSeconds: 3600 },
+    ...personDays.filter(day => day.assignee === 'B'),
+  ];
+  const aggregate = (rows: typeof personDays) => ['2026-10-21', '2026-10-22'].map(date => ({ date,
+    count: rows.filter(day => day.date === date).reduce((n, day) => n + day.count, 0),
+    totalSeconds: rows.filter(day => day.date === date).reduce((n, day) => n + day.totalSeconds, 0),
+  }));
+  const mttr = { formatVersion: 3 as const, filename: '', importedAt: '', totalJobs: 6, totalTickets: 6,
+    sourceRows: 6, matchedRows: 6, validRows: 6, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    earliestDate: '2026-10-21', latestDate: '2026-10-22', days: aggregate(personDays), personDays,
+    sameDay: { days: aggregate(sameDayPeople), personDays: sameDayPeople },
+  };
+  const input = { mttr, mttrBaseline: { from: '2026-10-21', to: '2026-10-21' }, mttrCurrent: { from: '2026-10-22', to: '2026-10-22' }, mttrAssignee: 'A' };
+  const all = facts(input).effectiveness.mttr;
+  assert.equal(all.baseline.count, 2);
+  assert.equal(all.calendarDayFilter.excludeCrossDay, false);
+  assert.deepEqual(all.calendarDayFilter.selectedExcludedJobs, { baseline: 0, current: 0 });
+  const filtered = facts({ ...input, mttrExcludeCrossDay: true }).effectiveness.mttr;
+  assert.equal(filtered.baseline.count, 1);
+  assert.equal(filtered.current.count, 1);
+  assert.equal(filtered.baseline.meanSeconds, 7200);
+  assert.equal(filtered.current.meanSeconds, 3600);
+  assert.equal(filtered.reductionRate, 50);
+  assert.equal(filtered.overall.baseline.count, 2);
+  assert.equal(filtered.overall.current.count, 2);
+  assert.equal(filtered.overall.baseline.meanSeconds, 10800);
+  assert.equal(filtered.overall.current.meanSeconds, 7200);
+  assert.equal(filtered.people.ranking[0].assignee, 'A');
+  assert.equal(filtered.people.ranking[0].comparison.reductionRate, 50);
+  assert.equal(filtered.people.ranking[1].comparison.reductionRate, 25);
+  assert.equal(filtered.calendarDayFilter.policy, 'same-calendar-date');
+  assert.equal(filtered.calendarDayFilter.status, 'available');
+  assert.deepEqual(filtered.calendarDayFilter.selectedExcludedJobs, { baseline: 1, current: 1 });
+  assert.deepEqual(filtered.calendarDayFilter.overallExcludedJobs, { baseline: 1, current: 1 });
+  assert.equal(filtered.dataQuality!.totalJobs, 6, 'import quality diagnostics remain before this report filter');
+  assert.equal(filtered.dataQuality!.sourceRows, 6);
+  assert.match(filtered.dataQuality!.countsScope, /before the optional cross-day filter/);
+  assert.match(filtered.calendarDayFilter.definition, /23:59 to 00:01/);
+  assert.match(filtered.limitations, /subset only/);
+  assert.equal(mttr.days[0].count, 3, 'source snapshot is not mutated');
+});
+
+test('missing same-day aggregates never become invented filtered rates or rankings', () => {
+  const mttr = { formatVersion: 3 as const, filename: '', importedAt: '', totalJobs: 2, totalTickets: 2,
+    sourceRows: 2, matchedRows: 2, validRows: 2, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    earliestDate: '2026-10-21', latestDate: '2026-10-22',
+    days: [{ date: '2026-10-21', count: 1, totalSeconds: 7200 }, { date: '2026-10-22', count: 1, totalSeconds: 3600 }],
+    personDays: [{ assignee: 'A', date: '2026-10-21', count: 1, totalSeconds: 7200 }, { assignee: 'A', date: '2026-10-22', count: 1, totalSeconds: 3600 }],
+  };
+  const input = { mttr, mttrBaseline: { from: '2026-10-21', to: '2026-10-21' }, mttrCurrent: { from: '2026-10-22', to: '2026-10-22' } };
+  assert.equal(facts(input).effectiveness.mttr.reductionRate, 50);
+  const missing = facts({ ...input, mttrExcludeCrossDay: true }).effectiveness.mttr;
+  assert.equal(missing.calendarDayFilter.status, 'same_day_aggregates_unavailable');
+  assert.equal(missing.calendarDayFilter.available, false);
+  assert.match(missing.calendarDayFilter.unavailableReason!, /export again/);
+  assert.equal(missing.reductionRate, null);
+  assert.equal(missing.overall.reductionRate, null);
+  assert.equal(missing.baseline.meanSeconds, null);
+  assert.equal(missing.current.meanSeconds, null);
+  assert.deepEqual(missing.calendarDayFilter.selectedExcludedJobs, { baseline: null, current: null });
+  assert.equal(missing.people.available, false);
+  assert.deepEqual(missing.people.ranking, []);
+});
