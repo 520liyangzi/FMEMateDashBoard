@@ -178,3 +178,25 @@ test('offline snapshots preserve editable duration threshold and exact duration 
     assert.ok(!('mttrDurationLimitHours' in old));
   });
 });
+
+test('offline snapshots preserve editable personal mean-gap filter and original person aggregates', async () => {
+  await browserMock(async context => {
+    context.setFetch((async () => Response.json({ js: 'console.log(1)', css: 'body{}' })) as typeof fetch);
+    const personDays = [
+      { date: '2026-10-21', assignee: 'A', count: 1, totalSeconds: 7200 },
+      { date: '2026-10-22', assignee: 'A', count: 1, totalSeconds: 3600 },
+    ];
+    const snapshot = { demo: false, mttrGapLimitEnabled: true, mttrGapLimitHours: '0.5',
+      mttr: { formatVersion: 3, personDays }, state: { feedback: [] } };
+    await downloadOfflineReport(snapshot, 'en');
+    const exported = JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.equal(exported.mttrGapLimitEnabled, true);
+    assert.equal(exported.mttrGapLimitHours, '0.5');
+    assert.deepEqual(exported.mttr.personDays, personDays, 'keep original person data so the threshold can be changed offline');
+    assert.equal(snapshot.mttr.personDays.length, 2);
+    await downloadOfflineReport({ demo: false, mttr: { formatVersion: 3, days: [] }, state: { feedback: [] } }, 'en');
+    const old = JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+    assert.ok(!('mttrGapLimitEnabled' in old));
+    assert.ok(!('personDays' in old.mttr));
+  });
+});

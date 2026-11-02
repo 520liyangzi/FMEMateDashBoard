@@ -215,3 +215,17 @@ test('MTTR prompt discloses duration equality, combined exclusions and unavailab
   assert.match(prompt, /invalid_duration_threshold/);
   assert.match(prompt, /不能从日均值推算或回退到全量结果/);
 });
+
+test('MTTR prompts disclose symmetric personal mean-gap filtering without claiming comparable task difficulty', () => {
+  const prompt = buildAiReportPrompt(facts());
+  assert.match(prompt, /meanGapFilter.enabled=true/);
+  assert.match(prompt, /\|基准均值−对比均值\| ≥ X 小时（含等于）/);
+  assert.match(prompt, /整个人从整体汇总和排行中剔除/);
+  assert.match(prompt, /改善和变慢对称处理，零均值也能用于差距判断/);
+  assert.match(prompt, /缺少任一期记录者与未分配 JOB/);
+  assert.match(prompt, /名单独立于当前人员选择、只算一次/);
+  assert.match(prompt, /不能证明两周工单难度已一致/);
+  assert.match(prompt, /必须明确这是筛选后人群的观察/);
+  assert.match(prompt, /invalid_gap_threshold/);
+  assert.match(prompt, /gap_person_data_unavailable/);
+});

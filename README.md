@@ -221,7 +221,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.4。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.5。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -361,3 +361,16 @@ The option preserves all saved Jobs and existing TT/status/deduplication rules. 
 **Exclude Jobs lasting ≥ X hours** is off by default, with an initial value of 24 hours. Enter any valid positive number of hours, including decimals such as 0.5. When enabled, only Jobs lasting **strictly less than X hours** remain; equality is excluded. The calendar-day and duration filters work independently or together using AND. Combined exclusions count each Job once. Blank, zero or invalid thresholds make calculations unavailable with a clear message.
 
 The browser remembers both the option and X. Overall/assignee MTTR, ranking, calculation details, Excel, print/PDF, offline reports and AI prompts use the same rule. Individual Job durations are filtered before weighted means are calculated. History is preserved. Existing V3 server data requires no source reupload. New offline reports support changing X; old snapshots without duration data require a new export.
+
+
+### 人员两期均值差筛选 / Assignee period-mean gap filter (v1.9.5)
+
+“成效统计”新增“过滤两期 MTTR 差距 ≥ X 小时的处理人”，默认关闭，初始 X 为 8，可填写正数或小数。这里比较的是 **同一处理人** 的基准期平均 MTTR 与对比期平均 MTTR，绝对差 **大于或等于 X 小时** 即将该处理人从排行和整体汇总排除。时长缩短和增加对称判断，不按方向选择。
+
+计算顺序固定为：先应用跨天 / 单 Job 时长条件，再用剩余 Job 一次性计算每人的两期均值，得到排除名单；最后用保留 Job 的总时长 ÷ Job 数重新汇总整体，不平均个人均值，也不迭代筛选。选中某个处理人不会改变排除名单。调整两期日期或前置条件会重新判断。缺少任一期数据的具名处理人无法判断差距，继续保留在整体；未分配 Job 也保留，均不作为正常可排名人员。零基准均值仍可判断绝对差，但百分比减少率继续不可用。
+
+页面展示被排除人员、两期 Job 数、均值与绝对差；Excel 增加完整排除人员明细，打印、离线报表、计算明细及 AI 提示词沿用相同规则。原始 Job、原始日期核对和导入质量计数不变。浏览器与新离线报表保留开关及 X；已有 V3 数据无需重新上传。这个规则用于筛查差距过大的人员对比，不能保证工单难度一致，也不能凭筛选后的改善率证明 FMEMate 因果成效。
+
+The optional **Exclude assignees with MTTR gap ≥ X hours** filter is off by default (initial X: 8). It compares each named assignee’s baseline and comparison arithmetic means. If their absolute difference is at least X hours, that assignee is excluded from both ranking and overall aggregation, symmetrically for shorter and longer durations.
+
+Apply Job-level day/duration conditions first. Assess the exclusion cohort once using both selected periods, then recompute overall MTTR from retained Job durations and counts. Never average personal means or iteratively remove people. Selection of one assignee does not change the cohort. Named assignees missing a period and unassigned Jobs remain in overall figures without a gap decision; zero-baseline means can be compared for absolute gaps but percentage reduction stays unavailable. The page and exports disclose exclusions, sample counts and means. This screen does not control ticket complexity or establish causal project benefits. Saved history and import-quality counters remain unchanged.

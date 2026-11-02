@@ -28,7 +28,7 @@ from job_mttr_import import stage_pair, joined_aggregates, duration_groups, fini
 from mttr_uploads import MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.9.4'
+APP_VERSION = '1.9.5'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -211,7 +211,7 @@ class Store:
             raise ApiError(409,'需要 TT + Job 数据 / Import TT + Job data before auditing stored Job timestamps.')
         return dataset
 
-    def get_mttr_jobs(self, date_from, date_to, assignee=None, offset=0, limit=100, exclude_cross_day=False, max_hours=None):
+    def get_mttr_jobs(self, date_from, date_to, assignee=None, offset=0, limit=100, exclude_cross_day=False, max_hours=None, gap_hours=None, baseline=None, current=None):
         require_date(date_from);require_date(date_to)
         if date_from>date_to:raise ApiError(400,'开始日期不能晚于结束日期 / Start date must not be after end date.')
         if type(offset) is not int or not 0<=offset<=9007199254740991 or type(limit) is not int or not 1<=limit<=1000:
@@ -223,11 +223,33 @@ class Store:
             try:valid_hours=type(max_hours) in (int,float) and math.isfinite(max_hours) and max_hours>0 and math.isfinite(max_hours*3600)
             except OverflowError:valid_hours=False
             if not valid_hours:raise ApiError(400,'maxHours must be a finite positive number.')
-        where=f'FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO} AND substr(j.finishedAt,1,10)>=? AND substr(j.finishedAt,1,10)<=?'
-        if exclude_cross_day:where+=' AND substr(j.createdAt,1,10)=substr(j.finishedAt,1,10)'
-        values=[date_from,date_to]
+        if gap_hours is None:
+            if baseline is not None or current is not None:raise ApiError(400,'Comparison periods require gapHours.')
+        else:
+            try:valid_gap=type(gap_hours) in (int,float) and math.isfinite(gap_hours) and gap_hours>0 and math.isfinite(gap_hours*3600)
+            except OverflowError:valid_gap=False
+            if not valid_gap:raise ApiError(400,'gapHours must be a finite positive number.')
+            for period in (baseline,current):
+                if not isinstance(period,dict) or set(period)!={'from','to'}:raise ApiError(400,'gapHours requires baseline and current periods.')
+                require_date(period['from']);require_date(period['to'])
+                if period['from']>period['to']:raise ApiError(400,'Gap-filter period start must not be after its end.')
+        # Derive a fixed assignee cohort from the Job-level filters, before the
+        # requested detail dates or selected assignee are applied. The HAVING
+        # comparison is symmetric and includes a valid zero mean; missing means
+        # produce NULL and do not exclude the person. Unassigned Jobs stay.
+        qualified=f'FROM mttr_jobs j JOIN mttr_tt t ON j.ttId=t.ttId WHERE t.category IN {RADIO}'
+        qualified_values=[]
+        if exclude_cross_day:qualified+=' AND substr(j.createdAt,1,10)=substr(j.finishedAt,1,10)'
         # "X hours or above" is inclusive exclusion: exact-boundary Jobs go out.
-        if max_hours is not None:where+=' AND j.durationSeconds<?';values.append(max_hours*3600)
+        if max_hours is not None:qualified+=' AND j.durationSeconds<?';qualified_values.append(max_hours*3600)
+        where=qualified+' AND substr(j.finishedAt,1,10)>=? AND substr(j.finishedAt,1,10)<=?'
+        values=qualified_values+[date_from,date_to]
+        if gap_hours is not None:
+            gap_query='SELECT j.assignee '+qualified+''' AND trim(j.assignee)<>'' GROUP BY j.assignee
+                HAVING abs(avg(CASE WHEN substr(j.finishedAt,1,10)>=? AND substr(j.finishedAt,1,10)<=? THEN j.durationSeconds END)
+                         - avg(CASE WHEN substr(j.finishedAt,1,10)>=? AND substr(j.finishedAt,1,10)<=? THEN j.durationSeconds END))>=?'''
+            where+=' AND j.assignee NOT IN ('+gap_query+')'
+            values+=qualified_values+[baseline['from'],baseline['to'],current['from'],current['to'],gap_hours*3600]
         if assignee is not None:
             where+=' AND j.assignee=?';values.append(assignee)
         with self.lock,self.connect() as db:
@@ -1001,20 +1023,28 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(url.query)
             if path == '/api/mttr/jobs':
                 audit_params=parse_qs(url.query,keep_blank_values=True)
-                if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit','excludeCrossDay','maxHours'} or any(len(values)!=1 for values in audit_params.values()):
+                if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit','excludeCrossDay','maxHours','gapHours','baselineFrom','baselineTo','currentFrom','currentTo'} or any(len(values)!=1 for values in audit_params.values()):
                     raise ApiError(400,'请指定唯一的开始和结束日期 / Specify one from and to date, with optional assignee, offset and limit.')
                 try:
                     offset=int(audit_params.get('offset',['0'])[0]);limit=int(audit_params.get('limit',['100'])[0])
                 except ValueError:raise ApiError(400,'Invalid Job audit pagination.')
                 exclude_value=audit_params.get('excludeCrossDay',['false'])[0]
                 if exclude_value not in ('true','false'):raise ApiError(400,'excludeCrossDay must be true or false.')
-                max_hours=None
-                if 'maxHours' in audit_params:
-                    text=audit_params['maxHours'][0]
-                    if not re.fullmatch(r'(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?',text):raise ApiError(400,'maxHours must be a finite positive decimal number.')
-                    max_hours=float(text)
-                    if not math.isfinite(max_hours) or max_hours<=0 or not math.isfinite(max_hours*3600):raise ApiError(400,'maxHours must be a finite positive decimal number.')
-                return self.json(self.server.store.get_mttr_jobs(audit_params['from'][0],audit_params['to'][0],audit_params.get('assignee',[None])[0],offset,limit,exclude_value=='true',max_hours))
+                thresholds={}
+                for name in ('maxHours','gapHours'):
+                    thresholds[name]=None
+                    if name in audit_params:
+                        text=audit_params[name][0]
+                        if not re.fullmatch(r'(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?',text):raise ApiError(400,name+' must be a finite positive decimal number.')
+                        value=float(text)
+                        if not math.isfinite(value) or value<=0 or not math.isfinite(value*3600):raise ApiError(400,name+' must be a finite positive decimal number.')
+                        thresholds[name]=value
+                gap_fields={'baselineFrom','baselineTo','currentFrom','currentTo'}
+                if ('gapHours' in audit_params and not gap_fields<=set(audit_params)) or ('gapHours' not in audit_params and gap_fields&set(audit_params)):
+                    raise ApiError(400,'gapHours and all four comparison-period dates must be supplied together.')
+                baseline={'from':audit_params['baselineFrom'][0],'to':audit_params['baselineTo'][0]} if 'gapHours' in audit_params else None
+                current={'from':audit_params['currentFrom'][0],'to':audit_params['currentTo'][0]} if 'gapHours' in audit_params else None
+                return self.json(self.server.store.get_mttr_jobs(audit_params['from'][0],audit_params['to'][0],audit_params.get('assignee',[None])[0],offset,limit,exclude_value=='true',thresholds['maxHours'],thresholds['gapHours'],baseline,current))
             if path == '/api/mttr/date-audit':
                 return self.json(self.server.store.get_mttr_date_audit())
             if path == '/api/mttr':

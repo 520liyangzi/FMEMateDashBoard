@@ -588,3 +588,110 @@ test('missing exact duration data or an invalid enabled threshold never fabricat
   }
   assert.equal(facts(input).effectiveness.mttr.durationFilter.enabled, false);
 });
+
+function meanGapFactsFixture() {
+  const personDays = [
+    { assignee: 'Improved', date: '2026-10-21', count: 1, totalSeconds: 10 * 3600 },
+    { assignee: 'Improved', date: '2026-10-22', count: 1, totalSeconds: 2 * 3600 },
+    { assignee: 'Worsened', date: '2026-10-21', count: 1, totalSeconds: 2 * 3600 },
+    { assignee: 'Worsened', date: '2026-10-22', count: 1, totalSeconds: 10 * 3600 },
+    { assignee: 'Zero', date: '2026-10-21', count: 1, totalSeconds: 0 },
+    { assignee: 'Zero', date: '2026-10-22', count: 1, totalSeconds: 8 * 3600 },
+    { assignee: 'Keep', date: '2026-10-21', count: 2, totalSeconds: 8 * 3600 },
+    { assignee: 'Keep', date: '2026-10-22', count: 1, totalSeconds: 3 * 3600 },
+    { assignee: 'Missing', date: '2026-10-21', count: 1, totalSeconds: 6 * 3600 },
+    { assignee: '', date: '2026-10-21', count: 1, totalSeconds: 3600 },
+    { assignee: '', date: '2026-10-22', count: 1, totalSeconds: 2 * 3600 },
+  ];
+  const days = ['2026-10-21', '2026-10-22'].map(date => ({ date,
+    count: personDays.filter(row => row.date === date).reduce((total, row) => total + row.count, 0),
+    totalSeconds: personDays.filter(row => row.date === date).reduce((total, row) => total + row.totalSeconds, 0),
+  }));
+  const mttr = { formatVersion: 3 as const, filename: '', importedAt: '', totalJobs: 12, totalTickets: 12,
+    sourceRows: 12, matchedRows: 12, validRows: 12, invalidDates: 0, negativeDurations: 0, excludedRows: 0,
+    earliestDate: '2026-10-21', latestDate: '2026-10-22', days, personDays,
+  };
+  return { mttr, mttrBaseline: { from: '2026-10-21', to: '2026-10-21' }, mttrCurrent: { from: '2026-10-22', to: '2026-10-22' } };
+}
+
+test('personal mean-gap facts exclude both directions and equality, retain zero-mean eligibility and weighted overall', () => {
+  const input = meanGapFactsFixture(), before = JSON.stringify(input.mttr);
+  const report = facts({ ...input, mttrGapHours: 8 }).effectiveness.mttr;
+  assert.equal(report.meanGapFilter.enabled, true);
+  assert.equal(report.meanGapFilter.gapHours, 8);
+  assert.equal(report.meanGapFilter.status, 'available');
+  assert.equal(report.meanGapFilter.excludedAssigneeCount, 3);
+  assert.deepEqual(report.meanGapFilter.excludedExamples.map(person => person.assignee), ['Improved', 'Worsened', 'Zero']);
+  assert.ok(report.meanGapFilter.excludedExamples.every(person => person.gapSeconds === 8 * 3600));
+  assert.equal(report.meanGapFilter.unassessedAssignees, 1);
+  assert.deepEqual(report.meanGapFilter.unassignedJobs, { baseline: 1, current: 1 });
+  assert.equal(report.overall.baseline.count, 4);
+  assert.equal(report.overall.current.count, 2);
+  assert.equal(report.overall.baseline.meanSeconds, 3.75 * 3600);
+  assert.equal(report.overall.current.meanSeconds, 2.5 * 3600);
+  assert.ok(Math.abs(report.overall.reductionRate! - 100 / 3) < 1e-10);
+  assert.deepEqual(report.reportFilters.overallExcludedJobs, { baseline: 3, current: 3 });
+  assert.equal(report.dataQuality!.totalJobs, 12);
+  assert.deepEqual(report.people.ranking.map(person => person.assignee), ['Keep']);
+  assert.match(report.meanGapFilter.definition, /does not control Job difficulty/);
+  assert.equal(JSON.stringify(input.mttr), before);
+  const selected = facts({ ...input, mttrGapHours: 8, mttrAssignee: 'Improved' }).effectiveness.mttr;
+  assert.equal(selected.meanGapFilter.selectedAssigneeExcluded, true);
+  assert.equal(selected.reductionRate, null);
+  assert.equal(selected.baseline.count, 0);
+  assert.equal(selected.overall.baseline.meanSeconds, report.overall.baseline.meanSeconds, 'cohort does not depend on selected person');
+});
+
+test('mean-gap facts follow Job filters once and use final combined exclusions without double counting', () => {
+  const input = durationFactsFixture();
+  const report = facts({ ...input, mttrExcludeCrossDay: true, mttrMaxHours: 8, mttrGapHours: 2 }).effectiveness.mttr;
+  assert.equal(report.meanGapFilter.excludedAssigneeCount, 1);
+  assert.equal(report.meanGapFilter.excludedExamples[0].assignee, 'A');
+  assert.equal(report.meanGapFilter.excludedExamples[0].baseline.meanSeconds, 4 * 3600);
+  assert.equal(report.meanGapFilter.excludedExamples[0].current.meanSeconds, 2 * 3600);
+  assert.deepEqual(report.reportFilters.overallExcludedJobs, { baseline: 3, current: 2 });
+  assert.deepEqual(report.reportFilters.selectedExcludedJobs, { baseline: 2, current: 2 });
+  assert.equal(report.overall.current.meanSeconds, 6 * 3600, 'B lacks baseline after Job duration filtering and remains');
+  assert.equal(report.overall.baseline.count, 0);
+  assert.equal(report.reductionRate, null);
+  assert.equal(report.durationFilter.status, 'available', 'first-stage Job data stays valid independently of gap cohort');
+});
+
+test('invalid gap settings or missing person aggregates never fall back to original MTTR', () => {
+  const input = meanGapFactsFixture();
+  for (const threshold of [null, 0, -1, NaN, Infinity]) {
+    const report = facts({ ...input, mttrGapHours: threshold }).effectiveness.mttr;
+    assert.equal(report.meanGapFilter.status, 'invalid_threshold');
+    assert.equal(report.reportFilters.status, 'invalid_gap_threshold');
+    assert.equal(report.durationFilter.status, 'available');
+    assert.equal(report.reductionRate, null);
+    assert.deepEqual(report.reportFilters.overallExcludedJobs, { baseline: null, current: null });
+    assert.deepEqual(report.people.ranking, []);
+  }
+  const invalidRange = facts({ ...input, mttrBaseline: { from: 'bad', to: 'bad' }, mttrGapHours: 8 }).effectiveness.mttr;
+  assert.equal(invalidRange.reportFilters.status, 'invalid_gap_range');
+  const { personDays, ...old } = input.mttr;
+  const missing = facts({ ...input, mttr: old, mttrGapHours: 8 }).effectiveness.mttr;
+  assert.equal(missing.reportFilters.status, 'gap_person_data_unavailable');
+  assert.equal(missing.overall.reductionRate, null);
+  assert.match(missing.reportFilters.unavailableReason!, /person-day aggregates/);
+  const jobUnavailable = facts({ ...input, mttrMaxHours: 8, mttrGapHours: 8 }).effectiveness.mttr;
+  assert.equal(jobUnavailable.reportFilters.status, 'duration_groups_unavailable');
+  assert.equal(jobUnavailable.meanGapFilter.status, 'job_filters_unavailable');
+});
+
+test('mean-gap examples are bounded while exclusions and weighted calculations cover all assignees', () => {
+  const input = meanGapFactsFixture();
+  const personDays = Array.from({ length: 30 }, (_, index) => [
+    { assignee: `Person-${String(index).padStart(2, '0')}`, date: '2026-10-21', count: 1, totalSeconds: 7200 },
+    { assignee: `Person-${String(index).padStart(2, '0')}`, date: '2026-10-22', count: 1, totalSeconds: 3600 },
+  ]).flat();
+  const report = facts({ ...input, mttr: { ...input.mttr, personDays, totalJobs: 60, totalTickets: 60,
+    days: [{ date: '2026-10-21', count: 30, totalSeconds: 216000 }, { date: '2026-10-22', count: 30, totalSeconds: 108000 }],
+  }, mttrGapHours: 1 }).effectiveness.mttr;
+  assert.equal(report.meanGapFilter.excludedAssigneeCount, 30);
+  assert.equal(report.meanGapFilter.excludedExamples.length, 20);
+  assert.equal(report.meanGapFilter.excludedCoverage.omitted, 10);
+  assert.equal(report.overall.baseline.count, 0);
+  assert.equal(report.reductionRate, null);
+});

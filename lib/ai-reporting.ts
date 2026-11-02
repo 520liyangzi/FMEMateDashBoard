@@ -1,5 +1,5 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
-import { compareMttr, previousMttrPeriod, analyzeMttrPeople, selectMttrDayScope, selectMttrScope, type MttrDataset, type MttrPeriod } from './mttr.ts';
+import { compareMttr, previousMttrPeriod, analyzeMttrPeople, selectMttrDayScope, selectMttrScope, filterMttrPeopleByGap, type MttrDataset, type MttrPeriod } from './mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -34,11 +34,13 @@ export type AiFactsInput = {
   mttrExcludeCrossDay?: boolean;
   /** Undefined disables the threshold; null represents an enabled invalid value. */
   mttrMaxHours?: number | null;
+  /** Optional two-period absolute personal mean-gap exclusion, applied after Job filters. */
+  mttrGapHours?: number | null;
 };
 
 const LIMITS = {
   topUsers: 10, repeatUsageUsers: 10, topQuestions: 20, customQuestions: 10, customAuthors: 10,
-  mttrPeople: 20, mttrUnrankedPeople: 10, failureExamples: 10, feedback: 10, daily: 31, retentionDaily: 31, communityRecords: 31, scenes: 20,
+  mttrPeople: 20, mttrUnrankedPeople: 10, mttrGapExamples: 20, failureExamples: 10, feedback: 10, daily: 31, retentionDaily: 31, communityRecords: 31, scenes: 20,
   questionCharacters: 1200, answerCharacters: 2000, reasonCharacters: 1000,
   feedbackCharacters: 1200, identifierCharacters: 200, sceneCharacters: 200,
 } as const;
@@ -58,14 +60,28 @@ export function buildAiFacts(input: AiFactsInput) {
   const mttrDayData = selectMttrDayScope(mttrAllData, mttrExcludeCrossDay);
   const mttrDurationEnabled = input.mttrMaxHours !== undefined;
   const mttrValidHours = typeof input.mttrMaxHours === 'number' && Number.isFinite(input.mttrMaxHours) && input.mttrMaxHours > 0 && Number.isFinite(input.mttrMaxHours * 3600);
-  const mttrScopedData = selectMttrScope(mttrAllData, mttrExcludeCrossDay, input.mttrMaxHours);
-  const mttrFilterStatus = !mttrV3 ? 'no_joined_dataset'
+  const mttrJobScopedData = selectMttrScope(mttrAllData, mttrExcludeCrossDay, input.mttrMaxHours);
+  const mttrGapResult = filterMttrPeopleByGap(mttrJobScopedData, mttrBaseline, mttrCurrent, input.mttrGapHours);
+  const mttrScopedData = mttrGapResult.dataset;
+  const mttrValidGapHours = typeof input.mttrGapHours === 'number' && Number.isFinite(input.mttrGapHours) && input.mttrGapHours > 0 && Number.isFinite(input.mttrGapHours * 3600);
+  const mttrJobFilterStatus = !mttrV3 ? 'no_joined_dataset'
     : mttrDurationEnabled && !mttrValidHours ? 'invalid_duration_threshold'
     : mttrDurationEnabled && !mttrAllData?.durationGroups ? 'duration_groups_unavailable'
-    : !mttrScopedData ? 'same_day_aggregates_unavailable' : 'available';
-  const mttrFilterUnavailableReason = mttrFilterStatus === 'invalid_duration_threshold' ? 'The enabled duration threshold must be a finite positive number of hours. No filtered comparison is available until it is corrected or disabled.'
-    : mttrFilterStatus === 'duration_groups_unavailable' ? 'This snapshot has no exact duration groups. Open the updated live app and export again, or disable the duration filter; never infer filtered values from daily means.'
-    : mttrFilterStatus === 'same_day_aggregates_unavailable' ? 'This snapshot has no same-day aggregates. Open the updated live app and export again, or disable the cross-day filter; never infer the subset from daily means or a 24-hour threshold.' : null;
+    : !mttrJobScopedData ? 'same_day_aggregates_unavailable' : 'available';
+  const mttrJobFilterUnavailableReason = mttrJobFilterStatus === 'invalid_duration_threshold' ? 'The enabled duration threshold must be a finite positive number of hours. No filtered comparison is available until it is corrected or disabled.'
+    : mttrJobFilterStatus === 'duration_groups_unavailable' ? 'This snapshot has no exact duration groups. Open the updated live app and export again, or disable the duration filter; never infer filtered values from daily means.'
+    : mttrJobFilterStatus === 'same_day_aggregates_unavailable' ? 'This snapshot has no same-day aggregates. Open the updated live app and export again, or disable the cross-day filter; never infer the subset from daily means or a 24-hour threshold.' : null;
+  const mttrGapFilterStatus = !mttrGapResult.enabled ? 'disabled'
+    : mttrJobFilterStatus !== 'available' ? 'job_filters_unavailable' : mttrGapResult.status;
+  const mttrFilterStatus = mttrJobFilterStatus !== 'available' ? mttrJobFilterStatus
+    : mttrGapFilterStatus === 'invalid_threshold' ? 'invalid_gap_threshold'
+    : mttrGapFilterStatus === 'invalid_range' ? 'invalid_gap_range'
+    : mttrGapFilterStatus === 'person_data_unavailable' ? 'gap_person_data_unavailable'
+    : mttrGapFilterStatus === 'no_dataset' ? 'no_joined_dataset' : 'available';
+  const mttrFilterUnavailableReason = mttrJobFilterUnavailableReason
+    ?? (mttrGapFilterStatus === 'invalid_threshold' ? 'The enabled personal mean-gap threshold must be a finite positive number of hours. Correct it or disable the gap filter; no filtered rate is available.'
+      : mttrGapFilterStatus === 'invalid_range' ? 'Two valid baseline and comparison date ranges are required before evaluating personal mean gaps.'
+      : mttrGapFilterStatus === 'person_data_unavailable' ? 'This snapshot has no person-day aggregates required for the mean-gap filter. Export again from the updated server or disable this option; do not infer personal means from overall means.' : null);
   const mttrOverall = compareMttr(mttrScopedData, mttrBaseline, mttrCurrent);
   const selectedMttrAssignee = mttrV3 ? input.mttrAssignee : undefined;
   const mttrComparison = compareMttr(mttrScopedData, mttrBaseline, mttrCurrent, selectedMttrAssignee);
@@ -176,6 +192,10 @@ export function buildAiFacts(input: AiFactsInput) {
   });
   const mttrRanking = mttrRanked.slice(0, LIMITS.mttrPeople).map((person, index) => mttrPerson(person, `effectiveness.mttr.people.ranking[${index}].assignee`));
   const mttrUnrankedExamples = mttrUnranked.slice(0, LIMITS.mttrUnrankedPeople).map((person, index) => mttrPerson(person, `effectiveness.mttr.people.unrankedExamples[${index}].assignee`));
+  const mttrGapExamples = mttrGapResult.excluded.slice(0, LIMITS.mttrGapExamples).map((person, index) => ({
+    assignee: text(person.assignee, LIMITS.identifierCharacters, `effectiveness.mttr.meanGapFilter.excludedExamples[${index}].assignee`),
+    baseline: person.baseline, current: person.current, gapSeconds: person.gapSeconds,
+  }));
   const boundedMapping = (value: Record<string, string> | undefined, keys: string[], field: string) => value ? Object.fromEntries(
     keys.map(key => [key, text(value[key] ?? '', LIMITS.identifierCharacters, `${field}.${key}`)]),
   ) : null;
@@ -241,19 +261,35 @@ export function buildAiFacts(input: AiFactsInput) {
           enabled: mttrDurationEnabled,
           maxHours: mttrDurationEnabled && mttrValidHours ? input.mttrMaxHours : null,
           boundary: 'Exclude elapsed duration >= maxHours × 3600 seconds; retain strictly less than maxHours. Equality is excluded. Decimal hours are supported.',
-          available: !!mttrScopedData,
-          status: mttrFilterStatus,
-          unavailableReason: mttrFilterUnavailableReason,
+          available: !!mttrJobScopedData,
+          status: mttrJobFilterStatus,
+          unavailableReason: mttrJobFilterUnavailableReason,
+        },
+        meanGapFilter: {
+          enabled: mttrGapResult.enabled,
+          gapHours: mttrValidGapHours ? input.mttrGapHours : null,
+          available: mttrGapFilterStatus === 'disabled' ? !!mttrJobScopedData : mttrGapFilterStatus === 'available',
+          status: mttrGapFilterStatus,
+          excludedAssigneeCount: mttrGapResult.excluded.length,
+          excludedExamples: mttrGapExamples,
+          excludedCoverage: coverage(mttrGapResult.excluded.length, mttrGapExamples.length, 'Excluded named assignees sorted by exact name; first 20 examples only, total includes the complete cohort.'),
+          selectedAssigneeExcluded: selectedMttrAssignee !== undefined && mttrGapResult.excluded.some(person => person.assignee === selectedMttrAssignee),
+          unassessedAssignees: mttrGapResult.unassessedAssignees,
+          unassignedJobs: mttrGapResult.unassignedJobs,
+          definition: 'After the selected Job calendar-day and duration conditions, compute each named assignee baseline and comparison mean once, independent of the selected person. Exclude the assignee from the overall weighted comparison and ranking when abs(baseline mean - comparison mean) >= gapHours × 3600. Equality, increases and decreases are treated symmetrically. A zero mean is valid for the absolute-gap test. Named assignees missing either period and unassigned Jobs cannot establish a named two-period gap: they remain in overall counts, with normal unavailable person-rate rules. Do not reapply or iterate the exclusion after recomputing overall results. This changes the observed cohort; it does not control Job difficulty or establish causation.',
+          unavailableReason: mttrGapResult.enabled && mttrGapFilterStatus !== 'available' ? mttrFilterUnavailableReason : null,
         },
         reportFilters: {
           excludeCrossDay: mttrExcludeCrossDay,
           durationLimitEnabled: mttrDurationEnabled,
           maxHours: mttrDurationEnabled && mttrValidHours ? input.mttrMaxHours : null,
+          gapLimitEnabled: mttrGapResult.enabled,
+          gapHours: mttrValidGapHours ? input.mttrGapHours : null,
           available: !!mttrScopedData,
           status: mttrFilterStatus,
           selectedExcludedJobs: excludedJobs(mttrUnfilteredSelected, mttrComparison),
           overallExcludedJobs: excludedJobs(mttrUnfilteredOverall, mttrOverall),
-          definition: 'All enabled conditions are combined with AND. Retain same-calendar-date Jobs when the day filter is on, and elapsed duration strictly less than maxHours when the duration filter is on. Combined exclusions are unfiltered eligible Job count minus final retained Job count, so a Job failing both conditions is counted once. All compared means, counts and ranks use the final subset. Saved records and import-quality counters are unchanged.',
+          definition: 'First apply enabled calendar-day and Job duration conditions with AND. Then apply the optional named-assignee absolute mean-gap exclusion once using the two selected periods, independent of the selected person. Combined exclusions are unfiltered eligible Job count minus final retained Job count, so a Job affected by multiple filters is counted once. All compared means, counts and ranks use the final retained subset. Overall is total retained Job duration divided by retained Job count, never an average of personal means or rates. Saved records and import-quality counters are unchanged.',
           unavailableReason: mttrFilterUnavailableReason,
         },
         selectedScope: {
@@ -276,7 +312,7 @@ export function buildAiFacts(input: AiFactsInput) {
         importedAt: input.mttr?.importedAt ?? null,
         dataQuality: input.mttr ? {
           formatVersion: input.mttr.formatVersion ?? 1,
-          countsScope: mttrV3 ? 'sources.tt and sources.job contain their own latest import diagnostics. totalJobs is the accumulated valid joined unique jb_id count before the optional cross-day filter and duration threshold; totalTickets is a compatibility alias equal to totalJobs, not a TT count. storedJobs counts all stored valid unique Jobs including unmatched/non-Radio Jobs; storedTtIds counts all IDs in the stored TT catalog, not only eligible Radio TT IDs.' : 'sourceRows/matchedRows/validRows/excludedRows/invalidDates/negativeDurations/addedRows/duplicateRows/missingIds describe the latest imported file only; totalTickets describes legacy accumulated unique tickets.',
+          countsScope: mttrV3 ? 'sources.tt and sources.job contain their own latest import diagnostics. totalJobs is the accumulated valid joined unique jb_id count before the optional cross-day filter, duration threshold and personal mean-gap cohort exclusion; totalTickets is a compatibility alias equal to totalJobs, not a TT count. storedJobs counts all stored valid unique Jobs including unmatched/non-Radio Jobs; storedTtIds counts all IDs in the stored TT catalog, not only eligible Radio TT IDs.' : 'sourceRows/matchedRows/validRows/excludedRows/invalidDates/negativeDurations/addedRows/duplicateRows/missingIds describe the latest imported file only; totalTickets describes legacy accumulated unique tickets.',
           totalJobs: input.mttr.totalJobs ?? null,
           updatedJobs: Number.isSafeInteger(input.mttr.updatedJobs) && input.mttr.updatedJobs! >= 0 ? input.mttr.updatedJobs! : 0,
           duplicatePolicy: input.mttr.duplicatePolicy === 'update' ? 'update' : 'keep',
@@ -319,6 +355,7 @@ export function buildAiFacts(input: AiFactsInput) {
           ? 'Filter TT category to Radio-OSP or Radio-ISP, without filtering TT status. Join eligible TT IDs to JOB.tt_id. Include JOB status Done or Close only. Duration is selected JOB finished minus JOB created timestamp; defaults are G created, I finished, AG assignee and AR status, but actual mappings and sourceHeaders govern. Assign to the JOB finished date inclusively. Count each valid unique jb_id once: multiple Jobs for one TT are separate observations. Within each file, the first valid occurrence wins. Across uploads, duplicatePolicy defaults to keep, preserving saved Jobs; only an explicit update policy replaces an existing Job from a valid current-file record. updatedJobs is the latest import count of existing Jobs updated, not new Jobs, and the resulting dates, durations, associations, assignees and aggregates are recomputed. The latest TT catalog recomputes membership for all saved valid Jobs, including previously unmatched Jobs. Divide total elapsed seconds by valid joined Job count, not TT count or the number of assignees. Do not use TT creation/closure times or assign_date in place of JOB timestamps.'
           + (mttrExcludeCrossDay ? ' The selected calendar-day filter includes only Jobs created and finished on the same source calendar date. Its rates are conditional on this subset; cross-day exclusions are not evidence those Jobs lack business value.' : ' The calendar-day filter is off; eligible cross-day Jobs remain included.')
           + (mttrDurationEnabled ? ' The enabled duration filter excludes Jobs lasting greater than or equal to the selected hour threshold; retained duration is strictly less. Decimal hours are supported. All enabled filters apply together, and combined exclusions count each Job once. Filtered comparisons describe the retained subset rather than all Jobs.' : ' The duration threshold is disabled.')
+          + (mttrGapResult.enabled ? ' The personal mean-gap option subsequently excludes named assignees with absolute two-period mean differences greater than or equal to its selected hour threshold, in both directions and at equality. The retained population is conditional on this filter; it does not standardize task complexity or make the result representative of all Jobs.' : ' The personal mean-gap threshold is disabled.')
           : 'LEGACY SINGLE-TABLE DATA: old single-table percentages and means are deliberately withheld because they do not represent the new TT-category-to-JOB join. Reimport both TT and JOB sources before reporting the new business metric or person ranking. Version 2 uses first-valid selected ticket-ID deduplication; version 1 lacks verified ID deduplication.',
         units: 'meanSeconds, totalSeconds and savedSeconds are seconds. reductionRate is percentage: (baseline mean - current mean) / baseline mean × 100. Positive means shorter mean duration; negative means longer. savedSeconds is the difference in mean elapsed time per observation, not total work-hours saved.',
         limitations: 'Observed completed-Job comparison for v3, with no Job-to-app-use or app-user linkage. It does not establish FMEMate causation, labor time saved, ROI or comparable Job difficulty. Imported coverage is unconfirmed. Missing periods, invalid ranges or a zero baseline mean make rates unavailable, never an invented 0% or 100%. Overlapping or unequal-length periods must be disclosed. Individual scope does not filter the overall comparison or overall person ranking. ' + (mttrV3
@@ -359,6 +396,7 @@ export function buildAiFacts(input: AiFactsInput) {
       `Window retention is not a first-use or registration cohort. It uses baseline-day identifiable accounts and counts each account once if it returns on ANY of the following ${retention.windowDays} calendar days. The baseline is windowDays before the selected end. The baseline day is excluded from follow-up; new later accounts do not enter the numerator. It does not require activity exactly on day N or on every day. Scene filtering is consistent and browser is excluded.`,
       'retention.latest describes the selected end date and its preceding window, not an average over the selected period. Always state previousDate (baseline), windowStart, date (window end), windowDays and retainedUsers/previousUsers. Missing baseline or any unobserved follow-up date makes rate null. Present logs are not confirmed complete; absent observations do not establish churn.',
       'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for the baseline and every follow-up day, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
+      'MTTR meanGapFilter is a one-pass named-assignee cohort filter after Job filters: exclude abs(two means gap) >= gapHours in either direction, including zero means. Keep unassessed records and disclose counts. Use reportFilters for final exclusions; this does not equalize complexity or establish causation. Invalid settings mean unavailable.',
       'The MTTR durationFilter and reportFilters apply uniformly to all MTTR scopes. A valid enabled duration limit excludes durations greater than or equal to X hours, retaining strictly less; disclose X and the equality boundary. Combine enabled day and duration conditions with AND. Combined excluded counts come from reportFilters and count a Job once even if it fails both conditions; do not add day-only exclusions to combined exclusions. If reportFilters is unavailable, explain its reason, omit filtered rates and do not report placeholder zero counts as measured facts.',
       'The MTTR calendarDayFilter option applies to all MTTR scopes. When excludeCrossDay=true, only Jobs with equal source creation and finish calendar dates remain; a short interval crossing midnight is excluded. Always disclose this selected subset and available excluded Job counts. Import diagnostic counters and totalJobs remain all-data counts before this optional filter. When same-day aggregates are unavailable, report the limitation and no filtered rate; do not substitute the unfiltered comparison.',
       'MTTR is independent of app log metrics, Scene filtering and app reporting dates. V3 joins Radio-OSP/Radio-ISP TT IDs to completed JOBs (Done/Close); TT status is not filtered. Use selected JOB finish-create elapsed time, finish-date grouping and unique jb_id denominators, allowing multiple Jobs per TT. State both ranges/counts/means and the reduction sign. Overall comparison and global person ranking stay independent of the selected person; never average person percentages or daily means. Do not infer total labor hours saved or FMEMate causation. Legacy v1/v2 is not this rule and requires reimporting both tables.',

@@ -6,6 +6,8 @@ type MutableSnapshot = Record<string, unknown> & {
   mttrExcludeCrossDay?: boolean;
   mttrDurationLimitEnabled?: boolean;
   mttrDurationLimitHours?: string;
+  mttrGapLimitEnabled?: boolean;
+  mttrGapLimitHours?: string;
   state?: Record<string, unknown> & {
     feedback?: (Record<string, unknown> & { imageUrl?: string })[];
     siteVisits?: {photos:string[]}[];

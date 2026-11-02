@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeMttrPeople, compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, selectMttrDayScope, selectMttrScope, parseMttrMaxHours, type MttrDataset } from './mttr.ts';
+import { analyzeMttrPeople, compareMttr, previousMttrPeriod, shiftMttrPeriod, isValidMttrPeriod, selectMttrDayScope, selectMttrScope, parseMttrMaxHours, filterMttrPeopleByGap, type MttrDataset, type MttrPersonDay } from './mttr.ts';
 
 const dataset = (days: MttrDataset['days']): MttrDataset => ({
   filename: 'tickets.xlsx', importedAt: '2026-10-31T00:00:00Z', sourceRows: 0, matchedRows: 0,
@@ -199,4 +199,98 @@ test('duration threshold validity and old snapshots never silently substitute fu
   assert.equal(selectMttrScope(d, false), d);
   d.durationGroups = [];
   assert.equal(selectMttrScope(d, false, 8)!.totalJobs, 0, 'known empty groups are available');
+});
+
+function gapDataset(personDays: MttrPersonDay[]): MttrDataset {
+  return { ...dataset(personDays), formatVersion: 3, personDays,
+    totalJobs: personDays.reduce((sum, day) => sum + day.count, 0),
+    totalTickets: personDays.reduce((sum, day) => sum + day.count, 0) };
+}
+const gapDay = (assignee: string, date: string, count: number, meanHours: number): MttrPersonDay =>
+  ({ assignee, date, count, totalSeconds: count * meanHours * 3600 });
+
+test('personal gap excludes equality symmetrically, including zero-baseline means, without mutating data', () => {
+  const d = gapDataset([
+    gapDay('Slower', '2026-10-01', 1, 1), gapDay('Slower', '2026-10-04', 1, 9),
+    gapDay('Faster', '2026-10-01', 1, 12), gapDay('Faster', '2026-10-04', 1, 4),
+    gapDay('Zero', '2026-10-01', 1, 0), gapDay('Zero', '2026-10-04', 1, 8),
+    gapDay('Stable', '2026-10-01', 1, 3), gapDay('Stable', '2026-10-04', 1, 4),
+  ]), before = JSON.stringify(d);
+  const filtered = filterMttrPeopleByGap(d, baseline, current, 8);
+  assert.equal(filtered.status, 'available');
+  assert.deepEqual(filtered.excluded.map(p => [p.assignee, p.gapSeconds / 3600]), [['Faster', 8], ['Slower', 8], ['Zero', 8]]);
+  assert.deepEqual(analyzeMttrPeople(filtered.dataset, baseline, current).map(p => p.assignee), ['Stable']);
+  assert.equal(filtered.excluded.find(p => p.assignee === 'Zero')!.baseline.meanSeconds, 0);
+  assert.equal(filtered.dataset!.totalJobs, 2);
+  assert.equal(JSON.stringify(d), before);
+  assert.equal(filterMttrPeopleByGap(d, baseline, current).dataset, d);
+  assert.equal(filterMttrPeopleByGap(d, baseline, current, 8.01).dataset, d);
+});
+
+test('gap-filtered overall mean remains Job-weighted; missing periods and unassigned Jobs stay disclosed', () => {
+  const d = gapDataset([
+    gapDay('Exclude', '2026-10-01', 1, 1), gapDay('Exclude', '2026-10-04', 1, 9),
+    gapDay('Stable', '2026-10-01', 3, 3), gapDay('Stable', '2026-10-04', 1, 4),
+    gapDay('New', '2026-10-04', 2, 10), gapDay('Gone', '2026-10-01', 1, 10),
+    gapDay('', '2026-10-01', 2, 5), gapDay('', '2026-10-04', 2, 15),
+    gapDay('Outside', '2026-09-01', 2, 100),
+  ]);
+  const filtered = filterMttrPeopleByGap(d, baseline, current, 8);
+  assert.equal(filtered.unassessedAssignees, 2);
+  assert.deepEqual(filtered.unassignedJobs, { baseline: 2, current: 2 });
+  assert.equal(filtered.dataset!.totalJobs, 13);
+  const result = compareMttr(filtered.dataset, baseline, current);
+  assert.equal(result.baseline.count, 6);
+  assert.equal(result.current.count, 5);
+  assert.equal(result.baseline.meanSeconds, 29 * 3600 / 6);
+  assert.equal(result.current.meanSeconds, 54 * 3600 / 5);
+  assert.equal(compareMttr(filtered.dataset, baseline, current, 'Exclude').status, 'no_baseline_tickets');
+  const rows = analyzeMttrPeople(filtered.dataset, baseline, current);
+  assert.equal(rows.find(p => p.assignee === 'New')!.rank, null);
+  assert.equal(rows.find(p => p.assignee === '')!.rank, null);
+  assert.equal(filtered.dataset!.earliestDate, '2026-09-01');
+});
+
+test('personal gaps are computed after Job filters and from the selected periods, with no global-mean threshold', () => {
+  const personDays = [
+    gapDay('A', '2026-10-01', 1, 4), gapDay('A', '2026-10-04', 2, 6),
+    gapDay('A', '2026-10-07', 1, 20),
+  ];
+  const d = gapDataset(personDays);
+  d.durationGroups = [
+    { date: '2026-10-01', assignee: 'A', durationSeconds: 4 * 3600, count: 1, sameDay: true },
+    { date: '2026-10-04', assignee: 'A', durationSeconds: 2 * 3600, count: 1, sameDay: true },
+    { date: '2026-10-04', assignee: 'A', durationSeconds: 10 * 3600, count: 1, sameDay: false },
+    { date: '2026-10-07', assignee: 'A', durationSeconds: 20 * 3600, count: 1, sameDay: true },
+  ];
+  assert.equal(filterMttrPeopleByGap(d, baseline, current, 3).excluded.length, 0, '4h versus 6h is below 3h');
+  const prior = selectMttrScope(d, true, 8)!;
+  assert.equal(filterMttrPeopleByGap(prior, baseline, current, 2).excluded.length, 1, '4h versus 2h meets 2h');
+  const otherCurrent = { from: '2026-10-07', to: '2026-10-07' };
+  const changed = filterMttrPeopleByGap(d, baseline, otherCurrent, 3);
+  assert.equal(changed.excluded[0].current.meanSeconds, 20 * 3600);
+  assert.equal(changed.excluded[0].gapSeconds, 16 * 3600);
+  assert.equal(changed.dataset!.personDays!.length, 0, 'cohort exclusion applies to all report dates once');
+  assert.deepEqual(changed.dataset!.days, []);
+  assert.equal(changed.dataset!.earliestDate, '');
+  assert.equal(changed.dataset!.latestDate, '');
+});
+
+test('gap filtering reports invalid conditions and missing person data instead of substituting full data', () => {
+  const d = gapDataset([]);
+  for (const value of [null, 0, -1, NaN, Infinity]) {
+    const result = filterMttrPeopleByGap(d, baseline, current, value);
+    assert.equal(result.status, 'invalid_threshold');
+    assert.equal(result.dataset, null);
+  }
+  assert.equal(filterMttrPeopleByGap(d, { from: '', to: '' }, current, 1).status, 'invalid_range');
+  assert.equal(filterMttrPeopleByGap(null, baseline, current, 1).status, 'no_dataset');
+  const legacy = { ...d, formatVersion: 2 as const };
+  assert.equal(filterMttrPeopleByGap(legacy, baseline, current, 1).status, 'person_data_unavailable');
+  const missing = { ...d }; delete missing.personDays;
+  assert.equal(filterMttrPeopleByGap(missing, baseline, current, 1).dataset, null);
+  const empty = filterMttrPeopleByGap(d, baseline, current, 1);
+  assert.equal(empty.status, 'available');
+  assert.equal(empty.dataset, d);
+  assert.deepEqual(empty.excluded, []);
 });

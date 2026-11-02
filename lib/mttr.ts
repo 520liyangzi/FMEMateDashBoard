@@ -179,6 +179,85 @@ export function compareMttr(dataset: MttrDataset | null, baselinePeriod: MttrPer
   };
 }
 
+export type MttrGapExclusion = {
+  assignee: string;
+  baseline: MttrAggregate;
+  current: MttrAggregate;
+  /** Absolute difference between this assignee's two means, in seconds. */
+  gapSeconds: number;
+};
+export type MttrGapFilterResult = {
+  dataset: MttrDataset | null;
+  enabled: boolean;
+  status: 'disabled' | 'available' | 'invalid_threshold' | 'invalid_range' | 'no_dataset' | 'person_data_unavailable';
+  excluded: MttrGapExclusion[];
+  /** Named assignees observed in at least one period, but not in both. */
+  unassessedAssignees: number;
+  unassignedJobs: { baseline: number; current: number };
+};
+/**
+ * Apply once AFTER Job-level day/duration filters. Exclusions use absolute
+ * personal mean differences, so both improvements and deteriorations qualify.
+ * The cohort is determined before any assignees are removed and is independent
+ * of the selected person. Missing-period people and unassigned Jobs stay.
+ *
+ * The returned view retains raw sameDay/durationGroups metadata. Do not pass
+ * it back into selectMttrScope: that would restore excluded raw assignees.
+ */
+export function filterMttrPeopleByGap(dataset: MttrDataset | null, baseline: MttrPeriod, current: MttrPeriod, maxGapHours?: number | null): MttrGapFilterResult {
+  const result: MttrGapFilterResult = {
+    dataset, enabled: maxGapHours !== undefined, status: 'disabled', excluded: [],
+    unassessedAssignees: 0, unassignedJobs: { baseline: 0, current: 0 },
+  };
+  if (maxGapHours === undefined) return result;
+  const unavailable = (status: MttrGapFilterResult['status']): MttrGapFilterResult => ({ ...result, dataset: null, status });
+  if (!validMttrMaxHours(maxGapHours)) return unavailable('invalid_threshold');
+  if (!isValidMttrPeriod(baseline) || !isValidMttrPeriod(current)) return unavailable('invalid_range');
+  if (!dataset) return unavailable('no_dataset');
+  if (dataset.formatVersion !== 3 || !Array.isArray(dataset.personDays)) return unavailable('person_data_unavailable');
+
+  const groups = new Map<string, MttrDay[]>();
+  for (const day of dataset.personDays) {
+    if (typeof day.assignee !== 'string') continue;
+    let days = groups.get(day.assignee);
+    if (!days) { days = []; groups.set(day.assignee, days); }
+    days.push(day);
+  }
+  for (const [assignee, days] of groups) {
+    const view = { ...dataset, days };
+    const base = aggregate(view, baseline), comparison = aggregate(view, current);
+    if (!assignee.trim()) {
+      result.unassignedJobs.baseline += base.count;
+      result.unassignedJobs.current += comparison.count;
+      continue;
+    }
+    if (base.meanSeconds === null || comparison.meanSeconds === null) {
+      if (base.count || comparison.count) result.unassessedAssignees++;
+      continue;
+    }
+    const gapSeconds = Math.abs(base.meanSeconds - comparison.meanSeconds);
+    if (gapSeconds >= maxGapHours * 3600) result.excluded.push({ assignee, baseline: base, current: comparison, gapSeconds });
+  }
+  result.excluded.sort((a, b) => a.assignee < b.assignee ? -1 : a.assignee > b.assignee ? 1 : 0);
+  result.status = 'available';
+  if (!result.excluded.length) return result;
+
+  const excluded = new Set(result.excluded.map(person => person.assignee));
+  const personDays = dataset.personDays.filter(day => !excluded.has(day.assignee));
+  const byDate = new Map<string, MttrDay>();
+  for (const day of personDays) {
+    const total = byDate.get(day.date) ?? { date: day.date, count: 0, totalSeconds: 0 };
+    total.count += day.count; total.totalSeconds += day.totalSeconds; byDate.set(day.date, total);
+  }
+  const days = [...byDate.values()].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const total = days.reduce((sum, day) => sum + day.count, 0);
+  result.dataset = {
+    ...dataset, days, personDays, totalJobs: total, totalTickets: total,
+    earliestDate: days[0]?.date ?? '', latestDate: days.at(-1)?.date ?? '',
+  };
+  return result;
+}
+
 export type MttrPersonComparison = { assignee: string; comparison: MttrComparison; rank: number | null };
 /**
  * Rank observed assignees by their own signed reduction, never average their
