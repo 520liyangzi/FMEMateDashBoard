@@ -1,6 +1,6 @@
 # FMEMate · Project Pulse
 
-本地运行的中英文项目进展报表：导入应用日志 Excel，查看使用趋势、高频问题、用户主动输入、失败明细，以及 Line group 人数增长与客户反馈；生成 AI 总结提示词，并按日期归档已核对的中英文汇报。中文和英文页面使用同一份数据。要用一份告警 Excel 对比两个期间的平均恢复时长，见下文「告警 MTTR」。
+本地运行的中英文项目进展报表：导入应用日志 Excel，查看使用趋势、高频问题、用户主动输入、失败明细，以及 Line group 人数增长与客户反馈；生成 AI 总结提示词，并按日期归档已核对的中英文汇报。中文和英文页面使用同一份数据。在「成效统计」可用告警表和 Job 表对比全部工单、指定人员组或个人的平均 MTTR，见下文「工单 MTTR」。
 
 ## 快速启动
 
@@ -193,7 +193,7 @@ This is a local bilingual dashboard for FMEMate application usage and Line group
 2. Run `start.bat` on Windows, `bash start.sh` on macOS / Linux, or `python server.py`.
 3. Open **http://127.0.0.1:8000**. Keep the terminal open; use `Ctrl+C` to stop.
 4. Import Excel logs, configure preset questions, enter daily Line group membership, and add customer feedback with screenshots.
-5. For **alarm MTTR**, open **Effectiveness**, configure the allowed alarm IDs, import one alarm workbook and select the two date ranges to compare. See the column map and worked example below.
+5. For **Job MTTR**, open **Effectiveness**. Import alarms and configure the alarm ID allowlist; import the Job-to-assignee mapping to compare specific people. Choose both periods and optionally filter by assignee. See the column map and worked example below.
 6. Under **Workspace**, use **AI summary** to prepare a prompt for your local AI tool, then paste or import the reviewed Chinese and English reports into **Project intelligence → Daily summaries** and save them by date.
 
 The package includes a prebuilt `dist/` directory. Node.js and pip packages are not required to run it. To rebuild edited frontend source, use Node.js 22.13+, run `npm install`, then `npm run build`.
@@ -222,7 +222,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.0.0**。原 TT / Job 工单数据不能还原告警发生时间和时长；要使用新版 MTTR，需要导入告警表。已有的 App 使用日志无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.1.0**。2.0 的告警汇总不能还原每个 Job 的最长告警，升级后请重新导入原告警文件；个人统计还需导入 Job 表。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -260,38 +260,44 @@ Overview and User analytics always explain the user-count methodology. A logging
 Date filters apply to visit counts, visit days and photo totals independently of Scene. Click photos to view them in full. Excel includes visit text and photo counts; use offline HTML or Print / Save PDF to share photos. Offline HTML embeds the complete visit archive and images, remains read-only, and excludes real visits from demo exports. Local persistence and ZIP backups include visits/photos; old backups without visits remain compatible. Clearing application logs preserves site visits.
 
 
-## 告警 MTTR / Alarm MTTR (v2.0.0)
+## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.1.0)
 
-在 **成效统计** 打开告警 MTTR，填写需要观察的告警 ID，例如 `26540,26564,26568`，然后导入**一份告警 Excel（.xlsx）**。请把告警数据放在第一个工作表。第 1 行是表头，数据从第 2 行开始；列位置如下：
+进入 **成效统计**。在告警白名单中填入 `26540,26564,26568` 这样的逗号分隔列表，导入告警 Excel。需要看处理人时再导入 Job Excel。两份文件可分开上传、任意顺序导入；Job 表只提供人员归属，不使用它的创建、关闭时间，也不需要 TT 表。Excel 使用第一个工作表，第 1 行为表头，从第 2 行开始读取。
 
-| 列 | 字段 / Field | 纳入条件 / Rule |
+| 来源 / Source | 列 | 用途 / Use |
 | --- | --- | --- |
-| B | 告警 ID / Alarm ID | 与逗号分隔白名单中的一个完整 ID 匹配。`26540` 不匹配 `265401`。 / Must exactly match one comma-separated allowlisted ID. |
-| I | 持续时长 / Duration | `时:分:秒`；`0:05:10` = **5 分 10 秒**（310 秒）。只接受正时长。 / Hours:minutes:seconds; `0:05:10` means **310 seconds**, not five hours. Only positive durations qualify. |
-| K | 告警发生时间 / Occurrence time | 按表中发生时间的自然日期归入期间，含起止当天。 / Use the calendar date of occurrence, including both period boundaries. |
-| AE | Job ID | 非空；仅用作准入条件。同一个 Job 可有多条有效告警。 / Must be nonblank; multiple eligible alarm occurrences can share a Job ID. |
+| 告警 / Alarms | B | 告警 ID；完整匹配可配置的白名单。 / Alarm ID; exact match to an allowlisted ID. |
+| 告警 / Alarms | I | Duration，`时:分:秒` 或 Excel 原生时长。`0:05:10` = 310 秒；0 表示未清除，排除。 / Text `h:mm:ss` or a native Excel duration. Zero means uncleared. |
+| 告警 / Alarms | K | 告警发生日期时间，按源表自然日分期。 / Occurrence date and time in the source calendar. |
+| 告警 / Alarms | AE | Job ID；非空才能纳入，用于将同一工单的告警归组。 / Nonblank Job ID used to group alarms. |
+| Job | C | Job ID，与告警 AE 关联。 / Job ID matching column AE in the alarm file. |
+| Job | AG | `jb_assign_to`，该工单的处理人。 / Assignee for that Job. |
 
-**计算方法：** 对基准期和对比期分别筛选。`0:00:00` 表示告警还没清除，不参与总时长，也不进入分母。缺少 Job ID、告警 ID 不在白名单中、时长无效或为负、发生日期无效的行也不计入。每期 **平均 MTTR = 有效告警总时长 ÷ 有效告警条数**；同一个告警 ID 出现多次可分别计入。更改并保存白名单后，服务会按新名单重新统计已导入的有效历史，不需要重新上传。
+**先归并工单，再选日期。** 对每个 Job，只保留白名单命中、Job ID 非空、K 日期有效且 Duration 大于 0 的告警。将这些告警中**最长的一条 Duration** 作为该 Job 的估算 MTTR，并以这条告警的 K 日期作为工单的统计日期。最长时长并列时取最早的发生日期。比如某 Job 在周日有一条 8 分钟的告警、周一有一条 11 分钟的告警，该 Job 只归到周一，时长为 11 分钟。先对全部已导入数据归并，避免在两个不重叠区间重复计入同一工单。更改白名单或补传更长告警后，该 Job 的时长和统计日期都可能变化。
 
-**导入与重复记录：** I 列可以是文本 `0:05:10`，也可以是 Excel 数值型时长（一天的分数）；超过 24 小时的时长不会按时钟回绕。K 列可用 Excel 日期时间或明确的年/月/日时刻。缺少必要字段、无效日期或非正时长不会入库。结构有效但当前不在白名单中的记录会保留，便于以后调整名单。没有命中时不会自动把全部 ID 当作有效。
+**选择统计对象和比较期。** 可搜索人员，查看全部、某个人或勾选的多人。每期均值 = **所选范围内各有效 Job 最长时长之和 ÷ 有效 Job 数**。未关联到具名处理人的 Job 仍纳入全部工单，不归到某个具名人员名下。例如 A 有 2 个 Job（15、9 分钟），B 有 1 个 Job（36 分钟），选择 A+B 的均值是 `(15+9+36)/3=20` 分钟；单看 A 是 12 分钟，单看 B 是 36 分钟。
 
-告警 ID 是筛选项，Job ID 是关联号，都不是唯一记录号。重复导入不是按 B 或 AE 去重，而是比对规范化后的源行（包括其他有值的列）。同一文件中两条完全相同的行仍算两条；两个重叠文件分别有两条和三条相同行时，全库保留三条。由于没有唯一告警流水号，来自不同文件、所有值都相同的独立告警无法区分；改动其他列的导出也可能被视作新行。
+基准期和对比期都包含起止当天。**减少率 =（基准期均值 − 对比期均值）÷ 基准期均值 × 100%**。上述 A+B 如果对比期均值是 10 分钟，减少率为 50%。个人榜按各人自己的减少率从高到低排序，任一期无有效 Job 就没有可比较的百分比。解读排名时一起看两期样本量。指标反映的是由告警估算的工单时长变化，不能单独证明 FMEMate 导致了改善。
 
-**对比示例：** 基准期的两条有效告警各持续 `0:05:10` 和 `0:14:50`，总计 20 分钟，平均 MTTR 为 **10 分钟**。对比期平均为 **8 分钟**时，减少率为 `(10 − 8) ÷ 10 × 100% = 20%`，正值表示耗时缩短，负值表示变长。任一期没有有效告警时无法计算减少率；不能把没有样本当作 `0%` 改善。选择本周和上周、两个三天区间或其他起止日期时均按此规则计算。比较结果反映两个样本的时长变化，不能单独证明改善是由 FMEMate 带来的。
+**核对两期明细。** “工单明细”分为“基准期工单”和“对比期工单”，各自显示该期实际计入的 Job ID、处理人、最长告警日期和 MTTR（时:分:秒）。可独立翻页；卡片上的工单数和均值始终按整期计算。每行是一张工单；同一工单即使关联多条告警，也只有一行。切换所选人员或日期后，明细随之更新。分别把两期明细的时长求和，再各自除以该期的工单数，即可核对两张 MTTR 卡片。选择多人时，每张工单的权重相同；不能把各人的平均时长直接求平均。
 
-**大文件与导出：** 支持 `.xlsx` 或 UTF-8 `.csv`（旧 `.xls` 请另存为 `.xlsx`）。文件按 4 MiB 分块上传，默认每个源文件最多 1 GiB；可用 `python server.py --mttr-max-file-mb 2048` 修改上传上限。XLSX 解压后的 1 GiB 读取限制独立于上传上限，超过时请拆为多个独立文件、分次导入。Excel 报表和打印页使用所选两期；离线 HTML 保存导出时的白名单与每日汇总，可离线改日期对比。
+Excel 把**基准期工单明细**和**对比期工单明细**分在两张工作表中，按导出时的日期与人员筛选。离线 HTML 支持在本地服务不可达时切换日期、切换人员并查明细，因此文件中包含快照内全部有效工单的 Job ID 和处理人，包含当前筛选范围之外的工单。打印或保存 PDF 时，两张明细表各显示当前页。要分享选定范围的全部工单，可点“导出完整明细”，分享 Excel 中相应的明细表。旧离线 HTML 无法补出当时未保存的工单明细；请从当前服务重新导出。
 
-**从 1.x 升级：** 保留 `data/` 并重启服务。旧版 TT / Job 处理时长与新版告警持续时长是两种指标，不能换算或拼接。新图表需要覆盖所选日期的告警表；以往按 Job 计算的个人排名、跨日过滤和时长阈值不再用于当前 MTTR。窗口留存和周期复用仍基于 App 日志，无需重新导入。历史离线 HTML 是导出当时的快照；如要展示新口径，需用新版重新导出。
+修改并保存白名单会重新计算已导入的告警；更新 Job 归属后也会重算人员统计，而不用重传另一张表。重复上传同一文件不会把工单数翻倍。Job 表中重复的同一 ID 和同一人员只产生一条归属；同一份文件内同一 Job 若出现多个不同的非空人员，请先核实、修正后导入，原归属保持不变。缺少人员的行跳过；后续另一份 Job 表可更新已有 Job 的归属。支持 `.xlsx` 和 UTF-8 `.csv`；旧 `.xls` 请另存。两类文件分块上传，默认单文件上限 1 GiB（`--mttr-max-file-mb` 可调整）。XLSX 展开后的大小限制独立于上传限制。导出的报表记录对比日期与人员范围；新的离线 HTML 可以在快照内切换人员和日期。
 
-**English:** In **Effectiveness**, enter comma-separated alarm IDs (e.g. `26540,26564,26568`) and import a **single alarm workbook** using the fixed columns above. The first row contains headers. Pick the baseline and comparison dates independently. Both use column K’s **occurrence date**, not the clearance date or the date of import. A zero duration marks an uncleared alarm and is excluded from both the sum and the count. Invalid dates, invalid or negative durations, missing Job IDs and alarm IDs outside the allowlist are also excluded. Saving a new allowlist recalculates eligible history from stored records.
+**升级：** 从 2.0 升级时保留 `data/`。此前的汇总只保留了告警行指纹和时长，不能反推出 Job ID。按页面提示重新上传原告警文件以补齐历史关联，再上传 Job 人员表。来自 1.x 的 TT/Job 时长也不会计入新版结果。应用日志、群记录和留存不受影响；旧离线文件仍代表导出当时的口径。
 
-Use the first worksheet. Native Excel duration values are day fractions; textual elapsed hours can exceed 24. Eligible rows with IDs outside the current allowlist remain stored so that a revised list can include them later. Reimporting the same export does not double its counts. For overlapping exports, identical normalized source rows retain their highest occurrence count in any one file. Neither the alarm ID nor Job ID is a unique event key. Identical independent events in separate exports cannot be distinguished without such a key, and editing other populated columns may produce a distinct row.
+**English.** Under **Effectiveness**, enter the comma-separated alarm ID allowlist and import the alarm export. To see assignee results, also import the Job export. Either file can be imported first. Use the first worksheet, with headers in row 1 and data from row 2. Job timestamps are not used.
 
-Each period’s **mean MTTR** divides the total duration of qualifying alarm occurrences by their count; it is not an average of daily or per-Job averages. Two eligible durations of `0:05:10` and `0:14:50` give a baseline mean of **10 minutes**. Against a comparison mean of **8 minutes**, duration decreased by **20%**: `(baseline mean − comparison mean) / baseline mean × 100%`. If either period has no eligible alarms, the rate is unavailable. Always review both periods’ sample counts before interpreting the change.
+The dashboard first groups eligible alarms across all imported dates by their nonblank Job ID. It excludes IDs outside the allowlist, invalid occurrence dates and nonpositive durations. For each Job, it takes the **maximum eligible alarm duration** as a proxy for its resolution time. The K date of that alarm determines which period contains the Job; tied maxima use the earliest occurrence date. Each Job therefore counts once across nonoverlapping periods. Changing the allowlist or importing a longer alarm for the same Job can change both its contribution and its period.
 
-The uploader supports `.xlsx` and UTF-8 `.csv` in 4 MiB chunks. The default limit is 1 GiB per source file; `--mttr-max-file-mb` adjusts that upload limit, not the independent 1 GiB expanded-XLSX limit. For a larger expanded workbook, split the export into separate files and import them one at a time. Excel and print reports use the selected periods; offline HTML keeps the saved allowlist and daily aggregates so recipients can change the dates.
+Search for one assignee, select several, or compare all Jobs. Within each inclusive date range, the mean is the **sum of the selected Jobs’ maximum durations divided by their Job count**. Jobs with no named owner remain in the overall result. If A’s two Jobs take 15 and 9 minutes and B’s one Job takes 36 minutes, A+B’s baseline mean is 20 minutes, while A’s own mean is 12 minutes. A comparison mean of 10 minutes for A+B is a 50% reduction. The ranking compares each named assignee’s own baseline and comparison means, sorting signed percentage reductions in descending order. Missing samples mean the person has no comparable rate; check each period’s Job count alongside the percentage.
 
-**Upgrading from 1.x:** Old TT/Job data cannot be converted into alarm occurrence records. Import the alarm workbook to start the new comparison; existing application logs, retention and repeat-use statistics do not need to be rebuilt. Generate a fresh offline report for recipients who should see the new methodology.
+**Check the Jobs behind each mean.** Under **Job details**, the **Baseline Jobs** and **Comparison Jobs** tables show each included Job ID, assignee, longest alarm date and MTTR (h:mm:ss). The tables can be paged independently; the count and mean always cover the full filtered period. Each row is one Job, even when several alarms contributed. The table follows the selected dates and assignees. To verify either MTTR card, sum that period’s Job durations and divide by its Job count. Every Job carries equal weight when multiple assignees are selected; taking the simple average of the assignees’ means can give a different answer.
+
+Excel puts the baseline and comparison Jobs on separate detail sheets using the date ranges and assignees selected at export. An offline HTML report lets the recipient change these filters and inspect the Jobs without reaching the local service. To support that, the file includes Job IDs and assignees across the eligible snapshot, including Jobs outside the original selection. Printing or saving a PDF shows only the displayed page of each detail table. To share every Job in the selected scope, choose **Export all detail rows** and share the relevant sheets. Older offline files cannot reconstruct missing Job details; export a new copy from the current service.
+
+Keep the existing data directory when upgrading from 2.0. Old alarm fingerprints cannot reconstruct Job IDs: reimport the original alarm files to recover historical Job links, and import the Job workbook for ownership. Old TT/Job duration data and archived HTML reports keep their previous meanings. Application logs do not need to be reimported. Importing the same export again does not inflate Job counts. Repeated identical Job-to-person mappings count once. Conflicting nonblank assignees for one Job in the same file must be resolved before import, with existing ownership unchanged; blank assignees are skipped. A later file can update ownership. The saved allowlist and Job ownership apply to the stored history, so they can be updated without reuploading both sources. Export a fresh offline report to share the new methodology and selectable periods and people.
 
 ### v1.9.6 — Daily active users / 每日活跃用户
 

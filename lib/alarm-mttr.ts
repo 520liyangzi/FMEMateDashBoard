@@ -76,3 +76,105 @@ export function compareAlarmMttr(dataset:AlarmMttrDataset|null|undefined, baseli
     unequalDays:valid&&baseline.days!==current.days,
   };
 }
+
+/** Current reporting contract. The server reduces eligible alarm occurrences to one maximum per Job
+ * before emitting daily counts/sums. V4 alarm-row means cannot be used in place of these groups. */
+export type JobProxyDay = { date: string; count: number; totalSeconds: number };
+export interface JobProxyMappingImportInfo {
+  filename:string; sheetName:string; importedAt:string; sourceRows:number; missingJobIds:number;
+  missingAssignees:number; validRows:number; duplicateRows:number; mappedJobs:number;
+}
+export interface JobProxyMttrDataset {
+  formatVersion:5; source:'alarm-jobs'; allowlist:string[]; revision?:string;
+  /** Current mapping catalogue names, including owners without eligible alarm Jobs. */
+  assignees?:string[];
+  days:JobProxyDay[];
+  /** Empty assignee means unmapped or unassigned: included in all Jobs but not a person. */
+  personDays:(JobProxyDay & {assignee:string})[];
+  totalJobs:number; totalAlarms:number; storedRows:number;
+  earliestDate:string|null; latestDate:string|null; lastImport:AlarmMttrImportInfo|null;
+  lastJobImport:JobProxyMappingImportInfo|null; mappedJobs:number; unassignedJobs:number;
+  legacyUnlinkedRows:number; needsAlarmReimport:boolean;
+}
+/** null/undefined = all, [] = no selection. Empty string selects the unassigned bucket explicitly. */
+export type JobProxyScope=readonly string[]|null|undefined;
+export type JobProxyMttrStatus='available'|'invalid_range'|'no_dataset'|'alarm_reimport_required'|'no_jobs_both_periods'|'no_baseline_jobs'|'no_current_jobs'|'zero_baseline';
+export interface JobProxyMttrComparison extends Omit<AlarmMttrComparison,'status'> {status:JobProxyMttrStatus}
+export interface JobProxyMttrPerson {assignee:string;rank:number|null;comparison:JobProxyMttrComparison}
+type ProxyInput=JobProxyMttrDataset|null|undefined;
+const isProxy=(d:ProxyInput):d is JobProxyMttrDataset=>d?.formatVersion===5&&d.source==='alarm-jobs';
+const usableGroup=(day:JobProxyDay)=>Number.isSafeInteger(day.count)&&day.count>0&&Number.isFinite(day.totalSeconds)&&day.totalSeconds>0;
+const asc=(a:string,b:string)=>a<b?-1:a>b?1:0;
+const blocked=(d:JobProxyMttrDataset)=>d.needsAlarmReimport&&d.totalJobs===0;
+
+/** A mapped owner can be selected before their first eligible Job; old V5 snapshots fall back to known owners. */
+export function getJobProxyAssignees(data:ProxyInput):string[]{
+  if(!isProxy(data))return [];
+  return [...new Set([...(data.assignees??[]),...data.personDays.map(d=>d.assignee)].filter(Boolean))].sort(asc);
+}
+
+/** Preserve the backend's Job weighting when combining several assignees on one date. */
+export function selectJobProxyDays(data:ProxyInput,assignees?:JobProxyScope):JobProxyDay[]{
+  if(!isProxy(data)||blocked(data))return [];
+  if(assignees==null)return data.days.filter(usableGroup);
+  const selected=new Set(assignees),daily=new Map<string,JobProxyDay>();
+  if(!selected.size)return [];
+  for(const d of data.personDays){
+    if(!selected.has(d.assignee)||!usableGroup(d))continue;
+    const sum=daily.get(d.date)??{date:d.date,count:0,totalSeconds:0};
+    sum.count+=d.count;sum.totalSeconds+=d.totalSeconds;daily.set(d.date,sum);
+  }
+  return [...daily.values()].sort((a,b)=>asc(a.date,b.date));
+}
+
+function proxyAggregate(rows:JobProxyDay[],range:MttrPeriod):MttrAggregate{
+  const out:MttrAggregate={...range,days:0,count:0,totalSeconds:0,meanSeconds:null};
+  if(!isValidMttrPeriod(range))return out;
+  out.days=(Date.parse(range.to+'T00:00:00Z')-Date.parse(range.from+'T00:00:00Z'))/86_400_000+1;
+  for(const d of rows)if(d.date>=range.from&&d.date<=range.to&&usableGroup(d)){
+    out.count+=d.count;out.totalSeconds+=d.totalSeconds;
+  }
+  if(out.count)out.meanSeconds=out.totalSeconds/out.count;
+  return out;
+}
+function compareProxyDays(data:ProxyInput,rows:JobProxyDay[],base:MttrPeriod,cur:MttrPeriod):JobProxyMttrComparison{
+  const baseline=proxyAggregate(rows,base),current=proxyAggregate(rows,cur);
+  const valid=baseline.days>0&&current.days>0;
+  let status:JobProxyMttrStatus='available';
+  if(!valid)status='invalid_range';
+  else if(!isProxy(data))status='no_dataset';
+  else if(blocked(data))status='alarm_reimport_required';
+  else if(!data.totalJobs&&!data.storedRows&&!data.lastImport)status='no_dataset';
+  else if(!baseline.count&&!current.count)status='no_jobs_both_periods';
+  else if(!baseline.count)status='no_baseline_jobs';
+  else if(!current.count)status='no_current_jobs';
+  else if(baseline.meanSeconds===0)status='zero_baseline';
+  const savedSeconds=status==='available'?baseline.meanSeconds!-current.meanSeconds!:null;
+  return {baseline,current,status,savedSeconds,reductionRate:savedSeconds===null?null:savedSeconds/baseline.meanSeconds!*100,
+    overlap:valid&&base.from<=cur.to&&cur.from<=base.to,unequalDays:valid&&baseline.days!==current.days};
+}
+/** Inclusive periods. A Job belongs to the K date of its winning alarm and is counted only once in each period. */
+export function compareJobProxyMttr(data:ProxyInput,baseline:MttrPeriod,current:MttrPeriod,assignees?:JobProxyScope):JobProxyMttrComparison{
+  return compareProxyDays(data,selectJobProxyDays(data,assignees),baseline,current);
+}
+/** Rank signed reductions before rounding for display, and keep one-period-only people visible as unranked.
+ * Include names observed in either selected period, plus explicitly selected names with no observations. */
+export function rankJobProxyMttr(data:ProxyInput,baseline:MttrPeriod,current:MttrPeriod,assignees?:JobProxyScope):JobProxyMttrPerson[]{
+  if(!isProxy(data)||blocked(data))return [];
+  const selected=assignees==null?null:new Set(assignees),grouped=new Map<string,JobProxyDay[]>();
+  if(selected)for(const name of selected)if(name)grouped.set(name,[]);
+  for(const d of data.personDays){
+    if(!d.assignee||(selected&&!selected.has(d.assignee))||!usableGroup(d))continue;
+    if(!(d.date>=baseline.from&&d.date<=baseline.to)&&!(d.date>=current.from&&d.date<=current.to))continue;
+    const bucket=grouped.get(d.assignee);if(bucket)bucket.push(d);else grouped.set(d.assignee,[d]);
+  }
+  const rows:JobProxyMttrPerson[]=[...grouped].map(([assignee,days])=>({assignee,rank:null,comparison:compareProxyDays(data,days,baseline,current)}));
+  rows.sort((a,b)=>{
+    const x=a.comparison.reductionRate,y=b.comparison.reductionRate;
+    if(x!==y)return x===null?1:y===null?-1:y-x;
+    return asc(a.assignee,b.assignee);
+  });
+  let previous:number|null=null,rank=0;
+  rows.forEach((row,i)=>{const rate=row.comparison.reductionRate;if(rate===null)return;if(rate!==previous)rank=i+1;row.rank=rank;previous=rate;});
+  return rows;
+}

@@ -1,4 +1,4 @@
-import { ALARM_MTTR_RULE, type AiFacts } from './ai-reporting.ts';
+import { ALARM_MTTR_RULE, JOB_PROXY_MTTR_RULE, type AiFacts } from './ai-reporting.ts';
 
 const STYLE_LIMIT = 4000;
 
@@ -33,11 +33,19 @@ export function buildAiReportPrompt(facts: AiFacts, instructions = ''): string {
   const daily = facts.range.days === 1 && facts.range.from === facts.range.to;
   const period = daily ? `${from}（单日）` : `${from} 至 ${to}（所选区间）`;
   const preference = stylePreference(instructions.trim());
+  const proxyMode = facts.effectiveness.mttr.businessRule === JOB_PROXY_MTTR_RULE;
   const alarmMode = facts.effectiveness.mttr.businessRule === ALARM_MTTR_RULE;
-  const mttrSection = alarmMode
+  const mttrSection = proxyMode
+    ? '2. 成效统计：按 selectedScope 明确是全部工单、某人或所选多人；写两期日期、各期工单数、均值及单位。指标是工单告警最长时长的代理值。只在数据可用时给出减少率，可引用所选范围内少量具名人员的减少率和两期样本量。'
+    : alarmMode
     ? '2. 成效统计：根据独立选择的基准期和对比期，写出具体起止日期、各期有效告警行数、平均告警时长（用同一单位，如小时）和已计算的 MTTR 减少率。正值表示平均时长缩短，负值表示延长；缺少可用结果时说明原因，不补百分比。结合留存或复用率时不要重复上一节的数据。'
     : `2. 成效统计：结合窗口留存或周期复用说明持续使用；不要重复上一节已写的数字。仅在 effectiveness.mttr 的 businessRule 为 TT-category-filter-joined-to-completed-JOB-by-TT-ID 时，引用新口径：基准期和对比期的具体起止日期、各期有效完成 JOB 数、平均耗时（将 meanSeconds 换算为小时或天，标明单位）及 MTTR 减少率。必须说明 calendarDayFilter、durationFilter 与 meanGapFilter 是否启用；时长过滤启用时写清 X 小时阈值，耗时大于等于 X 小时的 JOB 均排除、仅保留严格小于 X 小时的 JOB，支持小数。先应用跨天与单 JOB 时长条件，再按所选两期一次性计算处理人均值差筛选；使用 reportFilters 的最终两期排除数（每个 JOB 只计一次），不得把跨天排除数与总排除数相加。reportFilters 不可用时说明原因，不引用占位的 0 个 JOB 或未筛选均值；跨天筛选启用时称为“同日创建并完成的 JOB”，注明所选范围两期排除的跨天数量（可用时），不能表述为全部 JOB 成效。明确 selectedScope 是整体、具体处理人还是未分配；overall 是独立的整体比较，不受人员选择影响。有可用人员排名时可以写少量 Top 人员及其本人两期 JOB 数、均值、减少率，并标注按百分比排序及样本量。正数写平均时长缩短，负数写平均时长增加；不能把增加说成提升或把全负值中的第一名称为已实现正向提升。旧版数据必须说明需重新导入 TT 和 JOB 两张表，不引用成新口径或人员排名。缺 JOB、零基准等不可用时说明原因，不补百分比。只陈述工单系统的观察结果，不写成 FMEMate 导致的效率提升。`;
-  const mttrRules = alarmMode
+  const mttrRules = proxyMode
+    ? `- 告警表只取 AE 有 Job ID、B 列告警 ID 命中白名单、K 日期有效且 I 列 Duration 大于零的行。零时长表示未清除。先按 Job ID 在全部符合条件的告警中取最大 Duration；每个工单只计一次，以最长告警的 K 列发生日期分期；最长时长并列时取最早 K 日期。日期含两端，与应用日志日期和 Scene 无关。
+- 告警表 AE 关联 Job 表 C，AG 是处理人。全部工单可含未分配或未匹配人员的工单；未分配不是一个人。单人或所选多人只引用该范围的结果，未选择任何人不等于全部。每期 count 是工单数；meanSeconds 是各工单最长告警时长之和除以工单数，不能平均各人或各日均值。MTTR 减少率=(基准期均值−对比期均值)÷基准期均值×100%；正为缩短，负为延长，缺少任一期时不能补为 0%。仅在 status=available 且 reductionRate 非 null 时引用。若有重叠日期、两期长度不同或样本少，应交代。
+- 人员排行只覆盖所选范围中的具名处理人；列名次时附本人两期工单数、均值与减少率。只有负数时不能说第一名已改善；无两期可比数据不排名。排名示例受限，不外推。若 needsAlarmReimport 为真，必须说明未关联 Job ID 的旧版告警尚未参与，需重传原告警文件；仅对已有可计算范围陈述，无法比较时不报数字。
+- 这是工单处理时间的代理指标，不是工单真实起止耗时。告警组合、工单难度、样本量都可能不同；不能归因于 FMEMate，也不能推算实际节省工时。`
+    : alarmMode
     ? `- MTTR 只使用单份告警表的记录。B 列告警 ID 在当前白名单内，AE 列 Job ID 非空，I 列 Duration 有效且大于零：0:00:00 表示未清除，排除不计。I 中的 h:mm:ss 或 Excel 时长已换算为秒，不要把小时当分钟。依据 K 列告警发生日期（原始自然日）归入所选区间，包含两端日期，不套用 app 日志日期或 Scene。白名单为空时没有命中数据；分母是有效告警行数，同一 Job 或同一告警 ID 可有多条告警记录。整体平均时长=该期有效告警 Duration 之和÷有效告警行数，不能平均每日均值。导入诊断只描述最近一次导入，不是两期分母。
 - MTTR 减少率=(基准期 meanSeconds−对比期 meanSeconds)÷基准期 meanSeconds×100%。只有 status=available 且 reductionRate 非 null 时才引用。零基准、缺数据或日期无效均不可写成 0%/100%。对两期分别给出 count 和可用的 meanSeconds，统一换算展示单位。overlap 或 unequalDays 为真须披露。告警类型、难度或覆盖范围可能不同；仅描述观测变化，不能归因于 FMEMate，不能推算节省的人工工时或产出人员排行。`
     : `- effectiveness.mttr 与日志的日期和 Scene 筛选独立：按 baseline/current 的具体日期比较，不套用报告标题日期。新规则只在 businessRule=TT-category-filter-joined-to-completed-JOB-by-TT-ID 且 dataQuality.formatVersion=3 时成立：先筛 TT 的分类为 Radio-OSP 或 Radio-ISP，不过滤 TT 状态，再按 TT ID 关联 JOB.tt_id，仅取 JOB 状态 Done 或 Close。实际列由 dataQuality.mappings.tt/job 及 sourceHeaders.tt/job 给出；默认 JOB 创建时间 G、完成时间 I、处理人 AG、状态 AR，也不能替代实际所选映射。不得用 TT 创建/关闭时间、assign_date 或其他字段代替 JOB 创建/完成时间。
@@ -50,7 +58,7 @@ export function buildAiReportPrompt(facts: AiFacts, instructions = ''): string {
 - 日期审计及修复：始终按当前事实中的真实起止日期汇报，不静默过滤未来日期或改写日期。若 duplicatePolicy=update 且 updatedJobs>0，可以说明已按本次文件更新相应数量的已有 JOB 并重算统计；不能据此认定此前日期差异的根因，也不能把未验证的导入、Excel 格式或用户操作问题写成已确认原因。未提供 duplicatePolicy 时按 keep 理解。
 - selectedScope 指当前筛选人员：assignee=null 且 type=overall 表示整体，assignee='' 表示未分配，不是没有筛选。所选人员只改变当前比较，不影响 overall 或全局 people.ranking；每人的减少率分母是本人基准期平均耗时，整体分母是全量有效 JOB 的基准期平均耗时，两者不能混用。人员排名仅对两期均有有效 JOB、基准均值大于零且具名的处理人按有符号减少百分比降序排列；同分同名次，缺一期、零基准和未分配组不排名，不得补为第一。Top 是有限样例，必须遵守 rankingCoverage/unrankedCoverage 的 omitted 数，不声称覆盖所有人员。样本少时提醒不稳定，不把观测排名当工作能力评价。
 - 百分比减少最多不等于绝对平均耗时缩短最多，更不等于总节省工时最多。MTTR 是符合分类 TT 关联 JOB 的观察性比较，未关联哪些 JOB 或用户使用过 FMEMate；任务难度、故障类型、分工及其他因素可能不同。因此不能声称“由 FMEMate 带来/证明了效率提升”，也不能推断人工工作量、满意度、ROI 或因果效果。工单统计是独立材料，不得由 browser 人数或 app 失败率推算。`;
-  const mttrCheck = alarmMode ? '告警 MTTR 两期日期、各期有效告警行数、均值与单位、减少率、白名单及未清除告警的排除口径' : 'MTTR 两期日期/JOB 数/均值/减少率、整体与人员范围、跨天、单 JOB 时长与处理人两期均值差过滤选项、含等号的对称剔除边界、未判断人员及未分配说明、组合去重排除数量及筛选人群口径、TT/JOB 关联和非因果口径';
+  const mttrCheck = proxyMode ? '按工单最长告警时长统计、K 日期归属、两期有效工单数及均值、人员范围及排名样本、迁移完整性和非因果口径' : alarmMode ? '告警 MTTR 两期日期、各期有效告警行数、均值与单位、减少率、白名单及未清除告警的排除口径' : 'MTTR 两期日期/JOB 数/均值/减少率、整体与人员范围、跨天、单 JOB 时长与处理人两期均值差过滤选项、含等号的对称剔除边界、未判断人员及未分配说明、组合去重排除数量及筛选人群口径、TT/JOB 关联和非因果口径';
   const json = JSON.stringify(facts, null, 2);
   const preferences = preference
     ? `${fenced(preference, 'text')}\n${instructions.trim().length > STYLE_LIMIT ? '（排版偏好超过 4,000 字符，已截断；仅以上内容有效。）' : ''}`.trimEnd()

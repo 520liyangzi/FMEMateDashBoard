@@ -26,10 +26,10 @@ from ai_service import AiError, AiService, make_prompt
 from mttr_import import stage_mttr, finish_dataset, aggregate_tickets, validate_dataset, MttrImportError
 from job_mttr_import import stage_pair, joined_aggregates, duration_groups, finish_pair, validate_v3, RADIO
 import alarm_mttr
-from mttr_uploads import AlarmUploads, MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
+from mttr_uploads import AlarmJobUploads, AlarmUploads, MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '2.0.0'
+APP_VERSION = '2.1.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -166,6 +166,7 @@ class Store:
         with self.connect() as db:
             db.executescript(SCHEMA)
             db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)', ('presets', json.dumps(DEFAULT_PRESETS)))
+        self.alarm_job_uploads = AlarmJobUploads(self.root / '.alarm-job-uploads',max_file_bytes=mttr_max_file_bytes)
         self.alarm_uploads = AlarmUploads(self.root / '.alarm-uploads',max_file_bytes=mttr_max_file_bytes)
         self.mttr_uploads = MttrUploads(self.root / '.mttr-uploads',max_file_bytes=mttr_max_file_bytes)
 
@@ -197,6 +198,18 @@ class Store:
         with self.lock, self.connect() as db:
             return alarm_mttr.get_dataset(db)
 
+    def alarm_job_details(self, payload):
+        if set(payload) - {'start', 'end', 'assignees', 'offset', 'limit'}:
+            raise ApiError(400, '未知的工单筛选条件 / Unknown Job detail filter.')
+        try:
+            with self.lock, self.connect() as db:
+                return alarm_mttr.list_job_proxy_details(
+                    db, date_from=payload.get('start'), date_to=payload.get('end'),
+                    assignees=payload.get('assignees'), offset=payload.get('offset', 0),
+                    limit=payload.get('limit', 100))
+        except MttrImportError as exc:
+            raise ApiError(400, str(exc), exc.details) from exc
+
     def update_alarm_allowlist(self, payload):
         if set(payload) != {'allowlist'} or not isinstance(payload['allowlist'], str):
             raise ApiError(400, '请填写逗号分隔的告警 ID 白名单 / Supply a comma-separated alarm ID allowlist.')
@@ -212,6 +225,15 @@ class Store:
             with alarm_mttr.stage_import(content, filename) as staged:
                 with self.lock, self.connect() as db:
                     return alarm_mttr.merge_import(db, staged, allowlist)
+        except MttrImportError as exc:
+            raise ApiError(400, str(exc), exc.details) from exc
+
+    def import_alarm_jobs(self, content, filename):
+        try:
+            # Stage the entire file before changing any existing Job ownership.
+            with alarm_mttr.stage_job_import(content, filename) as staged:
+                with self.lock, self.connect() as db:
+                    return alarm_mttr.merge_job_import(db, staged)
         except MttrImportError as exc:
             raise ApiError(400, str(exc), exc.details) from exc
 
@@ -1166,6 +1188,8 @@ class Handler(BaseHTTPRequestHandler):
                 if source=='import':
                     return self.json(store.mttr_uploads.finish(upload_id,self.json_body(),store.import_mttr_pair))
                 return self.file_chunk(store.mttr_uploads, upload_id, source)
+            if path == '/api/mttr/alarms/job-details':
+                return self.json(store.alarm_job_details(self.json_body()))
             if path == '/api/mttr/alarms/uploads':
                 return self.json(store.alarm_uploads.create(self.json_body()))
             alarm_upload = re.fullmatch(r'/api/mttr/alarms/uploads/([0-9a-f]{32})/(alarm|import)', path)
@@ -1174,6 +1198,14 @@ class Handler(BaseHTTPRequestHandler):
                 if operation == 'import':
                     return self.json(store.alarm_uploads.import_file(upload_id, self.json_body(), store.import_alarm_mttr))
                 return self.file_chunk(store.alarm_uploads, upload_id, operation)
+            if path == '/api/mttr/alarms/job-uploads':
+                return self.json(store.alarm_job_uploads.create(self.json_body()))
+            mapping_upload = re.fullmatch(r'/api/mttr/alarms/job-uploads/([0-9a-f]{32})/(job|import)', path)
+            if mapping_upload:
+                upload_id, operation = mapping_upload.groups()
+                if operation == 'import':
+                    return self.json(store.alarm_job_uploads.import_file(upload_id, self.json_body(), store.import_alarm_jobs))
+                return self.file_chunk(store.alarm_job_uploads, upload_id, operation)
             if path == '/api/mttr/alarms/allowlist':
                 return self.json(store.update_alarm_allowlist(self.json_body()))
             if path == '/api/ai/config':
@@ -1229,7 +1261,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlsplit(self.path).path
-        if re.fullmatch(r'/api/mttr/uploads/[0-9a-f]{32}/(?:tt|job)',path) or re.fullmatch(r'/api/mttr/alarms/uploads/[0-9a-f]{32}/alarm',path):
+        if any(re.fullmatch(pattern, path) for pattern in (
+                r'/api/mttr/uploads/[0-9a-f]{32}/(?:tt|job)',
+                r'/api/mttr/alarms/uploads/[0-9a-f]{32}/alarm',
+                r'/api/mttr/alarms/job-uploads/[0-9a-f]{32}/job')):
             return self.do_POST()
         self.json({'error':'PUT is supported only for file chunks.'},405)
 
@@ -1242,6 +1277,9 @@ class Handler(BaseHTTPRequestHandler):
             alarm_upload = re.fullmatch(r'/api/mttr/alarms/uploads/([0-9a-f]{32})', url.path)
             if alarm_upload:
                 return self.json(store.alarm_uploads.cancel(alarm_upload[1]))
+            mapping_upload = re.fullmatch(r'/api/mttr/alarms/job-uploads/([0-9a-f]{32})', url.path)
+            if mapping_upload:
+                return self.json(store.alarm_job_uploads.cancel(mapping_upload[1]))
             if url.path == '/api/mttr/alarms':
                 return self.json(store.clear_alarm_mttr())
             upload = re.fullmatch(r'/api/mttr/uploads/([0-9a-f]{32})',url.path)

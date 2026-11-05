@@ -715,3 +715,32 @@ test('alarm MTTR evidence uses inclusive occurrence-date periods weighted by ala
   const none=facts({...input,alarmMttr:null}).effectiveness.mttr;
   assert.equal(none.reductionRate,null); assert.equal(none.status,'no_dataset','never substitute old Job data');
 });
+
+test('job-proxy evidence reports pooled Jobs and signed individual ranking within the selected cohort', () => {
+  const date='2026-10-01',next='2026-10-08';
+  const alarmJobMttr={formatVersion:5 as const,source:'alarm-jobs' as const,
+    allowlist:['26540'],storedRows:12,totalAlarms:10,totalJobs:9,earliestDate:date,latestDate:next,lastImport:null,lastJobImport:null,
+    mappedJobs:8,unassignedJobs:1,legacyUnlinkedRows:3,needsAlarmReimport:true,
+    days:[{date,count:6,totalSeconds:1500},{date:next,count:3,totalSeconds:720}],
+    personDays:[{date,assignee:'Alice',count:3,totalSeconds:600},{date,assignee:'Bo',count:1,totalSeconds:600},{date,assignee:'Other',count:1,totalSeconds:200},{date,assignee:'',count:1,totalSeconds:100},
+      {date:next,assignee:'Alice',count:1,totalSeconds:100},{date:next,assignee:'Bo',count:1,totalSeconds:600},{date:next,assignee:'Other',count:1,totalSeconds:20}]};
+  const input={alarmJobMttr,mttrBaseline:{from:date,to:date},mttrCurrent:{from:next,to:next},selectedAssignees:['Alice','Bo']};
+  const mttr=facts(input).effectiveness.mttr;
+  assert.equal(mttr.businessRule,'one-job-max-eligible-alarm-duration');
+  assert.equal(mttr.baseline.count,4);assert.equal(mttr.baseline.meanSeconds,300);
+  assert.equal(mttr.current.count,2);assert.equal(mttr.current.meanSeconds,350);
+  assert.ok(Math.abs(mttr.reductionRate!-(-100/6))<1e-8);
+  if (!('selectedScope' in mttr) || !('names' in mttr.selectedScope)) assert.fail('No v5 evidence scope');
+  assert.deepEqual(mttr.selectedScope.names,['Alice','Bo']);assert.equal(mttr.selectedScope.type,'group');
+  assert.equal(mttr.dataQuality.needsAlarmReimport,true);
+  assert.equal(mttr.dataQuality.legacyUnlinkedRows,3);
+  assert.deepEqual(mttr.people.ranking.map(x=>[x.assignee,x.rank,x.baselineJobs,x.reductionRate]),[['Alice',1,3,50],['Bo',2,1,0]]);
+  assert.equal(facts({...input,selectedAssignees:[]}).effectiveness.mttr.baseline.count,0);
+  assert.equal(facts({...input,selectedAssignees:null}).effectiveness.mttr.baseline.count,6);
+  const missing=facts({...input,alarmJobMttr:null,...{alarmMttr:null}}).effectiveness.mttr;
+  assert.equal(missing.businessRule,'one-job-max-eligible-alarm-duration');assert.equal(missing.status,'no_dataset');assert.equal(missing.reductionRate,null);
+  assert.equal(missing.baseline.count,null);
+  const pending=facts({...input,alarmJobMttr:{...alarmJobMttr,totalJobs:0,days:[],personDays:[]}}).effectiveness.mttr;
+  assert.equal(pending.status,'alarm_reimport_required');assert.equal(pending.baseline.count,null);
+  assert.equal(pending.current.meanSeconds,null);assert.equal(pending.reductionRate,null);
+});

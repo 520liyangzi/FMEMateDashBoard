@@ -1,6 +1,6 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
 import { compareMttr, previousMttrPeriod, analyzeMttrPeople, selectMttrDayScope, selectMttrScope, filterMttrPeopleByGap, type MttrDataset, type MttrPeriod } from './mttr.ts';
-import { compareAlarmMttr, type AlarmMttrDataset } from './alarm-mttr.ts';
+import { compareAlarmMttr, compareJobProxyMttr, rankJobProxyMttr, type JobProxyMttrDataset, type AlarmMttrDataset } from './alarm-mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -28,6 +28,9 @@ export type AiFactsInput = {
   minimumActiveDays?: number;
   retentionDays?: number;
   repeatMode?: RepeatMode;
+  /** V5 reporting: null means no recoverable Job-level alarm data. */
+  alarmJobMttr?: JobProxyMttrDataset | null;
+  selectedAssignees?: readonly string[] | null;
   /** Pass null when no alarm data exist. Omitted only for legacy callers. */
   alarmMttr?: AlarmMttrDataset | null;
   mttr?: MttrDataset | null;
@@ -48,6 +51,7 @@ const LIMITS = {
   feedbackCharacters: 1200, identifierCharacters: 200, sceneCharacters: 200,
 } as const;
 
+export const JOB_PROXY_MTTR_RULE = 'one-job-max-eligible-alarm-duration' as const;
 export const ALARM_MTTR_RULE = 'allowlisted-alarm-duration-by-occurrence-date' as const;
 
 function alarmMttrEvidence(data: AlarmMttrDataset | null, baseline: MttrPeriod, current: MttrPeriod) {
@@ -72,6 +76,51 @@ function alarmMttrEvidence(data: AlarmMttrDataset | null, baseline: MttrPeriod, 
   };
 }
 
+function jobProxyEvidence(
+  data: JobProxyMttrDataset|null, baseline:MttrPeriod, current:MttrPeriod,
+  assignees:readonly string[]|null, clip:(s:string,limit:number,field:string)=>string,
+) {
+  if (data?.formatVersion!==5 || data.source!=='alarm-jobs') data=null;
+  const names=assignees===null?null:[...new Set(assignees)];
+  const comparison=compareJobProxyMttr(data,baseline,current,names);
+  const measured=comparison.status!=='no_dataset' && comparison.status!=='invalid_range' && comparison.status!=='alarm_reimport_required';
+  // Unknown coverage or invalid ranges do not establish that zero Jobs occurred.
+  const period=(p:typeof comparison.baseline)=>measured?p:{...p,count:null,totalSeconds:null,meanSeconds:null};
+  const byPerson=measured?rankJobProxyMttr(data,baseline,current,names):[];
+  const ranked=byPerson.filter(p=>p.rank!==null),unranked=byPerson.filter(p=>p.rank===null);
+  const name=(s:string,field:string)=>clip(s,LIMITS.identifierCharacters,'effectiveness.mttr.'+field);
+  function people(rows:typeof byPerson,limit:number,field:string) {
+    return rows.slice(0,limit).map((p,i)=>({
+      assignee:name(p.assignee,field+'['+i+'].assignee'), rank:p.rank, status:p.comparison.status,
+      baselineJobs:p.comparison.baseline.count,baselineMeanSeconds:p.comparison.baseline.meanSeconds,
+      currentJobs:p.comparison.current.count,currentMeanSeconds:p.comparison.current.meanSeconds,
+      reductionRate:p.comparison.reductionRate,
+    }));
+  }
+  return {
+    ...comparison,baseline:period(comparison.baseline),current:period(comparison.current),businessRule:JOB_PROXY_MTTR_RULE,
+    selectedScope:{
+      type:names===null?'all_jobs':!names.length?'none':names.length===1?'single':'group',
+      selectedCount:names?.length??null, includesUnassigned:names===null||names.includes(''),
+      names:names?.slice(0,LIMITS.mttrPeople).map((v,i)=>name(v,'selectedScope.names['+i+']'))??null,
+      omittedNames:Math.max(0,(names?.length??0)-LIMITS.mttrPeople),
+    },
+    people:{
+      rankedCount:ranked.length,unrankedCount:unranked.length,
+      ranking:people(ranked,LIMITS.mttrPeople,'people.ranking'),unrankedExamples:people(unranked,LIMITS.mttrUnrankedPeople,'people.unrankedExamples'),
+      scope:'Same selected population and periods as the comparison. Ranked by signed reduction percentage; only named people with computable comparisons. Samples are bounded; blank owner is not a person.',
+    },
+    dataQuality:{
+      storedEligibleJobsAcrossAllDates:data?.totalJobs??null, eligibleAlarmsAcrossAllDates:data?.totalAlarms??null,
+      unassignedJobsAcrossAllDates:data?.unassignedJobs??null,mappedJobsAcrossAllDates:data?.mappedJobs??null,
+      allowlistSize:data?.allowlist.length??0,needsAlarmReimport:data?.needsAlarmReimport??false,
+      legacyUnlinkedRows:data?.legacyUnlinkedRows??null,jobMapImported:!!data?.lastJobImport,
+    },
+    method:'Use alarm rows whose B code is allowed, I duration is positive, K date valid and AE Job ID nonblank. For each Job take the longest eligible duration globally, assign that Job once to the K date of its maximum (earliest K when tied). Link alarm AE to Job C for owner AG. Unmapped or unassigned Jobs are included in all Jobs, not personal rankings. Counts are Jobs and means are summed Job maxima divided by Job count. Do not average person means or percentages.',
+    limitations:'This estimates MTTR with a duration proxy, not actual ticket elapsed time or labor savings. Differences in case mix, sample sizes and coverage preclude attributing change to FMEMate. Incomplete migrations exclude unlinked legacy alarms; reimport original alarm workbooks for full history.',
+  };
+}
+
 /** Build bounded evidence with the same metrics as the dashboard. No API settings enter this object. */
 export function buildAiFacts(input: AiFactsInput) {
   const stats = analyze(input.records, input.presets, input.from, input.to, input.scene);
@@ -81,8 +130,9 @@ export function buildAiFacts(input: AiFactsInput) {
   // MTTR has its own ticket-system ranges and is independent of app Scene filters.
   const mttrCurrent = input.mttrCurrent ?? { from, to };
   const mttrBaseline = input.mttrBaseline ?? previousMttrPeriod(mttrCurrent) ?? { from: '', to: '' };
+  const useJobProxy = input.alarmJobMttr !== undefined;
   const useAlarmMttr = input.alarmMttr !== undefined;
-  const mttrV3 = !useAlarmMttr && input.mttr?.formatVersion === 3;
+  const mttrV3 = !useJobProxy && !useAlarmMttr && input.mttr?.formatVersion === 3;
   const mttrExcludeCrossDay = input.mttrExcludeCrossDay === true;
   const mttrAllData = mttrV3 ? input.mttr! : null;
   const mttrDayData = selectMttrDayScope(mttrAllData, mttrExcludeCrossDay);
@@ -271,7 +321,7 @@ export function buildAiFacts(input: AiFactsInput) {
       },
     },
     effectiveness: {
-      mttr: useAlarmMttr ? alarmMttrEvidence(input.alarmMttr ?? null, mttrBaseline, mttrCurrent) : {
+      mttr: useJobProxy ? jobProxyEvidence(input.alarmJobMttr??null,mttrBaseline,mttrCurrent,input.selectedAssignees??null,text) : useAlarmMttr ? alarmMttrEvidence(input.alarmMttr ?? null, mttrBaseline, mttrCurrent) : {
         ...mttrComparison,
         businessRule: mttrV3 ? 'TT-category-filter-joined-to-completed-JOB-by-TT-ID' : 'legacy-single-table-reimport-TT-and-JOB-required',
         overall: mttrOverall,
@@ -424,7 +474,7 @@ export function buildAiFacts(input: AiFactsInput) {
       `Window retention is not a first-use or registration cohort. It uses baseline-day identifiable accounts and counts each account once if it returns on ANY of the following ${retention.windowDays} calendar days. The baseline is windowDays before the selected end. The baseline day is excluded from follow-up; new later accounts do not enter the numerator. It does not require activity exactly on day N or on every day. Scene filtering is consistent and browser is excluded.`,
       'retention.latest describes the selected end date and its preceding window, not an average over the selected period. Always state previousDate (baseline), windowStart, date (window end), windowDays and retainedUsers/previousUsers. Missing baseline or any unobserved follow-up date makes rate null. Present logs are not confirmed complete; absent observations do not establish churn.',
       'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for the baseline and every follow-up day, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
-      ...(useAlarmMttr ? ['Alarm MTTR compares the two independently selected periods using eligible alarm rows from a single alarm workbook. The configured allowlist is applied to both periods. State the counts and mean durations with units, and report shorter or longer means without attributing the change to FMEMate.'] : [
+      ...(useJobProxy ? ['Use the selected scope, its Job counts/means and its signed reduction. This is an observational proxy, independent of the app log range and Scene.'] : useAlarmMttr ? ['Alarm MTTR compares the two independently selected periods using eligible alarm rows from a single alarm workbook. The configured allowlist is applied to both periods. State the counts and mean durations with units, and report shorter or longer means without attributing the change to FMEMate.'] : [
       'MTTR meanGapFilter is a one-pass named-assignee cohort filter after Job filters: exclude abs(two means gap) >= gapHours in either direction, including zero means. Keep unassessed records and disclose counts. Use reportFilters for final exclusions; this does not equalize complexity or establish causation. Invalid settings mean unavailable.',
       'The MTTR durationFilter and reportFilters apply uniformly to all MTTR scopes. A valid enabled duration limit excludes durations greater than or equal to X hours, retaining strictly less; disclose X and the equality boundary. Combine enabled day and duration conditions with AND. Combined excluded counts come from reportFilters and count a Job once even if it fails both conditions; do not add day-only exclusions to combined exclusions. If reportFilters is unavailable, explain its reason, omit filtered rates and do not report placeholder zero counts as measured facts.',
       'The MTTR calendarDayFilter option applies to all MTTR scopes. When excludeCrossDay=true, only Jobs with equal source creation and finish calendar dates remain; a short interval crossing midnight is excluded. Always disclose this selected subset and available excluded Job counts. Import diagnostic counters and totalJobs remain all-data counts before this optional filter. When same-day aggregates are unavailable, report the limitation and no filtered rate; do not substitute the unfiltered comparison.',

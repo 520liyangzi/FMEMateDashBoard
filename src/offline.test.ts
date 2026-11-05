@@ -213,3 +213,20 @@ test('alarm snapshots keep eligible daily sums for changing periods offline, and
     }
   });
 });
+
+test('Job snapshots preserve per-Job audit rows and the selected cohort while demo copies strip both',async()=>{
+  await browserMock(async context=>{
+    context.setFetch((async()=>Response.json({js:'console.log(1)',css:'body{}'})) as typeof fetch);
+    const jobMttrRows=[{jobId:'PRIVATE-JOB',assignee:'PRIVATE-OWNER',date:'2026-10-28',seconds:360}];
+    const alarmJobMttr={formatVersion:5,source:'alarm-jobs',personDays:[{date:'2026-10-28',assignee:'PRIVATE-OWNER',count:1,totalSeconds:360}]};
+    for(const demo of [false,true]){
+      await downloadOfflineReport({demo,state:{},jobMttrRows,alarmJobMttr,selectedAssignees:['PRIVATE-OWNER']},'zh');
+      const body=await context.generated()!.text();
+      const exported=JSON.parse(body.match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+      assert.deepEqual(exported.jobMttrRows,demo?[]:jobMttrRows);
+      assert.deepEqual(exported.alarmJobMttr,demo?null:alarmJobMttr);
+      assert.deepEqual(exported.selectedAssignees,demo?null:['PRIVATE-OWNER']);
+      if(demo)assert.doesNotMatch(body,/PRIVATE-JOB|PRIVATE-OWNER/);
+    }
+  });
+});

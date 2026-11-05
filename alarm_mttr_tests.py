@@ -1,4 +1,4 @@
-"""Alarm occurrences are counted per row, elapsed Duration is never derived from dates."""
+"""Job-level MTTR is the maximum eligible alarm Duration, not elapsed Job time."""
 import csv
 from datetime import datetime
 import io
@@ -6,7 +6,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
-from alarm_mttr import init_schema, get_dataset, set_allowlist, stage_import, merge_import, clear_alarm
+from alarm_mttr import (init_schema,get_dataset,list_job_proxy_details,set_allowlist,stage_import,merge_import,
+                       stage_job_import,merge_job_import,clear_alarm,V4_TABLES,JOB_TABLES,restore_tables)
 from mttr_import import MttrImportError, column_index
 from mttr_tests import workbook
 
@@ -34,12 +35,12 @@ class AlarmMttrTest(unittest.TestCase):
         with stage_import(data,'alarm.'+('xlsx' if xlsx else 'csv')) as staged,self.db:
             return merge_import(self.db,staged,allow)
 
-    def test_weight_by_occurrence_keep_repeated_alarm_and_job_id_and_precise_seconds(self):
+    def test_work_order_uses_longest_of_repeated_alarm_rows_and_keeps_precise_seconds(self):
         d=self.add([row(),row(),row(duration='1:00:00.125',occurred='2026-11-06T00:00:01'),row(job='   '),
                     row(alarm='   '),row(duration='0'),row(duration='00:00:00.000'),row(duration='0:61:00'),
                     row(duration='-2'),row(occurred='2026/02/30 11:25:00'),row(alarm='126540')])
-        self.assertEqual(d['days'],[{'date':'2026-11-05','totalSeconds':620.,'count':2},
-                                   {'date':'2026-11-06','totalSeconds':3600.125,'count':1}])
+        self.assertEqual(d['days'],[{'date':'2026-11-06','totalSeconds':3600.125,'count':1}])
+        self.assertEqual((d['totalJobs'],d['unassignedJobs']),(1,1))
         self.assertEqual((d['totalAlarms'],d['storedRows']),(3,4))
         imp=d['lastImport']
         self.assertEqual(tuple(imp[k] for k in ('missingJobIds','missingAlarmIds','invalidDates','invalidDurations','zeroDurations','matchedRows')),(1,1,1,2,2,3))
@@ -57,7 +58,7 @@ class AlarmMttrTest(unittest.TestCase):
         self.assertEqual(d['storedRows'],2)
         d=set_allowlist(self.db,'26540， 26564,26540,,')
         self.assertEqual(d['allowlist'],['26540','26564'])
-        self.assertEqual(d['days'],[{'date':'2026-11-05','count':2,'totalSeconds':310.+25*3600+15*60+20}])
+        self.assertEqual(d['days'],[{'date':'2026-11-05','count':1,'totalSeconds':25*3600+15*60+20}])
         empty=set_allowlist(self.db,'   ')
         self.assertEqual((empty['days'],empty['earliestDate'],empty['latestDate']),([],None,None))
         self.assertEqual(set_allowlist(self.db,'2645')['totalAlarms'],0)
@@ -66,7 +67,7 @@ class AlarmMttrTest(unittest.TestCase):
 
     def test_real_xlsx_duration_cells_and_1904_occurrence_serial(self):
         serial=(datetime(2026,11,5,6,4)-datetime(1904,1,1)).total_seconds()/86400
-        d=self.add([row(duration=('n',310/86400),occurred=('n',serial)),row(duration=('n','0'),occurred=('n',serial)),
+        d=self.add([row(duration=('n',310/86400),occurred=('n',serial),job='Job2'),row(duration=('n','0'),occurred=('n',serial)),
                     row(duration=('n','1.5'),occurred=('n',serial+1)),row(duration='2.5',occurred=('n',serial))],
                    xlsx=True,date1904=True)
         self.assertEqual(d['days'],[{'date':'2026-11-05','count':1,'totalSeconds':310.},
@@ -103,5 +104,127 @@ class AlarmMttrTest(unittest.TestCase):
             self.assertEqual(out['days'][0]['totalSeconds'],123*3600+45*60+6)
             with self.assertRaises(MttrImportError), stage_import(path,'source.csv','F','minutes'):
                 pass
+
+    def jobmap(self,rows,xlsx=False):
+        header={'C':'jb_id','AG':'jb_assign_to'}
+        records=[header]+[{'C':j,'AG':p} for j,p in rows]
+        if xlsx:
+            data=workbook(records)
+        else:
+            out=io.StringIO();writer=csv.writer(out)
+            for r in records:
+                vals=['']*33;vals[2]=r['C'];vals[32]=r['AG'];writer.writerow(vals)
+            data=out.getvalue().encode()
+        with stage_job_import(data,'jobs.'+('xlsx' if xlsx else 'csv')) as st,self.db:
+            return merge_job_import(self.db,st)
+
+    def test_max_and_period_move_when_allowlist_changes_ties_choose_earliest_day_once(self):
+        self.jobmap([('J1','Alice'),('J2','Bob')])
+        d=self.add([row(job='J1',alarm='X',duration='0:20:00',occurred='2026-11-03'),
+                    row(job='J1',alarm='Y',duration='0:30:00',occurred='2026-11-12'),
+                    row(job='J1',alarm='Y',duration='0:30:00',occurred='2026-11-11'),
+                    row(job='J2',alarm='X',duration='0:10:00',occurred='2026-11-11'),
+                    row(job='J3',alarm='X',duration='0:50:00',occurred='2026-11-11')],'X,Y')
+        self.assertEqual((d['totalJobs'],d['totalAlarms'],d['unassignedJobs']),(3,5,1))
+        self.assertEqual(d['days'],[{'date':'2026-11-11','count':3,'totalSeconds':5400}])
+        self.assertEqual([(x['assignee'],x['count'],x['totalSeconds']) for x in d['personDays']],
+                         [('',1,3000),('Alice',1,1800),('Bob',1,600)])
+        d=set_allowlist(self.db,'X')
+        self.assertEqual(d['days'],[{'date':'2026-11-03','count':1,'totalSeconds':1200},
+                                     {'date':'2026-11-11','count':2,'totalSeconds':3600}])
+        self.assertEqual(d['personDays'][0]['assignee'],'Alice')
+
+    def test_mapping_updates_existing_rows_atomically_normalizes_ids_and_keeps_leading_zeroes(self):
+        d=self.add([row(job=' 00123 '),row(job='123.0'),row(job='999')])
+        self.assertEqual((d['totalJobs'],d['unassignedJobs']),(3,3))
+        d=self.jobmap([(('n',123),' Alice '),('00123','Bob'),('00123','Bob'),('999','  '),('','Z')],True)
+        self.assertEqual([(x['assignee'],x['count']) for x in d['personDays']],[('',1),('Alice',1),('Bob',1)])
+        m=d['lastJobImport'];self.assertEqual(tuple(m[k] for k in ('missingJobIds','missingAssignees','duplicateRows','mappedJobs')),(1,1,1,2))
+        with self.assertRaisesRegex(MttrImportError,'Conflicting'):
+            self.jobmap([('123','A'),('123','B')])
+        self.assertEqual(get_dataset(self.db),d)
+        with self.assertRaisesRegex(MttrImportError,'No rows'):
+            self.jobmap([('123','')])
+        self.assertEqual(get_dataset(self.db),d)
+        d=self.jobmap([('123','Bob'),('00123','')])
+        self.assertEqual([(x['assignee'],x['count']) for x in d['personDays']],[('',1),('Bob',2)])
+        self.assertEqual((d['totalJobs'],d['mappedJobs']),(3,2))
+
+    def test_details_explain_the_same_mean_after_global_maxima_and_date_ties(self):
+        self.jobmap([('J1','Alice'),('J2',"O'Neil")])
+        maximum=row(alarm='X',job='J1',duration='0:20:00',occurred='2026-11-06')
+        summary=self.add([maximum,maximum,
+                          row(alarm='Y',job='J1',duration='0:20:00',occurred='2026-11-08'),
+                          row(alarm='Y',job='J1',duration='0:15:00',occurred='2026-11-01'),
+                          row(alarm='X',job='J2',duration='0:05:00.25',occurred='2026-11-07'),
+                          row(alarm='X',job='J3',duration='1:00:00',occurred='2026-11-07')],'X,Y')
+        get=lambda **kwargs:list_job_proxy_details(self.db,**kwargs)
+        all_jobs=get()
+        self.assertEqual(all_jobs['revision'],summary['revision'])
+        self.assertEqual([r['jobId'] for r in all_jobs['rows']],['J2','J3','J1'])
+        self.assertEqual((all_jobs['total'],all_jobs['totalSeconds']),
+                         (summary['totalJobs'],sum(d['totalSeconds'] for d in summary['days'])))
+        j1={'jobId':'J1','assignee':'Alice','date':'2026-11-06','seconds':1200,'alarmCount':4,'alarmId':'X'}
+        self.assertEqual(get(date_from='2026-11-06',date_to='2026-11-06')['rows'],[j1])
+        self.assertEqual(get(date_to='2026-11-05')['total'],0)
+        self.assertEqual(get(date_from='2026-11-08')['total'],0)
+        self.assertEqual(get(assignees=[''])['rows'][0]['jobId'],'J3')
+        self.assertEqual(get(assignees=[])['total'],0)
+        self.assertEqual(get(assignees=["O'Neil",'Alice','Alice'])['totalSeconds'],1500.25)
+        first=get(limit=1)
+        second=get(offset=1,limit=2)
+        self.assertEqual(first['rows']+second['rows'],all_jobs['rows'])
+        empty=get(offset=30,limit=1)
+        self.assertEqual((empty['rows'],empty['total'],empty['totalSeconds']),([],3,5100.25))
+        # The selected maximum (and its date) moves when X is removed.
+        updated=set_allowlist(self.db,'Y')
+        self.assertNotEqual(updated['revision'],all_jobs['revision'])
+        self.assertEqual(get()['rows'],[dict(j1,alarmId='Y',alarmCount=2,date='2026-11-08')])
+        self.assertEqual(get()['revision'],updated['revision'])
+
+    def test_detail_large_owner_set_is_bound_and_invalid_parameters_cannot_expand_scope(self):
+        self.add([row()])
+        self.jobmap([('Job1','李华')])
+        many=['person'+str(i) for i in range(1200)]
+        # A selected owner with no eligible Job must not introduce any rows.
+        self.assertEqual(list_job_proxy_details(self.db,assignees=many)['total'],0)
+        self.assertEqual(list_job_proxy_details(self.db,assignees=many+['李华'])['total'],1)
+        for args in ({'date_from':'2026-11-31'}, {'date_from':'20261101'},
+                     {'date_from':'2026-11-06','date_to':'2026-11-05'},
+                     {'assignees':'李华'}, {'assignees':[None]}, {'assignees':['x\n']},
+                     {'offset':-1}, {'offset':2**63}, {'limit':5001}, {'limit':True}):
+            with self.subTest(args=args),self.assertRaises(MttrImportError):
+                list_job_proxy_details(self.db,**args)
+
+    def test_winner_cache_rebuilds_from_original_v5_and_ignores_backup_cache_contents(self):
+        self.add([row()]);self.jobmap([('Job1','A')])
+        original=list_job_proxy_details(self.db)
+        # An earlier V5 DB did not have a winner cache or revision token.
+        for table in ('alarm_mttr_job_max','alarm_mttr_revision'):
+            self.db.execute('DROP TABLE '+table)
+        init_schema(self.db)
+        self.assertEqual(list_job_proxy_details(self.db)['rows'],original['rows'])
+        # The backup's derived data is never trusted during restore.
+        self.db.execute("UPDATE alarm_mttr_job_max SET seconds=99999")
+        with sqlite3.connect(':memory:') as dest:
+            init_schema(dest)
+            restore_tables(self.db,dest,{'alarm_mttr_job_max','alarm_mttr_revision'}|V4_TABLES|JOB_TABLES)
+            self.assertEqual(list_job_proxy_details(dest)['rows'],original['rows'])
+            self.assertNotEqual(list_job_proxy_details(dest)['revision'],original['revision'])
+
+    def test_old_snapshot_restores_without_fabricating_ids_and_partial_reupload_recovers(self):
+        self.add([row(job='J1'),row(job='J1'),row(job='J2')]);self.db.commit()
+        with sqlite3.connect(':memory:') as dest:
+            init_schema(dest)
+            # Old backups contain these three V4 tables only; they have no reversible Job IDs.
+            restore_tables(self.db,dest,set(V4_TABLES))
+            ds=get_dataset(dest)
+            self.assertEqual((ds['needsAlarmReimport'],ds['legacyUnlinkedRows'],ds['totalJobs'],ds['days']),(True,3,0,[]))
+            with stage_import(csv_bytes([HEADER,row(job='J1')]),'overlap.csv') as st,dest:
+                ds=merge_import(dest,st,'26540')
+            self.assertEqual((ds['totalJobs'],ds['totalAlarms'],ds['legacyUnlinkedRows'],ds['needsAlarmReimport']),(1,2,1,True))
+            with stage_import(csv_bytes([HEADER,row(job='J2')]),'original.csv') as st,dest:
+                ds=merge_import(dest,st,'26540')
+            self.assertEqual((ds['totalJobs'],ds['totalAlarms'],ds['storedRows'],ds['needsAlarmReimport']),(2,3,3,False))
 
 if __name__=='__main__':unittest.main()

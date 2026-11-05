@@ -236,3 +236,10 @@ test('alarm MTTR prompt explains source columns, occurrence dates, valid row mea
   for (const rule of [/B 列告警 ID 在当前白名单内/,/AE 列 Job ID 非空/,/0:00:00 表示未清除/,/K 列告警发生日期/,/有效告警行数/,/不能平均每日均值/,/null/,/减少率=\(基准期 meanSeconds−对比期 meanSeconds\)/,/不能归因于 FMEMate/]) assert.match(prompt,rule);
   assert.doesNotMatch(prompt,/Radio-OSP|meanGapFilter|no_joined_dataset|TT-category-filter|重新导入 TT 和 JOB/);
 });
+
+test('job proxy prompt scopes ranking, names the occurrence date tie rule and flags incomplete migration', ()=>{
+  const data=buildAiFacts({records:[],presets:[],groups:[],feedback:[],failureNotes:{},from:'2026-10-01',to:'2026-10-08',scene:'',demo:false,alarmJobMttr:null,selectedAssignees:[]});
+  const prompt=buildAiReportPrompt(data);
+  for (const marker of [/每个工单只计一次/,/最长时长并列时取最早 K 日期/,/告警表 AE 关联 Job 表 C，AG 是处理人/,/不能平均各人或各日均值/,/所选范围中的具名处理人/,/needsAlarmReimport/,/不能归因于 FMEMate/]) assert.match(prompt,marker);
+  assert.doesNotMatch(prompt,/分母是有效告警行数|必须说明 calendarDayFilter|Radio-OSP|不.*产出人员排行/);
+});

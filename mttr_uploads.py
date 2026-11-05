@@ -179,7 +179,22 @@ class MttrUploads:
         return {'ok':True}
 
 
-class AlarmUploads(MttrUploads):
+class SingleFileUploads(MttrUploads):
+    def _finish_file(self, upload_id, importer, *args):
+        source, = self.sources
+        # Hold the session lock while validating and committing the import;
+        # retain the file on failure so an interrupted transfer can be retried.
+        with self._session(upload_id) as session:
+            path = self._file(session, source)
+            info = session.metadata[source]
+            if path.stat().st_size != info['size']:
+                raise MttrUploadError(409, '文件未上传完成 / Upload is incomplete.')
+            result = importer(path, info['name'], *args)
+            self._remove(session)
+            return result
+
+
+class AlarmUploads(SingleFileUploads):
     """One completed alarm export, retriable until the DB transaction succeeds."""
     sources = ('alarm',)
     selection_error = '请选择一份告警文件 / Specify one alarm file.'
@@ -187,11 +202,15 @@ class AlarmUploads(MttrUploads):
     def import_file(self, upload_id, payload, importer):
         if set(payload) != {'allowlist'} or not isinstance(payload['allowlist'], str):
             raise MttrUploadError(400, '请填写逗号分隔的告警 ID 白名单 / Supply the comma-separated alarm ID allowlist.')
-        with self._session(upload_id) as session:
-            path = self._file(session, 'alarm')
-            info = session.metadata['alarm']
-            if path.stat().st_size != info['size']:
-                raise MttrUploadError(409, '告警文件未上传完成 / Alarm upload is incomplete.')
-            result = importer(path, info['name'], payload['allowlist'])
-            self._remove(session)
-            return result
+        return self._finish_file(upload_id, importer, payload['allowlist'])
+
+
+class AlarmJobUploads(SingleFileUploads):
+    """Independent C/AG Job ownership imports; never a legacy TT/Job upload."""
+    sources = ('job',)
+    selection_error = '请选择一份 Job 文件 / Specify one Job file.'
+
+    def import_file(self, upload_id, payload, importer):
+        if payload != {}:
+            raise MttrUploadError(400, 'Job 映射使用固定列，无需附加参数 / Job imports use fixed columns and take no options.')
+        return self._finish_file(upload_id, importer)

@@ -1,4 +1,8 @@
-"""Alarm MTTR ledger. A row is an occurrence, never an alarm ID or a Job ID.
+"""Work-order MTTR based on the maximum eligible alarm duration per Job ID.
+
+Job scopes use the C -> AG owner catalogue; an unseen owner never removes a Job
+from the overall comparison. A Job belongs to the occurrence date of its longest
+eligible alarm (earliest such date in a tie), so it appears only once.
 
 The maximum observed multiplicity of identical rows makes repeated/overlapping
 exports idempotent while preserving repetitions within a single export. With
@@ -20,7 +24,22 @@ from zipfile import BadZipFile
 from mttr_import import (MttrImportError, MAX_ROWS, column_index, csv_rows, excel_time,
                          normalized, source_size, xlsx_rows)
 
-ALARM_TABLES = {'alarm_mttr_rows', 'alarm_mttr_allowlist', 'alarm_mttr_last_import'}
+V4_TABLES = {'alarm_mttr_rows', 'alarm_mttr_allowlist', 'alarm_mttr_last_import'}
+JOB_TABLES = {'alarm_mttr_job_links','alarm_mttr_job_owners','alarm_mttr_job_import'}
+# The two cache tables can always be rebuilt from the validated ledger; old
+# backups do not need them and restored backups never supply their values.
+CACHE_TABLES = {'alarm_mttr_job_max','alarm_mttr_revision'}
+ALARM_TABLES = V4_TABLES | JOB_TABLES | CACHE_TABLES
+_WRITE_MAX = """
+INSERT OR REPLACE INTO alarm_mttr_job_max(job_id,day,seconds,alarm_count,alarm_id)
+SELECT job_id,day,seconds,alarm_count,alarm_id FROM (
+    SELECT l.job_id,r.day,r.seconds,r.alarm_id,
+           sum(r.copies) OVER (PARTITION BY l.job_id) AS alarm_count,
+           row_number() OVER (PARTITION BY l.job_id ORDER BY r.seconds DESC,r.day ASC,r.signature) AS position
+    FROM alarm_mttr_rows r JOIN alarm_mttr_allowlist a USING(alarm_id)
+    JOIN alarm_mttr_job_links l USING(signature) {guard}
+) WHERE position=1"""
+_NEW_REVISION = "INSERT OR REPLACE INTO alarm_mttr_revision VALUES(1,lower(hex(randomblob(16))))"
 ALARM_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS alarm_mttr_rows (
     signature TEXT PRIMARY KEY, alarm_id TEXT NOT NULL, day TEXT NOT NULL,
@@ -29,6 +48,19 @@ CREATE TABLE IF NOT EXISTS alarm_mttr_rows (
 CREATE INDEX IF NOT EXISTS alarm_mttr_by_id_day ON alarm_mttr_rows(alarm_id, day);
 CREATE TABLE IF NOT EXISTS alarm_mttr_allowlist (alarm_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS alarm_mttr_last_import (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
+-- V4 hashes cannot be decoded. Link each old fingerprint only when that source row is imported again.
+CREATE TABLE IF NOT EXISTS alarm_mttr_job_links (signature TEXT PRIMARY KEY, job_id TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS alarm_mttr_job_link_idx ON alarm_mttr_job_links(job_id);
+CREATE TABLE IF NOT EXISTS alarm_mttr_job_owners (job_id TEXT PRIMARY KEY,assignee TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alarm_mttr_job_import (id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alarm_mttr_job_max (
+    job_id TEXT PRIMARY KEY, day TEXT NOT NULL, seconds REAL NOT NULL,
+    alarm_count INTEGER NOT NULL, alarm_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alarm_mttr_max_by_day ON alarm_mttr_job_max(day DESC,job_id);
+CREATE TABLE IF NOT EXISTS alarm_mttr_revision (id INTEGER PRIMARY KEY CHECK(id=1),token TEXT NOT NULL);
+''' + _WRITE_MAX.format(guard='WHERE NOT EXISTS (SELECT 1 FROM alarm_mttr_revision)') + ''';
+INSERT OR IGNORE INTO alarm_mttr_revision VALUES(1,lower(hex(randomblob(16))));
 '''
 MAX_IDS = 10000
 MAX_SECONDS = 86400 * 3652500  # generous upper bound; keeps sums finite
@@ -73,25 +105,172 @@ def _replace_ids(db, text):
 
 def set_allowlist(db,allowlist):
     _replace_ids(db,allowlist)
+    _refresh_max(db)
     return get_dataset(db)
+
+
+def _refresh_max(db):
+    # Materialize once per ledger/allowlist change: totals, person summaries
+    # and individual pages must all read the very same global winners.
+    db.execute('DELETE FROM alarm_mttr_job_max')
+    db.execute(_WRITE_MAX.format(guard=''))
+    db.execute(_NEW_REVISION)
 
 
 def get_dataset(db):
     ids=[r[0] for r in db.execute('SELECT alarm_id FROM alarm_mttr_allowlist ORDER BY rowid')]
-    days=[dict(date=r[0],count=r[1],totalSeconds=r[2]) for r in db.execute(
-        '''SELECT day,sum(copies),sum(seconds*copies) FROM alarm_mttr_rows
-           JOIN alarm_mttr_allowlist USING(alarm_id) GROUP BY day ORDER BY day''')]
+    winners = db.execute("""
+        SELECT day,coalesce(o.assignee,''),count(*),sum(seconds),sum(alarm_count)
+        FROM alarm_mttr_job_max LEFT JOIN alarm_mttr_job_owners o USING(job_id)
+        GROUP BY day,coalesce(o.assignee,'') ORDER BY day,coalesce(o.assignee,'')
+    """)
+    days_by_date,persons={},[]
+    alarms=jobs=unassigned=0
+    for day,person,n,seconds,k in winners:
+        d=days_by_date.setdefault(day,dict(date=day,count=0,totalSeconds=0))
+        d['count']+=n;d['totalSeconds']+=seconds
+        persons.append(dict(date=day,assignee=person,count=n,totalSeconds=seconds))
+        jobs+=n;alarms+=k
+        if not person:unassigned+=n
+    days=list(days_by_date.values())
+    stored,unlinked=db.execute("""SELECT coalesce(sum(copies),0),
+          coalesce(sum(CASE WHEN l.signature IS NULL THEN copies ELSE 0 END),0)
+          FROM alarm_mttr_rows r LEFT JOIN alarm_mttr_job_links l USING(signature)""").fetchone()
     last=db.execute('SELECT data FROM alarm_mttr_last_import WHERE id=1').fetchone()
-    return dict(formatVersion=4,source='alarms',allowlist=ids,days=days,
-                totalAlarms=sum(d['count'] for d in days),
-                storedRows=db.execute('SELECT coalesce(sum(copies),0) FROM alarm_mttr_rows').fetchone()[0],
+    mapping=db.execute('SELECT data FROM alarm_mttr_job_import WHERE id=1').fetchone()
+    assignees=[r[0] for r in db.execute("SELECT DISTINCT assignee FROM alarm_mttr_job_owners WHERE assignee<>'' ORDER BY assignee")]
+    return dict(formatVersion=5,source='alarm-jobs',allowlist=ids,days=days,personDays=persons,assignees=assignees,
+                revision=db.execute('SELECT token FROM alarm_mttr_revision WHERE id=1').fetchone()[0],
+                totalAlarms=alarms,totalJobs=jobs,storedRows=stored,unassignedJobs=unassigned,
+                mappedJobs=db.execute('SELECT count(*) FROM alarm_mttr_job_owners').fetchone()[0],
+                legacyUnlinkedRows=unlinked,needsAlarmReimport=bool(unlinked),
                 earliestDate=days[0]['date'] if days else None,latestDate=days[-1]['date'] if days else None,
-                lastImport=json.loads(last[0]) if last else None)
+                lastImport=json.loads(last[0]) if last else None,lastJobImport=json.loads(mapping[0]) if mapping else None)
 
 
 def clear_alarm(db):
-    db.execute('DELETE FROM alarm_mttr_rows')
-    db.execute('DELETE FROM alarm_mttr_last_import')
+    for table in ('alarm_mttr_job_links','alarm_mttr_rows','alarm_mttr_last_import',
+                  'alarm_mttr_job_owners','alarm_mttr_job_import'):
+        db.execute('DELETE FROM '+table)
+    _refresh_max(db)
+    return get_dataset(db)
+
+
+def _job_key(value):
+    # Treat numeric Excel IDs (including integral decimal representations) and
+    # equivalent text IDs alike. Preserve text case and leading zeroes.
+    return _id(value)
+
+
+def _valid_value(v):
+    return isinstance(v,str) and 0<len(v)<=512 and v==v.strip() and not re.search(r'[\x00-\x1f]',v)
+
+
+def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=0,limit=100):
+    """Read a page of the Jobs included in the mean and totals over the full selection.
+
+    A missing assignee filter includes every Job; [] includes none; '' selects
+    unassigned Jobs. The one global winning alarm per Job is determined before
+    applying either inclusive date bound.
+    """
+    for bound in (date_from,date_to):
+        if bound is None:continue
+        try:
+            if not isinstance(bound,str) or date.fromisoformat(bound).isoformat()!=bound:
+                raise ValueError()
+        except ValueError:
+            raise MttrImportError('日期无效 / Invalid date; use YYYY-MM-DD.') from None
+    if date_from and date_to and date_from>date_to:
+        raise MttrImportError('开始日期不能晚于结束日期 / Start date must not follow end date.')
+    if type(offset)!=int or not 0<=offset<=2**63-1 or type(limit)!=int or not 1<=limit<=5000:
+        raise MttrImportError('分页参数无效 / Invalid offset or limit (1–5,000).')
+    if assignees is not None and (not isinstance(assignees,list) or len(assignees)>MAX_IDS
+                                  or any(v!='' and not _valid_value(v) for v in assignees)):
+        raise MttrImportError('处理人筛选无效 / Invalid assignee selection (max 10,000).')
+
+    clauses=[]
+    args=dict(skip=offset,take=limit)
+    if date_from:
+        clauses.append('m.day>=:since');args['since']=date_from
+    if date_to:
+        clauses.append('m.day<=:until');args['until']=date_to
+    people=None if assignees is None else list(dict.fromkeys(assignees))
+    large_scope=people is not None and len(people)>300
+    if large_scope:
+        # Older SQLite builds have a 999-bind limit. The temporary lookup also
+        # keeps the same query plan for large scopes, without relying on JSON1.
+        clauses.append("coalesce(o.assignee,'') IN (SELECT name FROM temp.alarm_mttr_detail_scope)")
+    elif people:
+        keys=['p'+str(i) for i in range(len(people))]
+        clauses.append("coalesce(o.assignee,'') IN ("+','.join(':'+key for key in keys)+')')
+        args.update(zip(keys,people))
+    elif people==[]:
+        clauses.append('0')
+    source=' FROM alarm_mttr_job_max m LEFT JOIN alarm_mttr_job_owners o USING(job_id)'
+    if clauses:source+=' WHERE '+' AND '.join(clauses)
+    # Totals and page use one read snapshot. The page can use (day DESC,job_id)
+    # directly; an empty or out-of-range page still returns its full totals.
+    query=f"""
+        WITH totals AS (SELECT count(*) n,coalesce(sum(m.seconds),0) seconds {source}),
+        page AS (SELECT m.job_id,m.day,m.seconds,m.alarm_count,m.alarm_id,coalesce(o.assignee,'') assignee
+                 {source} ORDER BY m.day DESC,m.job_id ASC LIMIT :take OFFSET :skip)
+        SELECT t.n,t.seconds,v.token,p.job_id,p.assignee,p.day,p.seconds,p.alarm_count,p.alarm_id
+        FROM totals t JOIN alarm_mttr_revision v ON v.id=1 LEFT JOIN page p ON 1=1
+        ORDER BY p.day DESC,p.job_id ASC"""
+    if large_scope:
+        db.execute('CREATE TEMP TABLE alarm_mttr_detail_scope(name TEXT PRIMARY KEY) WITHOUT ROWID')
+    try:
+        if large_scope:
+            db.executemany('INSERT INTO temp.alarm_mttr_detail_scope VALUES(?)',((p,) for p in people))
+        records=db.execute(query,args).fetchall()
+    finally:
+        if large_scope:db.execute('DROP TABLE temp.alarm_mttr_detail_scope')
+    rows=[dict(jobId=r[3],assignee=r[4],date=r[5],seconds=r[6],alarmCount=r[7],alarmId=r[8])
+          for r in records if r[3] is not None]
+    return dict(rows=rows,total=records[0][0],totalSeconds=records[0][1],revision=records[0][2],
+                offset=offset,limit=limit)
+
+
+JOB_QUALITY=('sourceRows','missingJobIds','missingAssignees','validRows','duplicateRows','mappedJobs')
+
+
+@contextmanager
+def stage_job_import(content,filename):
+    """Validate the entire mapping before changing the existing catalogue."""
+    with tempfile.TemporaryDirectory(prefix='fmemate-job-owner-') as tmp, closing(sqlite3.connect(tmp+'/owners.db')) as staged:
+        staged.execute('CREATE TABLE owners(job_id TEXT PRIMARY KEY, assignee TEXT NOT NULL)')
+        with _rows(content,filename) as (name,meta,rows):
+            stats=dict.fromkeys(JOB_QUALITY,0)
+            stats.update(filename=name,sheetName=meta['sheetName'],importedAt=datetime.now(timezone.utc).isoformat())
+            for row in rows:
+                if row['_row']==1:continue
+                stats['sourceRows']+=1
+                job=_job_key(row.get('C',''))
+                if not _valid_value(job):stats['missingJobIds']+=1;continue
+                person=str(row.get('AG','')).strip()
+                if not _valid_value(person):stats['missingAssignees']+=1;continue
+                stats['validRows']+=1
+                cur=staged.execute('INSERT OR IGNORE INTO owners VALUES(?,?)',(job,person))
+                if cur.rowcount:
+                    stats['mappedJobs']+=1
+                else:
+                    prev=staged.execute('SELECT assignee FROM owners WHERE job_id=?',(job,)).fetchone()[0]
+                    if prev!=person:
+                        raise MttrImportError(f'工单 {job} 在同一份表中有多个处理人，请确认唯一处理人后重新导入。 / Conflicting assignees for Job {job}; mapping unchanged.')
+                    stats['duplicateRows']+=1
+        if not stats['mappedJobs']:
+            raise MttrImportError('没有可关联的工单，请检查 C 列 Job ID 和 AG 列处理人。 / No rows with Job ID in C and assignee in AG. Mapping unchanged.',{'source':'job-owners','lastJobImport':stats})
+        yield stats,staged
+
+
+def merge_job_import(db,staged):
+    stats,incoming=staged
+    db.executemany("""INSERT INTO alarm_mttr_job_owners VALUES(?,?)
+            ON CONFLICT(job_id) DO UPDATE SET assignee=excluded.assignee
+            WHERE alarm_mttr_job_owners.assignee<>excluded.assignee""",
+            incoming.execute('SELECT job_id,assignee FROM owners'))
+    db.execute('INSERT OR REPLACE INTO alarm_mttr_job_import VALUES(1,?)',(json.dumps(stats,ensure_ascii=False),))
+    db.execute(_NEW_REVISION)
     return get_dataset(db)
 
 
@@ -146,7 +325,7 @@ def _rows(content,filename):
     name=str(filename or '').replace('\\','/').rsplit('/',1)[-1][:255]
     ext=PurePosixPath(name).suffix.lower()
     if ext not in ('.xlsx','.csv') or not source_size(content):
-        raise MttrImportError('请上传有效告警 .xlsx 或 UTF-8 .csv 文件 / Upload a nonempty alarm .xlsx or UTF-8 .csv export.')
+        raise MttrImportError('请上传非空的 .xlsx 或 UTF-8 .csv 文件 / Upload a nonempty .xlsx or UTF-8 .csv export.')
     iterator=xlsx_rows(content,numeric_marker_column='I') if ext=='.xlsx' else csv_rows(content)
     with closing(iterator):
         try:
@@ -154,7 +333,7 @@ def _rows(content,filename):
         except MttrImportError:
             raise
         except (ParseError,BadZipFile,RuntimeError,csv.Error,ValueError,OverflowError,KeyError,OSError) as exc:
-            raise MttrImportError('告警文件损坏或格式不支持 / Invalid or unsupported alarm export. Existing data unchanged.') from exc
+            raise MttrImportError('文件损坏或格式不支持 / Invalid or unsupported export. Existing data unchanged.') from exc
 
 
 def preview(content,filename):
@@ -177,7 +356,7 @@ def stage_import(content,filename,date_column='K',duration_unit='hh:mm:ss'):
     if date_column!='K' or duration_unit!='hh:mm:ss':
         raise MttrImportError('日期固定为 K 列，时长固定为 I 列时:分:秒 / Use occurrence time K and elapsed duration I (h:mm:ss).')
     with tempfile.TemporaryDirectory(prefix='fmemate-alarm-') as tmp, closing(sqlite3.connect(tmp+'/alarm.db')) as staged:
-        staged.execute('CREATE TABLE r (signature TEXT PRIMARY KEY, alarm TEXT, day TEXT, seconds REAL, copies INTEGER)')
+        staged.execute('CREATE TABLE r (signature TEXT PRIMARY KEY, alarm TEXT, day TEXT, seconds REAL, copies INTEGER, job_id TEXT)')
         with _rows(content,filename) as (name,meta,rows):
             stats=dict.fromkeys(QUALITY,0)
             stats.update(filename=name,sheetName=meta['sheetName'],dateColumn='K',durationUnit='hh:mm:ss',
@@ -186,7 +365,7 @@ def stage_import(content,filename,date_column='K',duration_unit='hh:mm:ss'):
                 if row['_row']==1:continue
                 stats['sourceRows']+=1
                 job=str(row.get('AE','')).strip()
-                if not job:stats['missingJobIds']+=1;continue
+                if not _valid_value(_job_key(job)):stats['missingJobIds']+=1;continue
                 alarm=_id(row.get('B',''))
                 if not _valid_id(alarm):stats['missingAlarmIds']+=1;continue
                 seconds=_duration(row.get('I',''),row.get('_numericCell',False))
@@ -198,8 +377,8 @@ def stage_import(content,filename,date_column='K',duration_unit='hh:mm:ss'):
                 # Float canonicalization makes Excel day fractions and equivalent
                 # clock strings hash identically, down to microsecond precision.
                 sig=_signature(row,alarm,float(seconds),dt,job)
-                staged.execute('INSERT INTO r VALUES(?,?,?,?,1) ON CONFLICT(signature) DO UPDATE SET copies=copies+1',
-                               (sig,alarm,dt.date().isoformat(),seconds))
+                staged.execute('INSERT INTO r VALUES(?,?,?,?,1,?) ON CONFLICT(signature) DO UPDATE SET copies=copies+1',
+                               (sig,alarm,dt.date().isoformat(),seconds,_job_key(job)))
         if not stats['validRows']:
             raise MttrImportError(
                 f"没有可导入告警 / No eligible alarm rows (rows {stats['sourceRows']}; empty Job IDs {stats['missingJobIds']}; "
@@ -219,21 +398,27 @@ def merge_import(db,staged,allowlist=None):
     db.executemany('''INSERT INTO alarm_mttr_rows VALUES(?,?,?,?,?) ON CONFLICT(signature)
                    DO UPDATE SET copies=excluded.copies WHERE excluded.copies>alarm_mttr_rows.copies''',
                    incoming.execute('SELECT signature,alarm,day,seconds,copies FROM r'))
+    db.executemany('INSERT OR IGNORE INTO alarm_mttr_job_links VALUES(?,?)',
+                   incoming.execute('SELECT signature,job_id FROM r'))
     after=db.execute('SELECT sum(copies) FROM alarm_mttr_rows').fetchone()[0]
     stats['addedRows']=after-before
     stats['duplicateRows']=stats['validRows']-stats['addedRows']
     db.execute('INSERT OR REPLACE INTO alarm_mttr_last_import VALUES (1,?)',(json.dumps(stats,ensure_ascii=False),))
+    _refresh_max(db)
     return get_dataset(db)
 
 
 def restore_tables(source,dest,tables):
-    present=ALARM_TABLES.intersection(tables)
+    present=(V4_TABLES | JOB_TABLES).intersection(tables)
     if not present:return
     def invalid():
         raise MttrImportError('备份告警 MTTR 数据无效 / Invalid alarm MTTR backup.')
-    if present!=ALARM_TABLES:invalid()
+    if present not in (V4_TABLES, V4_TABLES | JOB_TABLES):invalid()
     expected={'alarm_mttr_rows':{'signature','alarm_id','day','seconds','copies'},
               'alarm_mttr_allowlist':{'alarm_id'},'alarm_mttr_last_import':{'id','data'}}
+    if JOB_TABLES<=present:
+        expected.update(alarm_mttr_job_links={'signature','job_id'},alarm_mttr_job_owners={'job_id','assignee'},
+                        alarm_mttr_job_import={'id','data'})
     for table,cols in expected.items():
         if {r[1] for r in source.execute('PRAGMA table_info('+table+')')}!=cols:invalid()
     ids=[r[0] for r in source.execute('SELECT alarm_id FROM alarm_mttr_allowlist ORDER BY rowid LIMIT ?', (MAX_IDS+1,))]
@@ -245,9 +430,33 @@ def restore_tables(source,dest,tables):
         if not isinstance(day,str) or len(day)!=10 or not _occurrence(day,False) or date.fromisoformat(day).isoformat()!=day:invalid()
         if type(seconds) not in (float,int) or not 0<seconds<=MAX_SECONDS or type(copies)!=int or not 1<=copies<=MAX_ROWS:invalid()
         dest.execute('INSERT INTO alarm_mttr_rows VALUES(?,?,?,?,?)',(sig,alarm,day,seconds,copies));stored+=copies
+    if JOB_TABLES<=present:
+        for sig,job,found in source.execute("""SELECT l.signature,l.job_id,r.signature FROM alarm_mttr_job_links l
+                                               LEFT JOIN alarm_mttr_rows r ON l.signature=r.signature"""):
+            if found is None or not _valid_value(job) or job!=_job_key(job):invalid()
+            dest.execute('INSERT INTO alarm_mttr_job_links VALUES(?,?)',(sig,job))
+        n=0
+        for job,person in source.execute('SELECT job_id,assignee FROM alarm_mttr_job_owners'):
+            if not _valid_value(job) or job!=_job_key(job) or not _valid_value(person):invalid()
+            dest.execute('INSERT INTO alarm_mttr_job_owners VALUES(?,?)',(job,person));n+=1
+        jm=list(source.execute('SELECT id,data FROM alarm_mttr_job_import LIMIT 2'))
+        if not jm and n:invalid()
+        if jm:
+            if len(jm)!=1 or jm[0][0]!=1 or not isinstance(jm[0][1],str) or len(jm[0][1])>8000:invalid()
+            try:
+                q=json.loads(jm[0][1])
+                if not isinstance(q,dict) or set(q)!={'filename','sheetName','importedAt',*JOB_QUALITY}:invalid()
+                if any(not isinstance(q[k],str) or not 0<len(q[k])<=v for k,v in [('filename',255),('sheetName',200),('importedAt',64)]):invalid()
+                datetime.fromisoformat(q['importedAt'])
+                if any(type(q[k])!=int or not 0<=q[k]<=MAX_ROWS for k in JOB_QUALITY):invalid()
+                if not 0<q['mappedJobs']<=n or q['validRows']!=q['mappedJobs']+q['duplicateRows']:invalid()
+                if q['sourceRows']!=q['missingJobIds']+q['missingAssignees']+q['validRows']:invalid()
+            except (TypeError,ValueError,KeyError):invalid()
+            dest.execute('INSERT INTO alarm_mttr_job_import VALUES(1,?)',(json.dumps(q,ensure_ascii=False),))
     last=list(source.execute('SELECT id,data FROM alarm_mttr_last_import LIMIT 2'))
     if not last:
         if stored:invalid()
+        _refresh_max(dest)
         return
     if len(last)!=1 or last[0][0]!=1 or not isinstance(last[0][1],str) or len(last[0][1])>8000:invalid()
     try:
@@ -261,3 +470,4 @@ def restore_tables(source,dest,tables):
     except (TypeError,ValueError,KeyError):
         invalid()
     dest.execute('INSERT INTO alarm_mttr_last_import VALUES(1,?)',(json.dumps(s,ensure_ascii=False),))
+    _refresh_max(dest)

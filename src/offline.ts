@@ -1,7 +1,10 @@
-import type {AlarmMttrDataset} from '../lib/alarm-mttr';
+import type {AlarmMttrDataset,JobProxyMttrDataset} from '../lib/alarm-mttr';
 type Language = 'zh' | 'en';
 type MutableSnapshot = Record<string, unknown> & {
   demo?: boolean;
+  alarmJobMttr?:JobProxyMttrDataset|null;
+  jobMttrRows?:import('../lib/job-mttr-details').JobProxyDetailRow[];
+  selectedAssignees?:string[]|null;
   alarmMttr?: AlarmMttrDataset|null;
   trendExcludeWeekends?: boolean;
   trendRange?: {from:string;to:string}|null;
@@ -98,7 +101,7 @@ export async function downloadOfflineReport(snapshot: unknown, lang: Language): 
   }
   verifyAssets(assets.js, assets.css, lang);
 
-  if (copy.demo) copy.alarmMttr = null;
+  if (copy.demo) {copy.alarmMttr=null;copy.alarmJobMttr=null;copy.selectedAssignees=null;copy.jobMttrRows=[];}
   if (copy.demo && copy.state) {
     // A synthetic preview must never carry production screenshots into a file.
     copy.state.feedback = [];
