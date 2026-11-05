@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createOfflineDocument, downloadOfflineReport } from './offline.ts';
+import { getJobDetailFocus } from '../lib/alarm-mttr.ts';
 
 test('offline HTML embeds snapshot strings without allowing script closure', () => {
   const hostile = '</script><img src=x onerror=alert(1)><!--\u2028';
@@ -214,19 +215,37 @@ test('alarm snapshots keep eligible daily sums for changing periods offline, and
   });
 });
 
-test('Job snapshots preserve per-Job audit rows and the selected cohort while demo copies strip both',async()=>{
+test('offline Job details reopen on one AL person without narrowing the group or losing other people’s rows',async()=>{
   await browserMock(async context=>{
     context.setFetch((async()=>Response.json({js:'console.log(1)',css:'body{}'})) as typeof fetch);
-    const jobMttrRows=[{jobId:'PRIVATE-JOB',assignee:'PRIVATE-OWNER',date:'2026-10-28',seconds:360}];
-    const alarmJobMttr={formatVersion:5,source:'alarm-jobs',personDays:[{date:'2026-10-28',assignee:'PRIVATE-OWNER',count:1,totalSeconds:360}]};
-    for(const demo of [false,true]){
-      await downloadOfflineReport({demo,state:{},jobMttrRows,alarmJobMttr,selectedAssignees:['PRIVATE-OWNER']},'zh');
-      const body=await context.generated()!.text();
-      const exported=JSON.parse(body.match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
-      assert.deepEqual(exported.jobMttrRows,demo?[]:jobMttrRows);
-      assert.deepEqual(exported.alarmJobMttr,demo?null:alarmJobMttr);
-      assert.deepEqual(exported.selectedAssignees,demo?null:['PRIVATE-OWNER']);
-      if(demo)assert.doesNotMatch(body,/PRIVATE-JOB|PRIVATE-OWNER/);
-    }
+    const focus='PRIVATE-FOCUS', selectedAssignees=[focus,'PRIVATE-TEAMMATE'];
+    const jobMttrRows=selectedAssignees.map((assignee,i)=>({jobId:'PRIVATE-JOB-'+i,assignee,date:'2026-10-28',seconds:360+i}));
+    const alarmJobMttr={formatVersion:5,source:'alarm-jobs',alPolicy:{mode:'all',names:[]},totalJobs:2,storedRows:2,needsAlarmReimport:false,
+      days:[{date:'2026-10-28',count:2,totalSeconds:721}],personDays:jobMttrRows.map(r=>({date:r.date,assignee:r.assignee,count:1,totalSeconds:r.seconds}))};
+    const mttrBaseline={from:'2026-10-28',to:'2026-10-28'},mttrCurrent={from:'2026-10-29',to:'2026-10-29'};
+    const template={state:{},jobMttrRows,alarmJobMttr,selectedAssignees,mttrBaseline,mttrCurrent};
+    const readSnapshot=async()=>{
+      const html=await context.generated()!.text();
+      return {html,data:JSON.parse(html.match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1])};
+    };
+    await downloadOfflineReport({...template,detailFocusPerson:focus},'en');
+    const current=await readSnapshot();
+    assert.equal(current.data.detailFocusPerson,focus);
+    assert.deepEqual(current.data.selectedAssignees,selectedAssignees);
+    assert.deepEqual(current.data.jobMttrRows,jobMttrRows,'the reader can switch to the other AL person without the server');
+    assert.deepEqual(current.data.alarmJobMttr,alarmJobMttr);
+    const focused=getJobDetailFocus(current.data.alarmJobMttr,current.data.mttrBaseline,current.data.mttrCurrent,current.data.selectedAssignees,current.data.detailFocusPerson);
+    assert.deepEqual(focused.assignees,[focus]);assert.equal(focused.comparison.baseline.meanSeconds,360);
+    assert.equal(focused.comparison.reductionRate,null,'one-period detail must not invent a reduction');
+    await downloadOfflineReport({...template,detailFocusPerson:focus,demo:true},'zh');
+    const demo=await readSnapshot();
+    assert.equal(demo.data.detailFocusPerson,null);
+    assert.deepEqual(demo.data.jobMttrRows,[]);assert.equal(demo.data.alarmJobMttr,null);assert.equal(demo.data.selectedAssignees,null);
+    assert.doesNotMatch(demo.html,/PRIVATE-(FOCUS|TEAMMATE|JOB)/);
+    await downloadOfflineReport(template,'en');
+    const legacy=await readSnapshot();
+    assert.equal(legacy.data.detailFocusPerson,undefined,'do not infer a focus from the first person in a legacy selection');
+    const grouped=getJobDetailFocus(legacy.data.alarmJobMttr,legacy.data.mttrBaseline,legacy.data.mttrCurrent,legacy.data.selectedAssignees,legacy.data.detailFocusPerson??null);
+    assert.deepEqual(grouped.assignees,selectedAssignees);assert.equal(grouped.comparison.baseline.meanSeconds,360.5);
   });
 });

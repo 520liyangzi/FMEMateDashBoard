@@ -5,6 +5,8 @@ type MutableSnapshot = Record<string, unknown> & {
   alarmJobMttr?:JobProxyMttrDataset|null;
   jobMttrRows?:import('../lib/job-mttr-details').JobProxyDetailRow[];
   selectedAssignees?:string[]|null;
+  /** Independent Job detail focus; absent or null follows the selected reporting group. */
+  detailFocusPerson?:string|null;
   alarmMttr?: AlarmMttrDataset|null;
   trendExcludeWeekends?: boolean;
   trendRange?: {from:string;to:string}|null;
@@ -101,7 +103,7 @@ export async function downloadOfflineReport(snapshot: unknown, lang: Language): 
   }
   verifyAssets(assets.js, assets.css, lang);
 
-  if (copy.demo) {copy.alarmMttr=null;copy.alarmJobMttr=null;copy.selectedAssignees=null;copy.jobMttrRows=[];}
+  if (copy.demo) {copy.alarmMttr=null;copy.alarmJobMttr=null;copy.selectedAssignees=null;copy.detailFocusPerson=null;copy.jobMttrRows=[];}
   if (copy.demo && copy.state) {
     // A synthetic preview must never carry production screenshots into a file.
     copy.state.feedback = [];

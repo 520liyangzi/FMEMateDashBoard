@@ -153,11 +153,16 @@ export function getJobProxyAssignees(data:ProxyInput,baseline?:MttrPeriod,curren
   return [...names].sort(asc);
 }
 
+function withinCohort(assignees:JobProxyScope,eligibleNames:readonly string[]):string[]|null{
+  if(assignees==null)return null;
+  const eligible=new Set(eligibleNames);
+  return [...new Set(assignees)].filter(name=>eligible.has(name));
+}
+
 /** The distinction between All and an empty selection survives a date or allowlist change. */
 export function resolveJobProxyScope(data:ProxyInput,assignees:JobProxyScope,baseline?:MttrPeriod,current?:MttrPeriod):string[]|null{
   if(assignees==null)return null;
-  const eligible=new Set(getJobProxyAssignees(data,baseline,current));
-  return [...new Set(assignees)].filter(name=>eligible.has(name));
+  return withinCohort(assignees,getJobProxyAssignees(data,baseline,current));
 }
 
 /** Old V5 day totals included ownerless Jobs. Build every report, including All, from named owner groups. */
@@ -203,6 +208,22 @@ function compareProxyDays(data:ProxyInput,rows:JobProxyDay[],base:MttrPeriod,cur
 export function compareJobProxyMttr(data:ProxyInput,baseline:MttrPeriod,current:MttrPeriod,assignees?:JobProxyScope):JobProxyMttrComparison{
   return compareProxyDays(data,selectJobProxyDays(data,assignees),baseline,current);
 }
+export interface JobDetailFocus {
+  availablePeople:string[]; person:string|null; assignees:string[]|null;
+  comparison:JobProxyMttrComparison; reset:boolean;
+}
+
+/** Focus only the drill-down. It may narrow, but never widen, the visible report population. */
+export function getJobDetailFocus(data:ProxyInput,baseline:MttrPeriod,current:MttrPeriod,reportOwners:JobProxyScope,requestedPerson:string|null):JobDetailFocus{
+  const names=getJobProxyAssignees(data,baseline,current);
+  const reportScope=withinCohort(reportOwners,names), selected=reportScope===null?null:new Set(reportScope);
+  // Historical snapshots saved AG assignees; those names cannot become AL focus candidates.
+  const availablePeople=getJobAlPolicy(data)===null?[]:selected?names.filter(n=>selected.has(n)):names;
+  const person=requestedPerson!==null&&availablePeople.includes(requestedPerson)?requestedPerson:null;
+  const assignees=person===null?reportScope:[person];
+  return {availablePeople,person,assignees,comparison:compareJobProxyMttr(data,baseline,current,assignees),reset:person!==requestedPerson};
+}
+
 /** Rank signed reductions before rounding for display, and keep one-period-only people visible as unranked.
  * Absent or stale names cannot create rows; an observed owner needs samples in both periods to earn a rank. */
 export function rankJobProxyMttr(data:ProxyInput,baseline:MttrPeriod,current:MttrPeriod,assignees?:JobProxyScope):JobProxyMttrPerson[]{

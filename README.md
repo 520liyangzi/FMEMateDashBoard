@@ -222,7 +222,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.2.0**。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.2.1**。从 2.2.0 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -260,7 +260,7 @@ Overview and User analytics always explain the user-count methodology. A logging
 Date filters apply to visit counts, visit days and photo totals independently of Scene. Click photos to view them in full. Excel includes visit text and photo counts; use offline HTML or Print / Save PDF to share photos. Offline HTML embeds the complete visit archive and images, remains read-only, and excludes real visits from demo exports. Local persistence and ZIP backups include visits/photos; old backups without visits remain compatible. Clearing application logs preserves site visits.
 
 
-## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.2.0)
+## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.2.1)
 
 进入 **成效统计**。在告警白名单中填入 `26540,26564,26568` 这样的逗号分隔列表，导入告警文件和一份或多份 Job 人员文件；这两类数据的先后顺序不限。计算整体、多人或个人 MTTR 都需要告警和人员归属。Job 表用 C 列关联工单、用 AL 列确定人员，不使用它的创建、关闭时间，也不需要 TT 表。每个 Excel 工作簿仅读取第一个工作表，第 1 行为表头，从第 2 行开始读取。
 
@@ -283,9 +283,13 @@ Date filters apply to visit counts, visit days and photo totals independently of
 
 基准期和对比期都包含起止当天。**减少率 =（基准期均值 − 对比期均值）÷ 基准期均值 × 100%**。上述 A+B 如果对比期均值是 10 分钟，减少率为 50%。个人榜按各人自己的减少率从高到低排序，仅一期有有效 Job 的人员仍可查看该期工单和均值，但没有提升率或名次。解读排名时一起看两期样本量。指标反映的是由告警估算的工单时长变化，不能单独证明 FMEMate 导致了改善。
 
-**核对两期明细。** “工单明细”分为“基准期工单”和“对比期工单”，各自显示该期实际计入的 Job ID、处理人、最长告警日期和 MTTR（时:分:秒）。可独立翻页；卡片上的工单数和均值始终按整期计算。每行是一张工单；同一工单即使关联多条告警，也只有一行。切换所选人员或日期后，明细随之更新。分别把两期明细的时长求和，再各自除以该期的工单数，即可核对两张 MTTR 卡片。选择多人时，每张工单的权重相同；不能把各人的平均时长直接求平均。
+**按人核对两期工单。** “工单明细”默认跟随当前报表。可以在这里搜索并选中一个 AL 人员，也可以点击提升率排名里的姓名，直接查看此人在基准期和对比期的 Job ID、最长有效告警日期和 MTTR（时:分:秒）。每期独立翻页，工单数和均值按该期全部明细计算。若此人仅一期有单，另一侧显示无单，个人提升率没有可比值。
 
-Excel 把**基准期工单明细**和**对比期工单明细**分在两张工作表中，按导出时的日期与人员筛选。离线 HTML 支持在本地服务不可达时切换日期、切换人员并查明细，因此文件中包含快照内全部有效工单的 Job ID 和处理人，包含当前临时人员或日期筛选范围之外的工单，但不含被已保存 AL 规则排除的工单。快照保留导出时的名单规则（包括配置的姓名）。离线可切换日期和符合条件的 AL 人员，不能修改项目的名单规则。打印或保存 PDF 时，两张明细表各显示当前页。要分享选定范围的全部工单，可点“导出完整明细”，分享 Excel 中相应的明细表。旧离线 HTML 无法补出当时未保存的工单明细；请从当前服务重新导出。
+明细区只能在已保存的 AL 名单、本次报表已选人员和两个日期区间限定的范围内选人。例如项目名单是东区团队、当前报表选了 A 和 B，在明细看 A 时，顶部对比、排名、AI 总结及常规 Excel 仍是 A+B；“返回报表范围”会把明细也切回 A+B。
+
+**导出与线下查看。** 查看某人时点“导出此人明细”，Excel 中基准期和对比期的工单明细分别列出此人在各期的全部工单；查看当前报表范围时点“导出完整明细”，得到所选人员组的两期明细。顶部常规 Excel 导出始终使用本次报表范围。打印或保存 PDF 时，两张明细表各显示当前页。
+
+离线 HTML 会记住导出时正在查看的人，同时保留可切换的工单明细。接收者无需联网即可改看另一位 AL 人员或返回报表范围。文件包含已保存 AL 规则允许的所有有效工单（包括初始日期和临时人员筛选之外的 Job ID 与 AL 姓名），以及导出时的名单设置；离线不能扩大该规则或修改它。未记录个人明细选择的快照默认跟随报表范围；旧文件若根本没有逐单数据，需要从当前服务重新导出。
 
 **批量导入 Job 人员表。** 在 Job 人员文件选择框中可一次选多份 `.xlsx` 或 UTF-8 `.csv`。页面列出的顺序就是导入顺序，每份文件单独保存。不同文件里的工单会累积；同一 Job ID 在多份文件出现时，以最后一份成功导入的非空 AL 姓名为准，工单仍只计一次。例：第一份为 J1→A、J2→B，第二份为 J1→C，结果是 J1→C、J2→B。如果一份更正表必须最后生效，可先完成其他文件，再单独上传更正表。同一文件内，同一 ID 的同名 AL 重复行只计一条；出现不同的非空 AL 姓名时整份文件不保存。AG 的差异不构成冲突。空 AL 行会跳过，不会清除此前从 AL 导入的归属；整份文件均无有效 C、AL 配对时，导入失败。
 
@@ -305,9 +309,13 @@ A Job also needs a matching ID in Job column C and a name in column AL. All filt
 
 For an individual comparison, search for one AL person, select several, or compare everyone admitted by the saved list. The picker and ranking include only people who have a qualifying Job in at least one of the two periods. Paste names separated by commas or line breaks. Exact matches in the current picker are selected; skipped names are shown. If no names match, the selection stays empty. Within each inclusive date range, the mean is the **sum of the selected Jobs’ maximum durations divided by their Job count**. If A’s two Jobs take 15 and 9 minutes and B’s one Job takes 36 minutes, A+B’s baseline mean is 20 minutes, while A’s own mean is 12 minutes. A comparison mean of 10 minutes for A+B is a 50% reduction. The ranking compares each named assignee’s own baseline and comparison means, sorting signed percentage reductions in descending order. A person with Jobs in only one period remains visible with that period’s mean and count but receives no percentage or rank; check each period’s Job count alongside the percentage.
 
-**Check the Jobs behind each mean.** Under **Job details**, the **Baseline Jobs** and **Comparison Jobs** tables show each included Job ID, assignee, longest alarm date and MTTR (h:mm:ss). The tables can be paged independently; the count and mean always cover the full filtered period. Each row is one Job, even when several alarms contributed. The table follows the selected dates and assignees. To verify either MTTR card, sum that period’s Job durations and divide by its Job count. Every Job carries equal weight when multiple assignees are selected; taking the simple average of the assignees’ means can give a different answer.
+**Check one person’s Jobs in both periods.** **Job details** follows the current report scope until you search for an AL person there or click their name in the improvement ranking. The baseline and comparison tables then show that person’s Job IDs, longest eligible alarm dates and MTTR (h:mm:ss). Each table pages independently; its count and mean cover the full period. A person with Jobs in only one period can still be inspected. The other table has no Jobs and there is no comparable individual rate.
 
-Excel puts the baseline and comparison Jobs on separate detail sheets using the date ranges and assignees selected at export. An offline HTML report lets the recipient change these filters and inspect the Jobs without reaching the local service. To support that, the file includes Job IDs and assignees across the eligible snapshot, including Jobs outside your original date and person selections. Jobs excluded by the saved AL rule are not included. The snapshot records the saved rule and its configured names. The recipient can change dates and AL selections within the snapshot but cannot edit the project rule. Printing or saving a PDF shows only the displayed page of each detail table. To share every Job in the selected scope, choose **Export all detail rows** and share the relevant sheets. Older offline files cannot reconstruct missing Job details; export a new copy from the current service.
+The focus picker can only narrow the saved AL rule, the report’s current personnel selection and the two date ranges. For example, if a regional AL list is active and the report selects A and B, inspecting A leaves the headline comparison, ranking, AI summary and general Excel report at A+B. **Use report scope** returns the tables to A+B.
+
+**Export and review offline.** With a person in focus, choose **Export this person’s details** for separate baseline and comparison sheets containing all their matching Jobs. With **Current report scope** active, **Export all detail rows** exports the group’s Jobs. The general Excel export always uses the report’s personnel selection. Printing or saving a PDF shows the current page of each detail table.
+
+Offline HTML remembers the captured detail focus but retains the data for switching to another AL person or following the report group without a server. The file includes Job IDs and AL names across the saved policy’s eligible history, even outside the initial dates and temporary person selection, plus the saved rule and its configured names. The saved project rule cannot be expanded or edited offline. Snapshots without a recorded detail focus default to the report group; if an older file has no individual Job rows, export a new copy from the current service.
 
 Keep the existing data directory on upgrade. Version 2.1.x stored AG assignments, not AL. After upgrading or restoring an older backup, reimport the original Job workbook(s) once. Already linked alarm records are retained. A new backup restores AL assignments and the saved personnel rule; older offline HTML files keep the calculations and data they originally contained. When upgrading from 2.0, old alarm fingerprints cannot reconstruct Job IDs: reimport the original alarm files to recover historical Job links, and import the Job workbook for ownership. Old TT/Job duration data and archived HTML reports keep their previous meanings. Application logs do not need to be reimported.
 

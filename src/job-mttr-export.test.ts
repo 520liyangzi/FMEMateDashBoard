@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {jobMttrSheets} from './job-mttr-export.ts';
+import {jobMttrSheets,jobDetailSheets} from './job-mttr-export.ts';
 import type {JobProxyMttrDataset} from '../lib/alarm-mttr.ts';
 import type {JobProxyDetailRow} from '../lib/job-mttr-details.ts';
 
@@ -89,4 +89,39 @@ test('AL snapshot uses the persisted list and AL-only scope for detail rows, ran
  assert.equal(sheets[3].rows[0]['Job AL person'],'Mei');assert.ok(!JSON.stringify(sheets).includes('Different AG owner'));
  const historical=jobMttrSheets(data,baseline,current,null,'en',detail)[0].rows[0];
  assert.equal(historical['Job personnel column'],'AG');assert.equal(historical['Applied AL mode'],undefined);
+});
+
+test('focused workbook round trip contains only that AL person, while the group export retains its own weighted comparison',async()=>{
+ const x=await import('xlsx');
+ const snapshot={...data,alPolicy:{mode:'exclude' as const,names:['Confidential excluded name']},alDiagnostics:{missingALJobs:1,filteredOutJobs:0}};
+ const xlsx=(sheets:ReturnType<typeof jobDetailSheets>)=>{
+   const wb=x.utils.book_new();for(const sheet of sheets)x.utils.book_append_sheet(wb,x.utils.json_to_sheet(sheet.rows),sheet.name);
+   const loaded=x.read(x.write(wb,{type:'buffer',bookType:'xlsx'}),{type:'buffer'});
+   return {sheets:loaded.SheetNames,rows:loaded.SheetNames.map(n=>x.utils.sheet_to_json<Record<string,unknown>>(loaded.Sheets[n]))};
+ };
+ const group=xlsx(jobDetailSheets(snapshot,baseline,current,owners,null,'en',detail));
+ const one=xlsx(jobDetailSheets(snapshot,baseline,current,owners,'Mei','en',detail));
+ assert.deepEqual(one.sheets,['Detail MTTR comparison','Baseline Job details','Comparison Job details']);
+ assert.deepEqual(group.rows[0].map(r=>[r['Owner selection'],r['Eligible Jobs'],r['Mean MTTR (seconds)']]),[['Mei, Lin',3,360],['Mei, Lin',2,50550]]);
+ assert.deepEqual(one.rows[0].map(r=>[r['Owner selection'],r['Eligible Jobs'],r['Mean MTTR (seconds)']]),[['Mei',2,90],['Mei',1,300]]);
+ assert.ok(Math.abs(Number(one.rows[0][1]['Reduction (%)'])-(90-300)/90*100)<1e-8);
+ assert.deepEqual(one.rows[1].slice(1).map(r=>r['Job ID']).sort(),['0001','0002']);
+ assert.deepEqual(one.rows[2].slice(1).map(r=>r['Job ID']),['0005']);
+ assert.ok(one.rows.slice(1).every(rr=>rr.slice(1).every(r=>r['Job AL person']==='Mei')));
+ assert.doesNotMatch(JSON.stringify(one),/Confidential excluded name|\bLin\b|\bAda\b|0003|0006/);
+ const full=jobMttrSheets(snapshot,baseline,current,owners,'en',detail);
+ assert.equal(full.length,5);assert.equal(full[0].rows[1]['Mean MTTR (seconds)'],50550);
+ assert.ok(full[3].rows.some(r=>r['Job AL person']==='Lin'));
+ const oneSided=xlsx(jobDetailSheets(snapshot,baseline,current,['Ada','Mei'],'Ada','zh',detail));
+ assert.deepEqual(oneSided.sheets,['明细 MTTR 对比','基准期工单明细','对比期工单明细']);
+ assert.deepEqual(oneSided.rows[0].map(r=>[r['有效工单数'],r['平均 MTTR（秒）'],r['减少率 (%)']]),[[0,'',''],[1,90,'']]);
+ assert.equal(oneSided.rows[1].length,1);assert.deepEqual(oneSided.rows[2].slice(1).map(r=>r['Job ID']),['0007']);
+});
+test('obsolete explicit focus fails closed, and a null focus over an empty selection cannot export the full group',()=>{
+ const snapshot={...data,alPolicy:{mode:'all' as const,names:[]},alDiagnostics:{missingALJobs:1,filteredOutJobs:0}};
+ for(const focus of ['Ada','Gone',''])assert.throws(()=>jobDetailSheets(snapshot,baseline,current,owners,focus,'en',detail),/select a person again/);
+ assert.throws(()=>jobDetailSheets(data,baseline,current,owners,'Mei','zh',detail),/重新选择/);
+ const none=jobDetailSheets(snapshot,baseline,current,[],null,'en',detail);
+ assert.deepEqual(none.slice(1).map(s=>s.rows.length),[1,1]);
+ assert.equal(none[0].rows[0]['Eligible Jobs'],0);
 });

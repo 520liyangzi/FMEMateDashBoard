@@ -1,4 +1,4 @@
-import {compareJobProxyMttr,getJobAlPolicy,getJobProxyAxis,rankJobProxyMttr,resolveJobProxyScope,selectJobProxyDays,type JobProxyMttrDataset} from '../lib/alarm-mttr.ts';
+import {compareJobProxyMttr,getJobDetailFocus,getJobAlPolicy,getJobProxyAxis,rankJobProxyMttr,resolveJobProxyScope,selectJobProxyDays,type JobProxyMttrDataset} from '../lib/alarm-mttr.ts';
 import {filterJobProxyDetails,type JobProxyDetailRow} from '../lib/job-mttr-details.ts';
 import type {MttrPeriod} from '../lib/mttr.ts';
 
@@ -12,6 +12,19 @@ function elapsed(seconds:number):string {
 
 /** Every workbook uses the same selection and Job weights as the on-screen comparison. */
 export function jobMttrSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,current:MttrPeriod,owners:readonly string[]|null,lang:'zh'|'en',detailRows:readonly JobProxyDetailRow[]):Sheet[] {
+ return buildJobSheets(data,baseline,current,owners,lang,detailRows,'full');
+}
+
+/** Export the visible detail view. An obsolete or unauthorized focus must never expand to the group. */
+export function jobDetailSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,current:MttrPeriod,reportOwners:readonly string[]|null,focusPerson:string|null,lang:'zh'|'en',detailRows:readonly JobProxyDetailRow[]):Sheet[] {
+ const focus=getJobDetailFocus(data,baseline,current,reportOwners,focusPerson);
+ if(focusPerson!==null && (focus.reset || focus.person!==focusPerson))throw new Error(lang==='zh'
+   ? '所选人员已不在当前明细范围内，请刷新并重新选择人员后导出。'
+   : 'This person is no longer in the detail scope. Refresh and select a person again before exporting.');
+ return buildJobSheets(data,baseline,current,focus.assignees,lang,detailRows,focus.person===null?'detail':'person');
+}
+
+function buildJobSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,current:MttrPeriod,owners:readonly string[]|null,lang:'zh'|'en',detailRows:readonly JobProxyDetailRow[],mode:'full'|'detail'|'person'):Sheet[] {
  const t=(zh:string,en:string)=>lang==='zh'?zh:en;
  const axis=getJobProxyAxis(data),policy=getJobAlPolicy(data),usesAL=axis==='AL';
  const ownerColumn=usesAL?t('Job 表 AL 列人员','Job AL person'):t('处理人（历史 Job AG 列）','Assignee (historical Job AG)');
@@ -19,16 +32,20 @@ export function jobMttrSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,
  const scope=effective===null?(usesAL?t('AL 规则内全部具名人员','All matched Job AL people under the policy'):t('全部已匹配处理人（历史 AG）','All matched owners (historical AG)')):effective.join(', ')||t('无符合条件的所选人员','No eligible selected owners');
  const range=(p:MttrPeriod)=>`${p.from} — ${p.to}`;
  const c=compareJobProxyMttr(data,baseline,current,effective);
- const ranked=rankJobProxyMttr(data,baseline,current,effective);
- const days=selectJobProxyDays(data,effective);
- const common:Record<string,Cell>={[t('人员范围','Owner selection')]:scope,[t('人员归属列','Job personnel column')]:axis,
-   [t('待重传的历史告警行','Historical alarm rows awaiting reimport')]:data?.legacyUnlinkedRows??''};
- if(usesAL){
+ const common:Record<string,Cell>={[t('人员范围','Owner selection')]:scope,[t('人员归属列','Job personnel column')]:axis};
+ if(mode!=='full'){
+   common[t('明细视图','Detail view')]=mode==='person'?t('单人','Individual'):t('跟随报表人员范围','Report selection');
+   if(usesAL)common[t('已应用 AL 模式','Applied AL mode')]=policy?.mode??'';
+   if(data?.needsAlarmReimport)common[t('数据覆盖','Data coverage')]=t('部分历史告警待重传','Partial history; alarm reimport required');
+ } else {
+   common[t('待重传的历史告警行','Historical alarm rows awaiting reimport')]=data?.legacyUnlinkedRows??'';
+   if(usesAL){
    common[t('已应用 AL 模式','Applied AL mode')]=policy?.mode??'';
    common[t('已配置 AL 名单（JSON）','Configured AL names (JSON)')]=policy?JSON.stringify(policy.names):'';
    common[t('未匹配或缺少 AL 人员的工单数（所有日期）','Jobs without a matched AL person (all dates)')]=data?.alDiagnostics?.missingALJobs??'';
    common[t('AL 名单过滤工单数（所有日期）','Jobs filtered by AL policy (all dates)')]=data?.alDiagnostics?.filteredOutJobs??'';
- } else common[t('未匹配处理人排除工单数（所有日期）','Excluded Jobs without matched owners (all dates)')]=data?.unassignedJobs??'';
+   } else common[t('未匹配处理人排除工单数（所有日期）','Excluded Jobs without matched owners (all dates)')]=data?.unassignedJobs??'';
+ }
 
  const measured=!['no_dataset','invalid_range','alarm_reimport_required'].includes(c.status);
  const joinRule=usesAL
@@ -66,10 +83,15 @@ export function jobMttrSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,
      ...rows.map(d=>({[type]:t('工单','Job'),[id]:d.jobId,[owner]:d.assignee,[date]:d.date,[seconds]:d.seconds,[time]:elapsed(d.seconds)})),
    ]};
  }
- return [
-  {name:t('工单 MTTR 对比','Job MTTR comparison'),rows:([[t('基准期','Baseline'),c.baseline],[t('对比期','Comparison'),c.current]] as const).map(([label,p])=>({[t('周期','Period')]:label,...summary(p),[t('减少率 (%)','Reduction (%)')]:p===c.current?c.reductionRate??'':'',[t('告警白名单','Alarm allowlist')]:data?.allowlist.join(', ')??'',[t('统计口径','Calculation')]:method}))},
+ const comparisons:Sheet[]=[
+  {name:mode==='full'?t('工单 MTTR 对比','Job MTTR comparison'):t('明细 MTTR 对比','Detail MTTR comparison'),rows:([[t('基准期','Baseline'),c.baseline],[t('对比期','Comparison'),c.current]] as const).map(([label,p])=>({[t('周期','Period')]:label,...summary(p),[t('减少率 (%)','Reduction (%)')]:p===c.current?c.reductionRate??'':'',[t('告警白名单','Alarm allowlist')]:data?.allowlist.join(', ')??'',[t('统计口径','Calculation')]:method}))},
   detailSheet(t('基准期工单明细','Baseline Job details'),c.baseline),
   detailSheet(t('对比期工单明细','Comparison Job details'),c.current),
+ ];
+ if(mode!=='full') return comparisons;
+ const ranked=rankJobProxyMttr(data,baseline,current,effective);
+ const days=selectJobProxyDays(data,effective);
+ return [...comparisons,
   {name:t('处理人 MTTR 排名','MTTR by owner'),rows:ranked.map(r=>({[t('排名','Rank')]:r.rank??'',[ownerColumn]:r.assignee,[t('基准期','Baseline')]:range(baseline),[t('对比期','Comparison')]:range(current),[t('基准工单数','Baseline Jobs')]:r.comparison.baseline.count,[t('对比工单数','Comparison Jobs')]:r.comparison.current.count,[t('基准均值（秒）','Baseline mean (seconds)')]:r.comparison.baseline.meanSeconds??'',[t('对比均值（秒）','Comparison mean (seconds)')]:r.comparison.current.meanSeconds??'',[t('减少率 (%)','Reduction (%)')]:r.comparison.reductionRate??'',[t('对比状态','Comparison status')]:r.comparison.status}))},
   {name:t('工单 MTTR 每日明细','Job MTTR by date'),rows:days.filter(d=>(d.date>=baseline.from&&d.date<=baseline.to)||(d.date>=current.from&&d.date<=current.to)).map(d=>({[t('工单归属日期','Job attribution date')]:d.date,[t('有效工单数','Eligible Jobs')]:d.count,[t('工单总时长（秒）','Total Job seconds')]:d.totalSeconds,[t('平均 MTTR（秒）','Mean MTTR (seconds)')]:d.totalSeconds/d.count}))},
  ];

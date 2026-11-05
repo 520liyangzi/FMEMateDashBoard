@@ -1,6 +1,6 @@
 import {useEffect,useMemo,useRef,useState} from 'react';
 import {Clock3,FileSpreadsheet,Search,Upload} from 'lucide-react';
-import {compareJobProxyMttr,getJobProxyAssignees,getJobAlPolicy,getJobProxyAxis,rankJobProxyMttr,selectJobProxyDays,type JobProxyMttrDataset,type JobAlPolicy} from '../lib/alarm-mttr';
+import {compareJobProxyMttr,type JobDetailFocus,getJobProxyAssignees,getJobAlPolicy,getJobProxyAxis,rankJobProxyMttr,selectJobProxyDays,type JobProxyMttrDataset,type JobAlPolicy} from '../lib/alarm-mttr';
 import {isValidMttrPeriod,previousMttrPeriod,type MttrPeriod} from '../lib/mttr';
 import {createAlarmUploader,type AlarmApi,type AlarmProgress} from './alarm-upload';
 import JobMttrDetails from './JobMttrDetails';
@@ -16,6 +16,7 @@ export type AlarmMttrPanelProps={
   selectedAssignees:string[]|null;onSelectedAssigneesChange:(values:string[]|null)=>void;
   onUseToday?:()=>void;readOnly:boolean;legacyPresent?:boolean;api:AlarmApi;
   onDatasetChange:(data:JobProxyMttrDataset)=>void;
+  detailFocus:JobDetailFocus;onDetailPersonChange:(person:string|null)=>void;
   offlineJobRows?:JobProxyDetailRow[];onExportJobDetails?:()=>void|Promise<void>;
 };
 const count=(n:number)=>n.toLocaleString('en-US');
@@ -167,7 +168,7 @@ function ImportEditor({dataset,t,api,onDatasetChange}:{dataset:JobProxyMttrDatas
   </details><JobAlPolicyPanel data={dataset} t={t} disabled={!!busy} saving={busy==='al'} onSave={saveAlPolicy}/></>;
 }
 
-export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBaselineChange,onCurrentChange,selectedAssignees=null,onSelectedAssigneesChange,onUseToday,readOnly,legacyPresent,api,onDatasetChange,offlineJobRows,onExportJobDetails}:AlarmMttrPanelProps){
+export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBaselineChange,onCurrentChange,selectedAssignees=null,onSelectedAssigneesChange,onUseToday,readOnly,legacyPresent,api,onDatasetChange,offlineJobRows,onExportJobDetails,detailFocus,onDetailPersonChange}:AlarmMttrPanelProps){
   const t:Translate=(zh,en)=>lang==='zh'?zh:en;
   const data=input?.formatVersion===5&&input.source==='alarm-jobs'?input:null;
   const legacy=getJobProxyAxis(data)==='AG';
@@ -185,6 +186,13 @@ export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBa
     :legacy?t('所选两期内没有匹配到历史人员和有效工单。','Neither period has an eligible Job with a historical assignee.')
     :t('应用 AL 名单及所选日期后，没有匹配到有效工单。','No eligible Jobs match the applied AL list and selected periods.');
   const report=useMemo(()=>compareJobProxyMttr(data,baseline,current,selectedAssignees),[data,baseline,current,selectedAssignees]);
+  function openPersonJobs(name:string){
+    onDetailPersonChange(name);
+    requestAnimationFrame(()=>{
+      const section=document.getElementById('job-mttr-details');
+      section?.focus({preventScroll:true});section?.scrollIntoView({block:'start'});
+    });
+  }
   const ranking=useMemo(()=>rankJobProxyMttr(data,baseline,current,selectedAssignees),[data,baseline,current,selectedAssignees]);
   const latest=matchedDays.at(-1)?.date,alarms=data?.lastImport,jobs=data?.lastJobImport;
   const listKey=data?.allowlist.join(', ')||t('未配置','None');
@@ -224,10 +232,10 @@ export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBa
     <p className="alarm-note">{t('有效告警须满足：B 列告警 ID 命中白名单，AE 列 Job ID 非空，I 列 Duration 大于 0，K 列发生时间有效。0:00:00 代表尚未清除，不参与比较。','Eligible alarms require an allowlisted alarm ID (B), a nonblank Job ID (AE), a positive duration (I), and a valid occurrence date (K). Zero-duration alarms are uncleared and excluded.')}</p>
     <p className="alarm-note alarm-meta">{t('当前白名单','Applied allowlist')}: {listKey} · {legacy?t('全部日期已匹配工单','Matched Jobs across all dates'):t('所有日期名单筛选后工单','Jobs after AL filtering, all dates')}: {count(matchedCount)}{!legacyAlarmCount&&<> · {t('匹配工单对应告警','Eligible alarms on matched Jobs')}: {count(data?.totalAlarms??0)}</>}{legacy&&<> · {t('全部日期未匹配工单（已排除）','Unmatched Jobs across all dates (excluded)')}: {count(data?.unassignedJobs??0)}</>}{latest&&<> · {matchedDays[0]?.date} — {latest}</>}</p>
     <section className="job-rank" aria-label={legacy?t('历史人员 MTTR 提升率排行','MTTR improvement by historical assignee'):t('AL 人员 MTTR 提升率排行','MTTR improvement by AL person')}><h3>{legacy?t('历史人员 MTTR 提升率排行','MTTR improvement by historical assignee'):t('AL 人员 MTTR 提升率排行','MTTR improvement by AL person')}</h3>
-      <p className="alarm-note">{t('按当前人员范围，依提升率从高到低排列。仅一期有工单的人员列在最后，不计算提升率。','Ranked within the selected scope, highest improvement first. People with Jobs in only one period appear last without an improvement rate.')}</p>
-      {ranking.length>0?<div className="job-rank-table"><table><thead><tr>{[t('排名','Rank'),person,t('基准期工单数','Baseline Jobs'),t('基准期 MTTR','Baseline MTTR'),t('对比期工单数','Comparison Jobs'),t('对比期 MTTR','Comparison MTTR'),t('提升率','Improvement')].map(h=><th key={h} scope="col">{h}</th>)}</tr></thead><tbody>{ranking.map(r=><tr key={r.assignee}><td>{r.rank??'—'}</td><th scope="row">{r.assignee}</th><td>{count(r.comparison.baseline.count)}</td><td>{duration(r.comparison.baseline.meanSeconds)}</td><td>{count(r.comparison.current.count)}</td><td>{duration(r.comparison.current.meanSeconds)}</td><td className={r.comparison.reductionRate>0?'positive':''}>{r.comparison.reductionRate===null?<><span>—</span><small>{unavailable(r.comparison.status)}</small></>:`${r.comparison.reductionRate.toFixed(1)}%`}</td></tr>)}</tbody></table></div>:<p className="job-rank-empty">{!names.length||!validDates?emptyNote:t('请选择统计人员，或切换为全部。','Select people for this report, or choose all.')}</p>}
+      <p className="alarm-note">{t('按当前人员范围，依提升率从高到低排列。仅一期有工单的人员列在最后，不计算提升率。','Ranked within the selected scope, highest improvement first. People with Jobs in only one period appear last without an improvement rate.')}{!legacy&&' '+t('点击姓名可查看该人员的两期工单。','Select a name to see that person’s Jobs in both periods.')}</p>
+      {ranking.length>0?<div className="job-rank-table"><table><thead><tr>{[t('排名','Rank'),person,t('基准期工单数','Baseline Jobs'),t('基准期 MTTR','Baseline MTTR'),t('对比期工单数','Comparison Jobs'),t('对比期 MTTR','Comparison MTTR'),t('提升率','Improvement')].map(h=><th key={h} scope="col">{h}</th>)}</tr></thead><tbody>{ranking.map(r=><tr key={r.assignee}><td>{r.rank??'—'}</td><th scope="row">{legacy?r.assignee:<button type="button" className="job-rank-person" aria-label={t(`查看 ${r.assignee} 的工单明细`,`View Job details for ${r.assignee}`)} onClick={()=>openPersonJobs(r.assignee)}>{r.assignee}</button>}</th><td>{count(r.comparison.baseline.count)}</td><td>{duration(r.comparison.baseline.meanSeconds)}</td><td>{count(r.comparison.current.count)}</td><td>{duration(r.comparison.current.meanSeconds)}</td><td className={r.comparison.reductionRate>0?'positive':''}>{r.comparison.reductionRate===null?<><span>—</span><small>{unavailable(r.comparison.status)}</small></>:`${r.comparison.reductionRate.toFixed(1)}%`}</td></tr>)}</tbody></table></div>:<p className="job-rank-empty">{!names.length||!validDates?emptyNote:t('请选择统计人员，或切换为全部。','Select people for this report, or choose all.')}</p>}
     </section>
-    <JobMttrDetails t={t} data={data} report={report} api={api} offline={readOnly} offlineRows={offlineJobRows} assignees={selectedAssignees} formatDuration={duration} onExport={onExportJobDetails}/>
+    <JobMttrDetails t={t} data={data} report={detailFocus.comparison} focusPerson={detailFocus.person} availablePeople={detailFocus.availablePeople} onFocusPersonChange={onDetailPersonChange} api={api} offline={readOnly} offlineRows={offlineJobRows} assignees={detailFocus.assignees} formatDuration={duration} onExport={onExportJobDetails}/>
     {alarms&&<details className="alarm-summary"><summary>{t('告警导入明细','Alarm import details')} · {alarms.filename}</summary><p>{alarms.sheetName} · {alarms.importedAt}</p>{counters([[t('读取行数','Source rows'),alarms.sourceRows],[t('缺少 Job ID','Missing Job ID'),alarms.missingJobIds],[t('缺少告警 ID','Missing alarm ID'),alarms.missingAlarmIds],[t('发生时间无效','Invalid occurrence time'),alarms.invalidDates],[t('未清除（零时长）','Uncleared (zero)'),alarms.zeroDurations],[t('时长无效','Invalid duration'),alarms.invalidDurations],[t('可用于白名单筛选','Valid before allowlist'),alarms.validRows],[t('命中导入时白名单','Matched at import'),alarms.matchedRows],[t('新增保存行','New stored rows'),alarms.addedRows],[t('重复行','Duplicate rows'),alarms.duplicateRows]])}</details>}
     {jobs&&<details className="alarm-summary"><summary>{t('人员归属导入明细','Ownership import details')} · {jobs.filename}</summary><p>{jobs.sheetName} · {jobs.importedAt}</p>{counters([[t('读取行数','Source rows'),jobs.sourceRows],[t('缺少 Job ID','Missing Job ID'),jobs.missingJobIds],[t('导入时姓名为空','Missing name at import'),jobs.missingAssignees],[t('重复 Job ID','Repeated Job IDs'),jobs.duplicateRows],[t('本次导入工单','Jobs in this import'),jobs.mappedJobs]])}</details>}
   </section>;

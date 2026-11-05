@@ -59,7 +59,7 @@ test('legacy Job aggregates cannot enter alarm comparisons through an old offlin
   assert.equal(aggregateAlarmMttr(legacy,baseline).count,0);
 });
 
-import {DEFAULT_JOB_AL_POLICY,getJobAlPolicy,getJobProxyAxis,isLegacyJobProxyDataset,parseJobAlNames,compareJobProxyMttr,rankJobProxyMttr,getJobProxyAssignees,resolveJobProxyScope,selectJobProxyDays,type JobProxyMttrDataset} from './alarm-mttr.ts';
+import {DEFAULT_JOB_AL_POLICY,getJobDetailFocus,getJobAlPolicy,getJobProxyAxis,isLegacyJobProxyDataset,parseJobAlNames,compareJobProxyMttr,rankJobProxyMttr,getJobProxyAssignees,resolveJobProxyScope,selectJobProxyDays,type JobProxyMttrDataset} from './alarm-mttr.ts';
 const groups:JobProxyMttrDataset['personDays']=[
   {assignee:'A',date:'2026-10-01',count:1,totalSeconds:310},{assignee:'A',date:'2026-10-02',count:2,totalSeconds:1490},
   {assignee:'A',date:'2026-10-03',count:1,totalSeconds:300},
@@ -163,4 +163,46 @@ test('AL aggregates use the cohort returned by the server; historical AG data is
   assert.equal(getJobAlPolicy(jobs),null);assert.equal(getJobProxyAxis(jobs),'AG');assert.equal(isLegacyJobProxyDataset(jobs),true);
   assert.equal(getJobAlPolicy(null),null);assert.equal(getJobProxyAxis(null),'AL');assert.equal(isLegacyJobProxyDataset(null),false);
   assert.deepEqual(DEFAULT_JOB_AL_POLICY,{mode:'all',names:[]});
+});
+
+
+test('detail focus compares one AL person inside a team and following the team retains its Job-weighted rate',()=>{
+  const al={...jobs,alPolicy:DEFAULT_JOB_AL_POLICY};
+  const report=['B','A','B','Historic'];
+  const follow=getJobDetailFocus(al,baseline,current,report,null);
+  assert.deepEqual(follow.availablePeople,['A','B']);assert.deepEqual(follow.assignees,['B','A']);
+  assert.equal(follow.person,null);assert.equal(follow.reset,false);assert.equal(follow.comparison.reductionRate,30);
+  const a=getJobDetailFocus(al,baseline,current,report,'A');
+  assert.equal(a.person,'A');assert.deepEqual(a.assignees,['A']);assert.equal(a.reset,false);
+  assert.equal(a.comparison.baseline.count,3);assert.equal(a.comparison.current.count,1);
+  assert.equal(a.comparison.reductionRate,50);
+  assert.deepEqual(report,['B','A','B','Historic']);
+  const moved=getJobDetailFocus(al,baseline,current,['B'],'A');
+  assert.equal(moved.reset,true);assert.equal(moved.person,null);assert.deepEqual(moved.assignees,['B']);
+  assert.deepEqual(moved.comparison,compareJobProxyMttr(al,baseline,current,['B']));
+});
+
+test('one-sided people remain inspectable without a rate; empty selections and changed dates cannot widen detail scope',()=>{
+  const al={...jobs,alPolicy:DEFAULT_JOB_AL_POLICY};
+  const arrived=getJobDetailFocus(al,baseline,current,null,'Arrived');
+  assert.equal(arrived.person,'Arrived');assert.equal(arrived.comparison.status,'no_baseline_jobs');
+  assert.equal(arrived.comparison.current.count,1);assert.equal(arrived.comparison.reductionRate,null);
+  for(const owners of [[],['Historic','Catalogue only']]){
+    const none=getJobDetailFocus(al,baseline,current,owners,'Arrived');
+    assert.deepEqual(none.availablePeople,[]);assert.deepEqual(none.assignees,[]);
+    assert.equal(none.reset,true);assert.equal(none.comparison.status,'no_jobs_both_periods');
+  }
+  const nowAbsent=getJobDetailFocus(al,baseline,baseline,null,'Arrived');
+  assert.equal(nowAbsent.reset,true);assert.equal(nowAbsent.person,null);assert.equal(nowAbsent.assignees,null);
+  assert.deepEqual(nowAbsent.comparison,compareJobProxyMttr(al,baseline,baseline));
+});
+
+test('saved AL snapshots use only their stored cohort, while legacy AG rows never masquerade as focused AL people',()=>{
+  const filtered={...jobs,personDays:groups.filter(d=>d.assignee==='A'),alPolicy:{mode:'include' as const,names:['a','Absent']}};
+  const stale=getJobDetailFocus(filtered,baseline,current,null,'Absent');
+  assert.deepEqual(stale.availablePeople,['A']);assert.equal(stale.person,null);assert.equal(stale.reset,true);
+  assert.equal(stale.assignees,null);assert.equal(stale.comparison.reductionRate,50);
+  const legacy=getJobDetailFocus(jobs,baseline,current,['B','A'],'A');
+  assert.deepEqual(legacy.availablePeople,[]);assert.deepEqual(legacy.assignees,['B','A']);
+  assert.equal(legacy.person,null);assert.equal(legacy.reset,true);assert.equal(legacy.comparison.reductionRate,30);
 });
