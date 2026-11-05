@@ -29,7 +29,7 @@ import alarm_mttr
 from mttr_uploads import AlarmJobUploads, AlarmUploads, MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '2.1.1'
+APP_VERSION = '2.2.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -216,6 +216,15 @@ class Store:
         try:
             with self.lock, self.connect() as db:
                 return alarm_mttr.set_allowlist(db, payload['allowlist'])
+        except MttrImportError as exc:
+            raise ApiError(400, str(exc), exc.details) from exc
+
+    def update_alarm_al_policy(self, payload):
+        if set(payload) != {'mode','names'}:
+            raise ApiError(400, '请提供 AL 筛选模式和人员名单 / Supply the AL filter mode and names.')
+        try:
+            with self.lock, self.connect() as db:
+                return alarm_mttr.set_al_policy(db, payload)
         except MttrImportError as exc:
             raise ApiError(400, str(exc), exc.details) from exc
 
@@ -1208,6 +1217,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.file_chunk(store.alarm_job_uploads, upload_id, operation)
             if path == '/api/mttr/alarms/allowlist':
                 return self.json(store.update_alarm_allowlist(self.json_body()))
+            if path == '/api/mttr/alarms/al-policy':
+                return self.json(store.update_alarm_al_policy(self.json_body()))
             if path == '/api/ai/config':
                 return self.json(store.ai.save_config(self.json_body()))
             if path == '/api/ai/preview':

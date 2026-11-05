@@ -2,12 +2,14 @@
 import csv
 from datetime import datetime
 import io
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from alarm_mttr import (init_schema,get_dataset,list_job_proxy_details,set_allowlist,stage_import,merge_import,
-                       stage_job_import,merge_job_import,clear_alarm,V4_TABLES,JOB_TABLES,restore_tables)
+                       stage_job_import,merge_job_import,clear_alarm,V4_TABLES,JOB_TABLES,ALARM_TABLES,
+                       set_al_policy,restore_tables)
 from mttr_import import MttrImportError, column_index
 from mttr_tests import workbook
 
@@ -113,14 +115,14 @@ class AlarmMttrTest(unittest.TestCase):
                 pass
 
     def jobmap(self,rows,xlsx=False):
-        header={'C':'jb_id','AG':'jb_assign_to'}
-        records=[header]+[{'C':j,'AG':p} for j,p in rows]
+        header={'C':'jb_id','AG':'jb_assign_to','AL':'reported person'}
+        records=[header]+[{'C':r[0],'AL':r[-1],'AG':r[1] if len(r)==3 else ''} for r in rows]
         if xlsx:
             data=workbook(records)
         else:
             out=io.StringIO();writer=csv.writer(out)
             for r in records:
-                vals=['']*33;vals[2]=r['C'];vals[32]=r['AG'];writer.writerow(vals)
+                vals=['']*38;vals[2]=r['C'];vals[32]=r['AG'];vals[37]=r['AL'];writer.writerow(vals)
             data=out.getvalue().encode()
         with stage_job_import(data,'jobs.'+('xlsx' if xlsx else 'csv')) as st,self.db:
             return merge_job_import(self.db,st)
@@ -171,7 +173,7 @@ class AlarmMttrTest(unittest.TestCase):
         self.assertEqual([r['jobId'] for r in all_jobs['rows']],['J2','J1'])
         self.assertEqual((all_jobs['total'],all_jobs['totalSeconds']),
                          (summary['totalJobs'],sum(d['totalSeconds'] for d in summary['days'])))
-        j1={'jobId':'J1','assignee':'Alice','date':'2026-11-06','seconds':1200,'alarmCount':4,'alarmId':'X'}
+        j1={'jobId':'J1','assignee':'Alice','alPerson':'Alice','date':'2026-11-06','seconds':1200,'alarmCount':4,'alarmId':'X'}
         self.assertEqual(get(date_from='2026-11-06',date_to='2026-11-06')['rows'],[j1])
         self.assertEqual(get(date_to='2026-11-05')['total'],0)
         self.assertEqual(get(date_from='2026-11-08')['total'],0)
@@ -215,7 +217,7 @@ class AlarmMttrTest(unittest.TestCase):
         self.db.execute("UPDATE alarm_mttr_job_max SET seconds=99999")
         with sqlite3.connect(':memory:') as dest:
             init_schema(dest)
-            restore_tables(self.db,dest,{'alarm_mttr_job_max','alarm_mttr_revision'}|V4_TABLES|JOB_TABLES)
+            restore_tables(self.db,dest,ALARM_TABLES)
             self.assertEqual(list_job_proxy_details(dest)['rows'],original['rows'])
             self.assertNotEqual(list_job_proxy_details(dest)['revision'],original['revision'])
 
@@ -254,5 +256,91 @@ class AlarmMttrTest(unittest.TestCase):
         switched=set_allowlist(self.db,'Y')
         self.assertEqual((switched['assignees'],switched['totalJobs'],switched['totalAlarms'],switched['storedRows']),
                          (['Bob'],1,1,4))
+
+    def test_al_only_cohort_shared_by_filters_counts_details_and_person_ranking(self):
+        self.add([row(job='1',duration='0:01:00',occurred='2026-11-01'),row(job='1',duration='0:02:00',occurred='2026-11-02'),
+                  row(job='2',duration='0:05:00',occurred='2026-11-03'),row(job='3',duration='0:08:00',occurred='2026-11-04'),
+                  row(job='4',duration='0:09:00',occurred='2026-11-05'),row(job='5',alarm='not-allowed')])
+        all_jobs=self.jobmap([('1','AG owner',' Ｊane   Doe '),('1','different AG','jane DOE'),
+                              ('2','','JANE DOE'),('3','Jane Doe','JANE DOE JR'),('4','Jane Doe',' '),
+                              ('5','','No eligible alarm')],xlsx=True)
+        def counts(d):
+            return (d['totalJobs'],d['totalAlarms'],d['assignees'],d['unassignedJobs'],d['alDiagnostics'])
+        def policy(mode,names):
+            return set_al_policy(self.db,dict(mode=mode,names=names))
+        self.assertEqual(all_jobs['alPolicy'],{'mode':'all','names':[]})
+        self.assertEqual(all_jobs['lastJobImport']['personColumn'],'AL')
+        self.assertEqual(counts(all_jobs),(3,4,['JANE DOE JR','Jane Doe'],1,{'missingALJobs':1,'filteredOutJobs':0}))
+        only=policy('include',['  jAnE　Doe ','ＪＡＮＥ DOE',''])
+        self.assertEqual(only['alPolicy'],{'mode':'include','names':['jAnE Doe']})
+        self.assertEqual(counts(only),(2,3,['Jane Doe'],1,{'missingALJobs':1,'filteredOutJobs':1}))
+        self.assertEqual((only['earliestDate'],only['latestDate']),('2026-11-02','2026-11-03'))
+        details=list_job_proxy_details(self.db,assignees=['JANE DOE'])
+        self.assertEqual((details['total'],details['totalSeconds']), (2,420))
+        self.assertEqual([(r['jobId'],r['alPerson'],r['assignee']) for r in details['rows']],
+                         [('2','Jane Doe','Jane Doe'),('1','Jane Doe','Jane Doe')])
+        excluded=policy('exclude',['jane doe'])
+        self.assertEqual(counts(excluded),(1,1,['JANE DOE JR'],1,{'missingALJobs':1,'filteredOutJobs':2}))
+        self.assertEqual(excluded['days'],[{'date':'2026-11-04','totalSeconds':480,'count':1}])
+        self.assertEqual(list_job_proxy_details(self.db)['totalSeconds'],480)
+        self.assertEqual(list_job_proxy_details(self.db,assignees=['Jane Doe'])['rows'],[])
+        self.assertEqual(counts(policy('all',[])), counts(all_jobs))
+
+    def test_bad_al_file_or_policy_preserves_everything_and_partial_updates_never_erase(self):
+        self.add([row(job='1'),row(job='2')])
+        base=self.jobmap([('1','wrong AG','Alice')])
+        for bad in ([('1','AG only',''),('2','AG only','')],[('1','AG','eve'),('1','AG','other AL')]):
+            with self.assertRaises(MttrImportError):
+                self.jobmap(bad)
+            self.assertEqual(get_dataset(self.db),base)
+        new=self.jobmap([('1','Alice',' '),('2','','Bob')])
+        self.assertEqual((new['mappedJobs'],new['assignees'],new['lastJobImport']['missingAssignees']),
+                         (2,['Alice','Bob'],1))
+        for invalid in ({'mode':'include','names':[]},{'mode':'exclude','names':['  ']},
+                        {'mode':'all','names':'Amy'},{'mode':'all','names':[2]},
+                        {'mode':'include','names':['a'*513]},{'mode':'exclude','names':['x']*10001},
+                        {'mode':'all','groupBy':'AG','names':[]},{'mode':'all','names':[chr(0xd800)]}):
+            with self.assertRaises(MttrImportError):set_al_policy(self.db,invalid)
+            self.assertEqual(get_dataset(self.db),new)
+        newer=self.jobmap([('1','old AG','Bob')])
+        self.assertEqual((newer['totalJobs'],newer['assignees'],newer['lastJobImport']['mappedJobs']),(2,['Bob'],1))
+        none=set_al_policy(self.db,{'mode':'include','names':['not yet imported']})
+        self.assertEqual((none['totalJobs'],none['days'],none['latestDate'],none['alDiagnostics']['filteredOutJobs']),
+                         (0,[],None,2))
+        joined=self.jobmap([('1','','Not Yet Imported')])
+        self.assertEqual((joined['totalJobs'],joined['assignees'],joined['alDiagnostics']['filteredOutJobs']),
+                         (1,['Not Yet Imported'],1))
+
+    def test_ag_only_backup_requires_job_al_reimport_and_new_backup_roundtrip_keeps_policy(self):
+        self.add([row(),row(job='J2')])
+        # Simulate the earlier V5 archive: only the old AG catalogue and
+        # receipt exist. The original alarm rows and per-Job winners survive.
+        new=self.jobmap([('Job1','A')])
+        old=dict(new['lastJobImport']);del old['personColumn']
+        self.db.execute('INSERT INTO alarm_mttr_job_owners VALUES(?,?)',('Job1','Old AG'))
+        self.db.execute('UPDATE alarm_mttr_job_import SET data=?',(json.dumps(old),))
+        with sqlite3.connect(':memory:') as dest:
+            init_schema(dest)
+            restore_tables(self.db,dest,V4_TABLES|JOB_TABLES)
+            d=get_dataset(dest)
+            self.assertEqual((d['storedRows'],d['mappedJobs'],d['totalJobs'],d['unassignedJobs'],d['assignees']),
+                             (2,0,0,2,[]))
+            self.assertEqual(dest.execute('SELECT assignee FROM alarm_mttr_job_owners').fetchone()[0],'Old AG')
+            self.assertNotIn('personColumn',d['lastJobImport'])
+            data=workbook([{'C':'Job ID','AL':'AL person'},{'C':'Job1','AL':'A'}])
+            with stage_job_import(data,'restored.xlsx') as st:
+                d=merge_job_import(dest,st)
+            self.assertEqual((d['storedRows'],d['mappedJobs'],d['assignees'],d['unassignedJobs']),(2,1,['A'],1))
+            d=set_al_policy(dest,{'mode':'exclude','names':['a']})
+            self.assertEqual((d['totalJobs'],d['alDiagnostics']),(0,{'missingALJobs':1,'filteredOutJobs':1}))
+            with sqlite3.connect(':memory:') as roundtrip:
+                init_schema(roundtrip);restore_tables(dest,roundtrip,ALARM_TABLES)
+                restored=get_dataset(roundtrip)
+                self.assertEqual({k:v for k,v in restored.items() if k!='revision'},
+                                 {k:v for k,v in d.items() if k!='revision'})
+                wiped=clear_alarm(roundtrip)
+                self.assertEqual((wiped['mappedJobs'],wiped['unassignedJobs'],wiped['alPolicy']),
+                                 (0,0,{'mode':'exclude','names':['a']}))
+                self.assertEqual(roundtrip.execute('SELECT count(*) FROM alarm_mttr_job_owners').fetchone()[0],0)
 
 if __name__=='__main__':unittest.main()

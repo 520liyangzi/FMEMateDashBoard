@@ -744,6 +744,18 @@ test('job-proxy evidence reports pooled Jobs and signed individual ranking withi
   assert.deepEqual(new Set(narrowed.selectedScope.names),new Set(['Alice','Other']));
   assert.equal(narrowed.people.rankedCount,0);assert.equal(narrowed.people.unrankedCount,2);
   assert.ok(narrowed.people.unrankedExamples.every(p=>p.reductionRate===null));
+  assert.equal(all.personnelColumn,'AG');assert.equal(all.alPolicy,null);
+  const policyNames=['Alice','Bo',...Array.from({length:50},(_,i)=>'Configured '+i)];
+  const alDataset={...alarmJobMttr,alPolicy:{mode:'include' as const,names:policyNames},alDiagnostics:{missingALJobs:1,filteredOutJobs:2},
+    days:[{date,count:4,totalSeconds:1200},{date:next,count:2,totalSeconds:700}],
+    personDays:alarmJobMttr.personDays.filter(p=>p.assignee==='Alice'||p.assignee==='Bo')};
+  const al=facts({...input,alarmJobMttr:alDataset,selectedAssignees:['AG only','Bo','Alice']}).effectiveness.mttr;
+  assert.equal(al.personnelColumn,'AL');assert.deepEqual(al.alDiagnostics,{missingALJobs:1,filteredOutJobs:2});
+  assert.equal(al.alPolicy.mode,'include');assert.deepEqual(al.alPolicy.names,policyNames.slice(0,40));
+  assert.equal(al.alPolicy.omittedNames,12);assert.equal(al.alPolicy.totalNames,52);
+  assert.deepEqual(new Set(al.selectedScope.names),new Set(['Alice','Bo']));
+  assert.deepEqual(al.people.ranking.map(x=>x.assignee),['Alice','Bo']);
+  assert.deepEqual([al.baseline.count,al.baseline.meanSeconds,al.current.count,al.current.meanSeconds],[4,300,2,350]);
   const missing=facts({...input,alarmJobMttr:null,...{alarmMttr:null}}).effectiveness.mttr;
   assert.equal(missing.businessRule,'one-job-max-eligible-alarm-duration');assert.equal(missing.status,'no_dataset');assert.equal(missing.reductionRate,null);
   assert.equal(missing.baseline.count,null);

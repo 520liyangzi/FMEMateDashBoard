@@ -80,12 +80,32 @@ export function compareAlarmMttr(dataset:AlarmMttrDataset|null|undefined, baseli
 /** Current reporting contract. The server reduces eligible alarm occurrences to one maximum per Job
  * before emitting daily counts/sums. V4 alarm-row means cannot be used in place of these groups. */
 export type JobProxyDay = { date: string; count: number; totalSeconds: number };
+/** The server applies this policy to matched Job-column-AL people before producing all report aggregates. */
+export type JobAlPolicy = {mode:'all'|'include'|'exclude'; names:string[]};
+export const DEFAULT_JOB_AL_POLICY:JobAlPolicy={mode:'all',names:[]};
+
+/** Prepare a pasted list for the policy API. Keep the first display spelling.
+ * The server performs authoritative Unicode casefold matching against whole AL values. */
+export function parseJobAlNames(input:string|readonly string[]):string[]{
+  const tokens=typeof input==='string'?input.split(/[,，、;；\r\n]+/u):input;
+  const seen=new Set<string>(),names:string[]=[];
+  for(const token of tokens){
+    const display=token.normalize('NFKC').trim().replace(/\s+/gu,' ');
+    // Common Unicode folds that differ from JavaScript's lowercase mapping.
+    const key=display.toLowerCase().replace(/ß/gu,'ss').replace(/ς/gu,'σ');
+    if(display&&!seen.has(key)){seen.add(key);names.push(display);}
+  }
+  return names;
+}
+
 export interface JobProxyMappingImportInfo {
   filename:string; sheetName:string; importedAt:string; sourceRows:number; missingJobIds:number;
   missingAssignees:number; validRows:number; duplicateRows:number; mappedJobs:number;
 }
 export interface JobProxyMttrDataset {
   formatVersion:5; source:'alarm-jobs'; allowlist:string[]; revision?:string;
+  /** Absent on historical AG reports: their aggregates must not be relabelled as AL. */
+  alPolicy?:JobAlPolicy; alDiagnostics?:{missingALJobs:number; filteredOutJobs:number};
   /** Optional server hint. Older V5 snapshots may include the whole mapping catalogue here. */
   assignees?:string[];
   days:JobProxyDay[];
@@ -103,6 +123,16 @@ export interface JobProxyMttrComparison extends Omit<AlarmMttrComparison,'status
 export interface JobProxyMttrPerson {assignee:string;rank:number|null;comparison:JobProxyMttrComparison}
 type ProxyInput=JobProxyMttrDataset|null|undefined;
 const isProxy=(d:ProxyInput):d is JobProxyMttrDataset=>d?.formatVersion===5&&d.source==='alarm-jobs';
+export function getJobAlPolicy(data:ProxyInput):JobAlPolicy|null{
+  return isProxy(data)?data.alPolicy??null:null;
+}
+export function isLegacyJobProxyDataset(data:ProxyInput):boolean{
+  return isProxy(data)&&!data.alPolicy;
+}
+/** Label the already-aggregated data. No client-side AL matching or fallback from AL to AG. */
+export function getJobProxyAxis(data:ProxyInput):'AL'|'AG'{
+  return isLegacyJobProxyDataset(data)?'AG':'AL';
+}
 const usableGroup=(day:JobProxyDay)=>Number.isSafeInteger(day.count)&&day.count>0&&Number.isFinite(day.totalSeconds)&&day.totalSeconds>0;
 const asc=(a:string,b:string)=>a<b?-1:a>b?1:0;
 const blocked=(d:JobProxyMttrDataset)=>d.needsAlarmReimport&&d.totalJobs===0;

@@ -73,3 +73,12 @@ test('short, duplicate, wrong-duration or revised pages and endpoint failures ne
     await assert.rejects(loadAllJobProxyDetails(api,{}),issue==='exception'?/network interrupted/:/incomplete or changed/,issue)
   }
 })
+
+test('new Job rows expose the canonical AL person; old snapshots remain explicitly historical and never manufacture AL',async()=>{
+  const liveRow={...rows[0],assignee:'Li Hua',alPerson:'Li Hua'};
+  const fetchOne=async()=>({rows:[liveRow],total:1,totalSeconds:liveRow.seconds});
+  assert.deepEqual(await loadAllJobProxyDetails(fetchOne),[liveRow]);
+  assert.equal(filterJobProxyDetails([rows[0]])[0].alPerson,undefined);
+  const inconsistent=async()=>({rows:[{...liveRow,alPerson:'Another'}],total:1,totalSeconds:liveRow.seconds});
+  await assert.rejects(loadAllJobProxyDetails(inconsistent),/incomplete or changed/);
+});

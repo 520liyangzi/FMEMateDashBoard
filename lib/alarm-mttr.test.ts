@@ -59,7 +59,7 @@ test('legacy Job aggregates cannot enter alarm comparisons through an old offlin
   assert.equal(aggregateAlarmMttr(legacy,baseline).count,0);
 });
 
-import {compareJobProxyMttr,rankJobProxyMttr,getJobProxyAssignees,resolveJobProxyScope,selectJobProxyDays,type JobProxyMttrDataset} from './alarm-mttr.ts';
+import {DEFAULT_JOB_AL_POLICY,getJobAlPolicy,getJobProxyAxis,isLegacyJobProxyDataset,parseJobAlNames,compareJobProxyMttr,rankJobProxyMttr,getJobProxyAssignees,resolveJobProxyScope,selectJobProxyDays,type JobProxyMttrDataset} from './alarm-mttr.ts';
 const groups:JobProxyMttrDataset['personDays']=[
   {assignee:'A',date:'2026-10-01',count:1,totalSeconds:310},{assignee:'A',date:'2026-10-02',count:2,totalSeconds:1490},
   {assignee:'A',date:'2026-10-03',count:1,totalSeconds:300},
@@ -146,4 +146,21 @@ test('period eligibility comes only from named positive Job groups, not the cata
   assert.deepEqual(rankJobProxyMttr(snapshot,baseline,late,selected).map(r=>[r.assignee,r.rank,r.comparison.status]),
     [['A',null,'no_current_jobs'],['Late',null,'no_baseline_jobs']]);
   assert.equal(compareJobProxyMttr(snapshot,baseline,late).current.count,1);
+});
+
+test('pasted AL lists preserve first spelling and distinct whole names while normalizing Unicode and whitespace',()=>{
+  assert.deepEqual(parseJobAlNames(' Ａda　 Wong， ADA Wong; Ada\n李  华、李 华；Straße,STRASSE,  '),['Ada Wong','Ada','李 华','Straße']);
+  // Arrays from a saved policy already contain whole names: never split stored punctuation.
+  assert.deepEqual(parseJobAlNames(['  Chen, Lan','Chen, Lan','Chen']),['Chen, Lan','Chen']);
+});
+
+test('AL aggregates use the cohort returned by the server; historical AG data is never identified as an AL report',()=>{
+  const al={...jobs,alPolicy:{mode:'include' as const,names:['a']},alDiagnostics:{missingALJobs:2,filteredOutJobs:7},
+    personDays:groups.filter(d=>d.assignee==='A')};
+  assert.deepEqual(getJobAlPolicy(al),{mode:'include',names:['a']});assert.equal(getJobProxyAxis(al),'AL');
+  assert.equal(isLegacyJobProxyDataset(al),false);assert.deepEqual(getJobProxyAssignees(al,baseline,current),['A']);
+  assert.equal(compareJobProxyMttr(al,baseline,current).reductionRate,50);
+  assert.equal(getJobAlPolicy(jobs),null);assert.equal(getJobProxyAxis(jobs),'AG');assert.equal(isLegacyJobProxyDataset(jobs),true);
+  assert.equal(getJobAlPolicy(null),null);assert.equal(getJobProxyAxis(null),'AL');assert.equal(isLegacyJobProxyDataset(null),false);
+  assert.deepEqual(DEFAULT_JOB_AL_POLICY,{mode:'all',names:[]});
 });

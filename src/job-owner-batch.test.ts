@@ -25,7 +25,7 @@ function fakeApi(hook?:(s:Step)=>void|Promise<void>){
       assert.equal(session.bytes.length,session.size);
       await hook?.({type:'import',name:session.name,signal:options?.signal,offset:session.size});
       commits.push(session.bytes);sessions.delete(id);
-      return {formatVersion:5,source:'alarm-jobs',allowlist:[],days:[],personDays:[],totalJobs:0,totalAlarms:0,storedRows:0,
+      return {formatVersion:5,source:'alarm-jobs',alPolicy:{mode:'all',names:[]},allowlist:[],days:[],personDays:[],totalJobs:0,totalAlarms:0,storedRows:0,
         unassignedJobs:0,legacyUnlinkedRows:0,mappedJobs:commits.length,lastJobImport:{filename:session.name,
           mappedJobs:1,sourceRows:1,validRows:1,missingJobIds:0,missingAssignees:0,duplicateRows:0}};
     }
@@ -75,6 +75,18 @@ test('an HTTP success without a receipt for the expected file does not advance t
     assert.equal(batch.completed,0);assert.equal(events.some(e=>e.type==='saved'),false);
     assert.equal(events.at(-1)?.type,'failed');assert.deepEqual(http.names,['a.csv']);
   }
+});
+
+test('a live ownership upload requires an AL receipt; a complete historical AG-only dataset cannot acknowledge it',async()=>{
+  const http=fakeApi(),events:JobOwnerBatchEvent[]=[];
+  const api=async(url:string,options?:RequestInit)=>{
+    const result=await http.api(url,options);
+    if(url.endsWith('/import')){delete result.alPolicy;}
+    return result;
+  };
+  const batch=createJobOwnerBatch(api,[excel('owners.csv','x')]);
+  await assert.rejects(batch.run(fresh().signal,e=>events.push(e)),/did not confirm/);
+  assert.equal(batch.completed,0);assert.ok(!events.some(e=>e.type==='saved'));
 });
 
 test('abort an in-flight file, reject concurrent attempts, and start only its remaining files on retry',async()=>{

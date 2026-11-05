@@ -66,6 +66,26 @@ class AlarmHttpTests(unittest.TestCase):
                                        'application/octet-stream')['received'], offset + len(chunk))
         return prefix
 
+    def restore_older_schema(self, tables, prepare=None):
+        with zipfile.ZipFile(io.BytesIO(self.store.backup())) as bundle:
+            manifest = bundle.read('manifest.json')
+            path = Path(self.tmp.name) / 'archived.db'
+            path.write_bytes(bundle.read('report.db'))
+        db = sqlite3.connect(path)
+        try:
+            with db:
+                for name in alarm_mttr.ALARM_TABLES-tables:
+                    db.execute('DROP TABLE ' + name)
+                if prepare:
+                    prepare(db)
+        finally:
+            db.close()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive,'w') as bundle:
+            bundle.writestr('manifest.json', manifest)
+            bundle.writestr('report.db', path.read_bytes())
+        self.store.restore(archive.getvalue())
+
     def test_import_allowlist_and_backup_restore(self):
         data = alarm_sheet(
             ('26540', '00:10:00', '2026-10-20 23:59:00', 'JOB-A'),
@@ -85,9 +105,9 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertEqual(result, self.call(BASE))
         refreshed = self.call(BASE + '/allowlist', 'POST', {'allowlist': '26564,26540'})
         self.assertEqual((refreshed['totalAlarms'],refreshed['totalJobs'],refreshed['unassignedJobs']), (0,0,2))
-        jobs = workbook([{'B':'TT ID','C':'Job ID','AG':'jb_assign_to'},
-                         {'B':'ignored','C':'JOB-A','AG':'Alice'},
-                         {'B':'ignored','C':'JOB-B','AG':'Bob'}])
+        jobs = workbook([{'B':'TT ID','C':'Job ID','AL':'AL person'},
+                         {'B':'ignored','C':'JOB-A','AL':'Alice'},
+                         {'B':'ignored','C':'JOB-B','AL':'Bob'}])
         refreshed = self.call(self.stage(jobs, 'jobs.xlsx', True) + '/import', 'POST', {})
         self.assertEqual((refreshed['totalAlarms'],refreshed['totalJobs'],refreshed['assignees']), (3,2,['Alice','Bob']))
         self.assertEqual(sum(d['totalSeconds'] for d in refreshed['days']),10200)
@@ -107,7 +127,7 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertIsNone(self.call('/api/mttr'))
 
     def test_excel_reupload_and_invalid_file_do_not_change_ledger(self):
-        self.call(self.stage(workbook([{'C':'Job ID','AG':'jb_assign_to'},{'C':'JOB-A','AG':'Alice'}]),
+        self.call(self.stage(workbook([{'C':'Job ID','AL':'AL person'},{'C':'JOB-A','AL':'Alice'}]),
                              'jobs.xlsx',True)+'/import','POST',{})
         header = {'B':'Alarm ID','I':'Duration','K':'Occurred','AE':'Job ID'}
         alarm = {'B':26540, 'I':('n',0.5), 'K':'2026/11/03 23:59:00', 'AE':'JOB-A'}
@@ -128,7 +148,7 @@ class AlarmHttpTests(unittest.TestCase):
 
     def test_mapping_first_and_owner_reassignment_do_not_multiply_jobs(self):
         def owners(name):
-            rows=[{'C':'job_id','AG':'jb_assign_to'}, {'C':'J1','AG':name}, {'C':'J1','AG':name}]
+            rows=[{'C':'job_id','AL':'AL person'}, {'C':'J1','AL':name}, {'C':'J1','AL':name}]
             return self.call(self.stage(workbook(rows), 'assignments.xlsx', True) + '/import', 'POST', {})
         first=owners('Alice')
         self.assertEqual((first['mappedJobs'],first['totalJobs']), (1,0))
@@ -159,7 +179,7 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertEqual((before['totalJobs'],before['unassignedJobs']), (0,3))
 
         def owner_file(filename, pairs):
-            rows = [{'C':'Job ID','AG':'jb_assign_to'}] + [{'C':j,'AG':p} for j,p in pairs]
+            rows = [{'C':'Job ID','AL':'AL person'}] + [{'C':j,'AL':p} for j,p in pairs]
             return self.stage(workbook(rows), filename, True) + '/import'
 
         first = self.call(owner_file('part-1.xlsx',[('J1','Alice'),('J2','Bob')]), 'POST', {})
@@ -182,9 +202,9 @@ class AlarmHttpTests(unittest.TestCase):
                          [('J1','Dana',3600),('J2','Bob',7200),('J3','Carol',10800)])
 
     def test_reject_incomplete_or_invalid_mapping_without_changing_ownership(self):
-        raw=workbook([{'C':'Job ID','AG':'jb_assign_to'},{'C':'J1','AG':'Owner'}])
+        raw=workbook([{'C':'Job ID','AL':'AL person'},{'C':'J1','AL':'Owner'}])
         saved=self.call(self.stage(raw,'ok.xlsx',True)+'/import','POST',{})
-        bad=self.stage(workbook([{'C':'Job ID','AG':'jb_assign_to'},{'C':'', 'AG':'Owner'}]),'invalid.xlsx',True)
+        bad=self.stage(workbook([{'C':'Job ID','AL':'AL person'},{'C':'', 'AL':'Owner'}]),'invalid.xlsx',True)
         with self.assertRaises(HTTPError) as exc:
             self.call(bad+'/import','POST',{})
         self.assertEqual(exc.exception.code,400)
@@ -210,9 +230,9 @@ class AlarmHttpTests(unittest.TestCase):
 
         empty = details()
         self.assertEqual(empty['rows'], [])
-        owners = workbook([{'C':'Job ID', 'AG':'jb_assign_to'},
-                           {'C':'J-A','AG':'Alice'}, {'C':'J-B','AG':'Bob'}, {'C':'J-C','AG':'Bob'},
-                           {'C':'never-alarmed','AG':'Catalogue only'}])
+        owners = workbook([{'C':'Job ID', 'AL':'AL person'},
+                           {'C':'J-A','AL':'Alice'}, {'C':'J-B','AL':'Bob'}, {'C':'J-C','AL':'Bob'},
+                           {'C':'never-alarmed','AL':'Catalogue only'}])
         self.call(self.stage(owners,'jobs.xlsx',True) + '/import','POST',{})
         dashboard = import_alarms([
             ('26540','00:10:00','2026-10-21','J-A'),
@@ -263,25 +283,88 @@ class AlarmHttpTests(unittest.TestCase):
                 self.call(BASE + '/job-details','POST',filters)
             self.assertEqual(exc.exception.code,400)
 
+    def test_al_policy_scopes_totals_people_and_details_and_survives_restore(self):
+        def policy(mode, names):
+            return self.call(BASE+'/al-policy','POST',{'mode':mode,'names':names})
+        # Save a list before uploading anything: it must also affect future files.
+        saved = policy('include',[' ANA ','ana'])
+        self.assertEqual(saved['alPolicy'], {'mode':'include','names':['ANA']})
+        owners = workbook([{'C':'Job ID','AG':'jb_assign_to','AL':'AL person'},
+                           {'C':'A','AG':'Bo','AL':'Ana'}, {'C':'B','AG':'Ana','AL':'Bo'},
+                           {'C':'C','AG':'Ana','AL':''}, {'C':'D','AG':'','AL':'Ana'}])
+        self.call(self.stage(owners,'assignments.xlsx',True)+'/import','POST',{})
+        alarms = alarm_sheet(('26540','00:10:00','2026-10-01','A'),('26540','00:20:00','2026-10-02','A'),
+                             ('26540','00:30:00','2026-10-02','B'),('26540','00:50:00','2026-10-02','C'),
+                             ('26540','01:00:00','2026-10-03','D'))
+        included = self.call(self.stage(alarms)+'/import','POST',{'allowlist':'26540'})
+        def check(report, people, ids, alarms, seconds, filtered_out):
+            self.assertEqual(report['assignees'],people)
+            self.assertEqual((report['totalJobs'],report['totalAlarms'],report['unassignedJobs']), (len(ids),alarms,1))
+            self.assertEqual(report['alDiagnostics']['missingALJobs'],1)
+            self.assertEqual(report['alDiagnostics']['filteredOutJobs'],filtered_out)
+            self.assertEqual(sum(r['totalSeconds'] for r in report['personDays']),seconds)
+            details = self.call(BASE+'/job-details','POST',{})
+            self.assertEqual((details['revision'],details['total'],details['totalSeconds']),
+                             (report['revision'],len(ids),seconds))
+            self.assertEqual({r['jobId'] for r in details['rows']},set(ids))
+            self.assertEqual({r['assignee'] for r in details['rows']},set(people))
+        check(included,['Ana'],['A','D'],3,4800,1)
+        # A personal/range lookup cannot reintroduce AL names excluded by the saved list.
+        zero = self.call(BASE+'/job-details','POST',{'start':'2026-10-02','assignees':['Bo']})
+        self.assertEqual((zero['total'], zero['totalSeconds']),(0,0))
+        excluded = policy('exclude',['Ana'])
+        self.assertNotEqual(excluded['revision'],included['revision'])
+        check(excluded,['Bo'],['B'],1,1800,2)
+        self.assertEqual(Store(self.store.root).get_alarm_mttr(), excluded)
+        backup = self.store.backup()
+        all_people = policy('all',[])
+        check(all_people,['Ana','Bo'],['A','B','D'],4,6600,0)
+        invalid = [{'mode':'other','names':[]}, {'mode':'include','names':'Ana'}, {'mode':'exclude','names':[]},
+                   {'mode':'all','names':[],'groupBy':'AG'}, {'mode':'all'}, {'mode':'include','names':[7]}]
+        for args in invalid:
+            with self.subTest(args=args), self.assertRaises(HTTPError) as err:
+                self.call(BASE+'/al-policy','POST',args)
+            self.assertEqual(err.exception.code,400)
+        self.assertEqual(self.call(BASE),all_people)
+        self.store.restore(backup)
+        restored = self.call(BASE)
+        self.assertEqual(restored['alPolicy'],excluded['alPolicy'])
+        self.assertNotEqual(restored['revision'],excluded['revision'])
+        check(restored,['Bo'],['B'],1,1800,2)
+        cleared = self.call(BASE,'DELETE')
+        self.assertEqual((cleared['totalJobs'],cleared['alPolicy']),(0,excluded['alPolicy']))
+
+    def test_ag_only_archive_preserves_alarm_ledger_but_never_treats_ag_as_al(self):
+        alarms = alarm_sheet(('26540','00:25:00','2026-10-20','J1'))
+        self.call(self.stage(alarms)+'/import','POST',{'allowlist':'26540'})
+        pre_al = {'alarm_mttr_allowlist','alarm_mttr_rows','alarm_mttr_last_import','alarm_mttr_job_owners',
+                  'alarm_mttr_job_links','alarm_mttr_job_import','alarm_mttr_job_max','alarm_mttr_revision'}
+        def add_legacy_owner(db):
+            db.execute('INSERT INTO alarm_mttr_job_owners VALUES(?,?)',('J1','Legacy dispatcher'))
+            stats = {'filename':'legacy.xlsx','sheetName':'Sheet1','importedAt':'2026-10-20T12:30:00+00:00',
+                     'sourceRows':1,'missingJobIds':0,'missingAssignees':0,'validRows':1,'duplicateRows':0,'mappedJobs':1}
+            db.execute('INSERT INTO alarm_mttr_job_import VALUES(1,?)',(json.dumps(stats),))
+        self.restore_older_schema(pre_al,add_legacy_owner)
+        source = self.call(BASE)
+        self.assertEqual((source['mappedJobs'],source['unassignedJobs'],source['totalJobs'],source['storedRows']), (0,1,0,1))
+        self.assertEqual(source['alPolicy'],{'mode':'all','names':[]})
+        self.assertFalse(source['needsAlarmReimport'])
+        ag_only = workbook([{'C':'Job ID','AG':'jb_assign_to'}, {'C':'J1','AG':'Legacy dispatcher'}])
+        with self.assertRaises(HTTPError) as exc:
+            self.call(self.stage(ag_only,'ag-only.xlsx',True)+'/import','POST',{})
+        self.assertEqual(exc.exception.code,400)
+        self.assertEqual(self.call(BASE),source)
+        al = workbook([{'C':'Job ID','AL':'AL person'}, {'C':'J1','AL':'Field engineer'}])
+        fixed = self.call(self.stage(al,'al.xlsx',True)+'/import','POST',{})
+        self.assertEqual((fixed['totalJobs'],fixed['totalAlarms'],fixed['assignees']), (1,1,['Field engineer']))
+        self.assertEqual(fixed['days'],[{'date':'2026-10-20','count':1,'totalSeconds':1500}])
+
     def test_v4_backup_does_not_invent_job_ids_and_original_export_relinks_rows(self):
         data=alarm_sheet(('26540','00:05:10','2026-10-19','J1'),('26540','00:07:00','2026-10-21','J1'))
         current=self.call(self.stage(data)+'/import','POST',{'allowlist':'26540'})
         # Recreate the v2.0 SQLite layout exactly: the old ledger held only a
         # row signature/category/date/duration, leaving Job IDs unrecoverable.
-        with zipfile.ZipFile(io.BytesIO(self.store.backup())) as bundle:
-            manifest=bundle.read('manifest.json')
-            path=Path(self.tmp.name)/'v4.db';path.write_bytes(bundle.read('report.db'))
-        old_tables={'alarm_mttr_allowlist','alarm_mttr_rows','alarm_mttr_last_import'}
-        db=sqlite3.connect(path)
-        try:
-            with db:
-                for name in alarm_mttr.ALARM_TABLES-old_tables:
-                    db.execute('DROP TABLE '+name)
-        finally:db.close()
-        archive=io.BytesIO()
-        with zipfile.ZipFile(archive,'w') as bundle:
-            bundle.writestr('manifest.json',manifest);bundle.writestr('report.db',path.read_bytes())
-        self.store.restore(archive.getvalue())
+        self.restore_older_schema({'alarm_mttr_allowlist','alarm_mttr_rows','alarm_mttr_last_import'})
         archived=self.call(BASE)
         self.assertTrue(archived['needsAlarmReimport'])
         self.assertEqual((archived['totalJobs'],archived['days'],archived['legacyUnlinkedRows']), (0,[],2))
@@ -290,7 +373,7 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertFalse(recovered['needsAlarmReimport'])
         self.assertEqual((recovered['totalJobs'],recovered['legacyUnlinkedRows'],recovered['totalAlarms'],recovered['unassignedJobs']), (0,0,0,1))
         self.assertEqual(recovered['days'],current['days'])
-        owners=workbook([{'C':'Job ID','AG':'jb_assign_to'},{'C':'J1','AG':'Alice'}])
+        owners=workbook([{'C':'Job ID','AL':'AL person'},{'C':'J1','AL':'Alice'}])
         restored=self.call(self.stage(owners,'jobs.xlsx',True)+'/import','POST',{})
         self.assertEqual((restored['totalJobs'],restored['totalAlarms'],restored['unassignedJobs']), (1,2,0))
         self.assertEqual(restored['days'],[{'date':'2026-10-21','count':1,'totalSeconds':420}])

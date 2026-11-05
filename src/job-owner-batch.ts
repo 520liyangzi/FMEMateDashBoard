@@ -7,9 +7,11 @@ export type JobOwnerBatchEvent = {index:number; file:File} & (
 );
 
 function checkReceipt(dataset:JobProxyMttrDataset,file:File){
-  const info=dataset?.lastJobImport;
+  const info=dataset?.lastJobImport,policy=dataset?.alPolicy;
   const count=(v:unknown)=>typeof v==='number'&&Number.isSafeInteger(v)&&v>=0;
   if(dataset?.formatVersion!==5||dataset.source!=='alarm-jobs'||!info||
+      !policy||!['all','include','exclude'].includes(policy.mode)||!Array.isArray(policy.names)||
+      !policy.names.every(n=>typeof n==='string')||
       info.filename!==file.name.replaceAll('\\','/').split('/').pop()||
       !Array.isArray(dataset.allowlist)||!Array.isArray(dataset.days)||!Array.isArray(dataset.personDays)||
       ![dataset.mappedJobs,dataset.totalJobs,dataset.totalAlarms,dataset.storedRows,dataset.unassignedJobs,

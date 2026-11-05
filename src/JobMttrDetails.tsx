@@ -4,7 +4,7 @@ import {
   filterJobProxyDetails,loadJobProxyDetailPage,
   type JobProxyDetailPage,type JobProxyDetailRow,
 } from '../lib/job-mttr-details';
-import type {JobProxyMttrDataset,JobProxyMttrComparison} from '../lib/alarm-mttr';
+import {getJobProxyAxis,type JobProxyMttrDataset,type JobProxyMttrComparison} from '../lib/alarm-mttr';
 import type {MttrAggregate} from '../lib/mttr';
 import type {AlarmApi} from './alarm-upload';
 
@@ -65,8 +65,8 @@ function DetailPeriod({t,data,assignees,api,offline,offlineRows,formatDuration,t
     :mismatch?<p className="job-detail-state" role="alert">{offline?t('快照中的明细与汇总不一致，请重新导出。','Snapshot details do not match the totals. Export a new snapshot.'):t('数据已更新。请刷新报表，重新查看汇总与明细。','Data has changed. Refresh the report to see the latest totals and details.')}</p>
     :!response?<p className="job-detail-state" role="status">{t('正在加载工单…','Loading Jobs…')}</p>
     :<>
-      <div className="job-detail-rows"><table aria-label={title}><thead><tr><th scope="col">Job ID</th><th scope="col">{t('处理人','Assignee')}</th><th scope="col">{t('最长告警日期','Longest alarm date')}</th><th scope="col">MTTR <small>({t('时:分:秒','h:mm:ss')})</small></th></tr></thead>
-        <tbody>{response.rows.map(r=><tr key={r.jobId}><th scope="row">{r.jobId}</th><td>{r.assignee}</td><td>{r.date}</td><td>{formatDuration(r.seconds)}</td></tr>)}</tbody></table></div>
+      <div className="job-detail-rows"><table aria-label={title}><thead><tr><th scope="col">Job ID</th><th scope="col">{getJobProxyAxis(data)==='AG'?t('历史人员','Historical assignee'):t('AL 人员','AL person')}</th><th scope="col">{t('最长告警日期','Longest alarm date')}</th><th scope="col">MTTR <small>({t('时:分:秒','h:mm:ss')})</small></th></tr></thead>
+        <tbody>{response.rows.map(r=><tr key={r.jobId}><th scope="row">{r.jobId}</th><td>{getJobProxyAxis(data)==='AG'?r.assignee:(r.alPerson??r.assignee)}</td><td>{r.date}</td><td>{formatDuration(r.seconds)}</td></tr>)}</tbody></table></div>
       <div className="job-detail-pages"><small aria-live="polite">{pageInfo}</small><div className="screen-only">
         <button type="button" aria-label={`${title} · ${t('上一页','Previous page')}`} className="btn" disabled={index===0} onClick={()=>setPage(index-1)}><ChevronLeft size={15}/></button>
         <button type="button" aria-label={`${title} · ${t('下一页','Next page')}`} className="btn" disabled={index>=lastPage} onClick={()=>setPage(index+1)}><ChevronRight size={15}/></button></div></div>

@@ -1,6 +1,6 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
 import { compareMttr, previousMttrPeriod, analyzeMttrPeople, selectMttrDayScope, selectMttrScope, filterMttrPeopleByGap, type MttrDataset, type MttrPeriod } from './mttr.ts';
-import { compareAlarmMttr, compareJobProxyMttr, rankJobProxyMttr, resolveJobProxyScope, type JobProxyMttrDataset, type AlarmMttrDataset } from './alarm-mttr.ts';
+import { compareAlarmMttr, compareJobProxyMttr, getJobAlPolicy, getJobProxyAxis, rankJobProxyMttr, resolveJobProxyScope, type JobProxyMttrDataset, type AlarmMttrDataset } from './alarm-mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -46,7 +46,7 @@ export type AiFactsInput = {
 
 const LIMITS = {
   topUsers: 10, repeatUsageUsers: 10, topQuestions: 20, customQuestions: 10, customAuthors: 10,
-  mttrPeople: 20, mttrUnrankedPeople: 10, mttrGapExamples: 20, failureExamples: 10, feedback: 10, daily: 31, retentionDaily: 31, communityRecords: 31, scenes: 20,
+  alPolicyNames: 40, mttrPeople: 20, mttrUnrankedPeople: 10, mttrGapExamples: 20, failureExamples: 10, feedback: 10, daily: 31, retentionDaily: 31, communityRecords: 31, scenes: 20,
   questionCharacters: 1200, answerCharacters: 2000, reasonCharacters: 1000,
   feedbackCharacters: 1200, identifierCharacters: 200, sceneCharacters: 200,
 } as const;
@@ -82,6 +82,7 @@ function jobProxyEvidence(
   assignees:readonly string[]|null, clip:(s:string,limit:number,field:string)=>string,
 ) {
   if (data?.formatVersion!==5 || data.source!=='alarm-jobs') data=null;
+  const personnelColumn=getJobProxyAxis(data),policy=getJobAlPolicy(data),usesAL=personnelColumn==='AL';
   const names=resolveJobProxyScope(data,assignees,baseline,current);
   const comparison=compareJobProxyMttr(data,baseline,current,names);
   const measured=comparison.status!=='no_dataset' && comparison.status!=='invalid_range' && comparison.status!=='alarm_reimport_required';
@@ -99,9 +100,12 @@ function jobProxyEvidence(
     }));
   }
   return {
-    ...comparison,baseline:period(comparison.baseline),current:period(comparison.current),businessRule:JOB_PROXY_MTTR_RULE,cohortRule:JOB_PROXY_COHORT_RULE,
+    ...comparison,baseline:period(comparison.baseline),current:period(comparison.current),businessRule:JOB_PROXY_MTTR_RULE,cohortRule:JOB_PROXY_COHORT_RULE,personnelColumn,
+    alPolicy:policy?{mode:policy.mode,names:policy.names.slice(0,LIMITS.alPolicyNames).map((v,i)=>name(v,'alPolicy.names['+i+']')),
+      totalNames:policy.names.length,omittedNames:Math.max(0,policy.names.length-LIMITS.alPolicyNames)}:null,
+    alDiagnostics:usesAL&&data?.alDiagnostics?{missingALJobs:data.alDiagnostics.missingALJobs,filteredOutJobs:data.alDiagnostics.filteredOutJobs}:null,
     selectedScope:{
-      type:names===null?'all_matched_owners':!names.length?'none':names.length===1?'single':'group',
+      type:names===null?(usesAL?'all_named_people_under_AL_policy':'all_matched_owners'):!names.length?'none':names.length===1?'single':'group',
       selectedCount:names?.length??null, includesUnassigned:false,
       names:names?.slice(0,LIMITS.mttrPeople).map((v,i)=>name(v,'selectedScope.names['+i+']'))??null,
       omittedNames:Math.max(0,(names?.length??0)-LIMITS.mttrPeople),
@@ -112,12 +116,13 @@ function jobProxyEvidence(
       scope:'Same selected population and periods as the comparison. Ranked by signed reduction percentage; only named people with computable comparisons. Samples are bounded; people with no eligible Jobs in either period are omitted; owners with Jobs in just one period are unranked.',
     },
     dataQuality:{
-      jobOwnerMappingsInCatalogue:data?.mappedJobs??null, excludedJobsWithoutNamedOwnerAcrossAllDates:data?.unassignedJobs??null,
+      jobOwnerMappingsInCatalogue:data?.mappedJobs??null,
+      ...(usesAL?{}:{excludedJobsWithoutNamedOwnerAcrossAllDates:data?.unassignedJobs??null}),
       countsScope:'The mapping catalogue can contain Jobs with no eligible alarms. Catalogue size and all-history exclusion counts are not period Job counts.',
       allowlistSize:data?.allowlist.length??0,needsAlarmReimport:data?.needsAlarmReimport??false,
       legacyUnlinkedRows:data?.legacyUnlinkedRows??null,jobMapImported:!!data?.lastJobImport,
     },
-    method:'Use alarm rows whose B code is allowed, I duration is positive, K date valid and AE Job ID nonblank. For each Job take the longest eligible duration globally, assign that Job once to the K date of its maximum (earliest K when tied). Link alarm AE to Job C for owner AG. All scopes exclude Jobs without a matched named owner. The excluded count is an all-history import diagnostic, never a period denominator. Counts are Jobs and means are summed Job maxima divided by Job count. Do not average person means or percentages.',
+    method:(usesAL?'Join alarm AE to Job C; use Job AL exclusively for the personnel policy, selection and ranking. All retains named AL people; include keeps the configured list; exclude removes it. Missing or unmatched AL and Jobs removed by the policy are excluded. The policy is applied before the optional report selection. ':'Historical Job-owner mapping: join alarm AE to Job C for its recorded AG owner. Preserve this snapshot’s original personnel column. ')+'Use alarm rows whose B code is allowed, I duration is positive, K date valid and AE Job ID nonblank. For each Job take the longest eligible duration globally, assign that Job once to the K date of its maximum (earliest K when tied). All scopes exclude Jobs without a matched named owner. The excluded count is an all-history import diagnostic, never a period denominator. Counts are Jobs and means are summed Job maxima divided by Job count. Do not average person means or percentages.',
     limitations:'This estimates MTTR with a duration proxy, not actual ticket elapsed time or labor savings. Differences in case mix, sample sizes and coverage preclude attributing change to FMEMate. Incomplete migrations exclude unlinked legacy alarms; reimport original alarm workbooks for full history.',
   };
 }

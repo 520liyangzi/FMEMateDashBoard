@@ -2,6 +2,8 @@
 export type JobProxyDetailRow = {
   jobId: string; assignee: string; date: string; seconds: number;
   alarmId?: string; alarmCount?: number;
+  /** Present for new AL reports; older snapshots only have their historical assignee. */
+  alPerson?: string;
 }
 export type JobProxyDetailFilter = {from?: string; to?: string; assignees?: readonly string[] | null}
 export type JobProxyDetailPage = {rows: JobProxyDetailRow[]; total: number; totalSeconds: number; revision?: string}
@@ -38,6 +40,7 @@ function isRow(row: unknown): row is JobProxyDetailRow {
   const value = row as Partial<JobProxyDetailRow>
   return typeof value.jobId === 'string' && value.jobId.length > 0 && typeof value.assignee === 'string' &&
     isDate(value.date) && typeof value.seconds === 'number' && Number.isFinite(value.seconds) && value.seconds > 0 &&
+    (value.alPerson === undefined || (value.alPerson === value.assignee && value.alPerson.trim().length > 0)) &&
     (value.alarmId === undefined || typeof value.alarmId === 'string') &&
     (value.alarmCount === undefined || (Number.isSafeInteger(value.alarmCount) && value.alarmCount > 0))
 }

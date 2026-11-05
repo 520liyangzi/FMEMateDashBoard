@@ -240,7 +240,7 @@ test('alarm MTTR prompt explains source columns, occurrence dates, valid row mea
 test('job proxy prompt scopes ranking, names the occurrence date tie rule and flags incomplete migration', ()=>{
   const data=buildAiFacts({records:[],presets:[],groups:[],feedback:[],failureNotes:{},from:'2026-10-01',to:'2026-10-08',scene:'',demo:false,alarmJobMttr:null,selectedAssignees:[]});
   const prompt=buildAiReportPrompt(data);
-  for (const marker of [/每个工单只计一次/,/最长时长并列时取最早 K 日期/,/告警表 AE 关联 Job 表 C，AG 是处理人/,/不能平均各人或各日均值/,/所选范围中的具名处理人/,/needsAlarmReimport/,/不能归因于 FMEMate/]) assert.match(prompt,marker);
+  for (const marker of [/每个工单只计一次/,/最长时长并列时取最早 K 日期/,/所有人员选择和排名只用 Job 表 AL 列/,/不能平均各人或各日均值/,/所选范围中的具名处理人/,/needsAlarmReimport/,/不能归因于 FMEMate/]) assert.match(prompt,marker);
   assert.doesNotMatch(prompt,/分母是有效告警行数|必须说明 calendarDayFilter|Radio-OSP|不.*产出人员排行/);
 });
 
@@ -252,7 +252,11 @@ test('new proxy prompts explicitly exclude unmatched Jobs while archived proxy e
  assert.doesNotMatch(fresh,/全部工单可含未分配/);
  const archived=structuredClone(data);
  delete (archived.effectiveness.mttr as {cohortRule?:string}).cohortRule;
+ delete (archived.effectiveness.mttr as {personnelColumn?:string}).personnelColumn;
  const prior=buildAiReportPrompt(archived);
  assert.match(prior,/这份历史快照的全部工单可含未分配/);
+ assert.match(prior,/AG 是处理人/);assert.doesNotMatch(prior,/所有人员选择和排名只用 Job 表 AL 列/);
+ assert.match(fresh,/include 仅保留名单内人员，exclude 排除名单内人员/);
+ assert.match(fresh,/所有日期的诊断数，不是本期分母/);assert.doesNotMatch(fresh,/AG 是处理人/);
  assert.doesNotMatch(prior,/整体也排除未匹配或未分配的工单/);
 });

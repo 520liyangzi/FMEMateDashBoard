@@ -27,7 +27,7 @@ test('detail sheets match weighted group means in the period comparison and iden
   assert.deepEqual(base.slice(1).map(r=>r['Job ID']).sort(),['0001','0002','0003']);
   assert.deepEqual(cur.slice(1).map(r=>r['Job ID']).sort(),['0005','0006']);
   const long=cur.find(r=>r['Job ID']==='0006')!;
-  assert.deepEqual([long.Assignee,long['Winning alarm date (K)'],long['Longest eligible duration (seconds)'],long['Longest eligible duration (hh:mm:ss)']],['Lin',b,100800,'28:00:00']);
+  assert.deepEqual([long['Assignee (historical Job AG)'],long['Winning alarm date (K)'],long['Longest eligible duration (seconds)'],long['Longest eligible duration (hh:mm:ss)']],['Lin',b,100800,'28:00:00']);
 });
 test('empty periods retain scope and dates; even all owners exclude unmapped Jobs in old snapshots',()=>{
  const empty=jobMttrSheets(data,baseline,current,[],'zh',detail);
@@ -37,7 +37,7 @@ test('empty periods retain scope and dates; even all owners exclude unmapped Job
  const all=jobMttrSheets(data,baseline,current,null,'en',detail).find(s=>s.name==='Baseline Job details')!.rows;
  assert.equal(all[0]['Eligible Jobs'],3);assert.equal(all[0]['Mean MTTR (seconds)'],360);
  assert.equal(all[0]['Excluded Jobs without matched owners (all dates)'],1);
- assert.equal(all[0]['Owner selection'],'All matched owners');assert.equal(all.some(r=>r['Job ID']==='0004'),false);
+ assert.equal(all[0]['Owner selection'],'All matched owners (historical AG)');assert.equal(all.some(r=>r['Job ID']==='0004'),false);
  const noSource=jobMttrSheets(null,baseline,current,null,'en',[])[1].rows;
  assert.deepEqual([noSource[0]['Eligible Jobs'],noSource[0]['Mean MTTR (seconds)'],noSource[0]['Comparison status']],['','','no_dataset']);
 });
@@ -70,5 +70,23 @@ test('direct export drops out-of-period, catalogue-only and blank names while ke
  const sheets=jobMttrSheets(mixed,baseline,current,['Ada','Old','Catalogue only',''], 'en',[...detail,oldJob]);
  assert.equal(sheets[1].rows[0]['Owner selection'],'Ada');assert.equal(sheets[1].rows[0]['Eligible Jobs'],0);
  assert.deepEqual(sheets[2].rows.slice(1).map(r=>r['Job ID']),['0007']);
- assert.deepEqual(sheets[3].rows.map(r=>[r.Assignee,r.Rank,r['Reduction (%)']]),[['Ada','','']]);
+ assert.deepEqual(sheets[3].rows.map(r=>[r['Assignee (historical Job AG)'],r.Rank,r['Reduction (%)']]),[['Ada','','']]);
+});
+
+test('AL snapshot uses the persisted list and AL-only scope for detail rows, ranked names and diagnostics',()=>{
+ // Source Job C/AG/AL differ. Import contract: assignee carries AL, never the old AG value.
+ const jobs=detail.map(r=>({C:r.jobId,AG:'Different AG owner',AL:r.assignee}));
+ const rows=detail.filter(r=>r.assignee==='Mei').map(r=>({...r,assignee:jobs.find(j=>j.C===r.jobId)!.AL,alPerson:'Mei'}));
+ const snapshot={...data,alPolicy:{mode:'include' as const,names:['Mei','Inactive, named']},alDiagnostics:{missingALJobs:1,filteredOutJobs:3},
+  totalJobs:3,unassignedJobs:1,days:[{date:a,count:2,totalSeconds:180},{date:b,count:1,totalSeconds:300}],personDays:data.personDays.filter(p=>p.assignee==='Mei')};
+ const sheets=jobMttrSheets(snapshot,baseline,current,['Different AG owner','Mei'],'en',rows);
+ const base=sheets[1].rows,cur=sheets[2].rows;
+ for(const summary of [sheets[0].rows[0],base[0],cur[0]]){
+   assert.deepEqual([summary['Owner selection'],summary['Job personnel column'],summary['Applied AL mode'],JSON.parse(String(summary['Configured AL names (JSON)']))],['Mei','AL','include',['Mei','Inactive, named']]);
+   assert.deepEqual([summary['Jobs without a matched AL person (all dates)'],summary['Jobs filtered by AL policy (all dates)']],[1,3]);
+ }
+ assert.deepEqual(base.slice(1).map(r=>r['Job AL person']),['Mei','Mei']);
+ assert.equal(sheets[3].rows[0]['Job AL person'],'Mei');assert.ok(!JSON.stringify(sheets).includes('Different AG owner'));
+ const historical=jobMttrSheets(data,baseline,current,null,'en',detail)[0].rows[0];
+ assert.equal(historical['Job personnel column'],'AG');assert.equal(historical['Applied AL mode'],undefined);
 });

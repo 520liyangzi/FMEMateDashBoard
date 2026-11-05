@@ -1,6 +1,6 @@
 """Work-order MTTR based on the maximum eligible alarm duration per Job ID.
 
-Only Jobs with an eligible alarm and a named C -> AG owner enter the report.
+Only Jobs with an eligible alarm and a named C -> AL person enter the report.
 Unmatched Jobs stay in the alarm ledger for later mapping. A Job belongs to the
 occurrence date of its longest eligible alarm (earliest such date in a tie).
 
@@ -19,6 +19,7 @@ from pathlib import PurePosixPath
 import re
 import sqlite3
 import tempfile
+import unicodedata
 from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile
 from mttr_import import (MttrImportError, MAX_ROWS, column_index, csv_rows, excel_time,
@@ -29,7 +30,8 @@ JOB_TABLES = {'alarm_mttr_job_links','alarm_mttr_job_owners','alarm_mttr_job_imp
 # The two cache tables can always be rebuilt from the validated ledger; old
 # backups do not need them and restored backups never supply their values.
 CACHE_TABLES = {'alarm_mttr_job_max','alarm_mttr_revision'}
-ALARM_TABLES = V4_TABLES | JOB_TABLES | CACHE_TABLES
+AL_TABLES = {'alarm_mttr_job_al','alarm_mttr_al_people','alarm_mttr_al_policy','alarm_mttr_al_names'}
+ALARM_TABLES = V4_TABLES | JOB_TABLES | CACHE_TABLES | AL_TABLES
 _WRITE_MAX = """
 INSERT OR REPLACE INTO alarm_mttr_job_max(job_id,day,seconds,alarm_count,alarm_id)
 SELECT job_id,day,seconds,alarm_count,alarm_id FROM (
@@ -53,6 +55,11 @@ CREATE TABLE IF NOT EXISTS alarm_mttr_job_links (signature TEXT PRIMARY KEY, job
 CREATE INDEX IF NOT EXISTS alarm_mttr_job_link_idx ON alarm_mttr_job_links(job_id);
 CREATE TABLE IF NOT EXISTS alarm_mttr_job_owners (job_id TEXT PRIMARY KEY,assignee TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS alarm_mttr_job_import (id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
+-- Keep previous AG mappings intact; they do not identify who appears in AL.
+CREATE TABLE IF NOT EXISTS alarm_mttr_job_al (job_id TEXT PRIMARY KEY,person_key TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alarm_mttr_al_people (person_key TEXT PRIMARY KEY,assignee TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alarm_mttr_al_policy (id INTEGER PRIMARY KEY CHECK(id=1),mode TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alarm_mttr_al_names (person_key TEXT PRIMARY KEY,name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS alarm_mttr_job_max (
     job_id TEXT PRIMARY KEY, day TEXT NOT NULL, seconds REAL NOT NULL,
     alarm_count INTEGER NOT NULL, alarm_id TEXT NOT NULL
@@ -117,16 +124,58 @@ def _refresh_max(db):
     db.execute(_NEW_REVISION)
 
 
-# Share the same inner join for the overall report, named scopes and Job detail
-# exports. Keep the wider winner cache so joining a later Job file is immediate.
-_REPORT_COHORT = """ FROM alarm_mttr_job_max m JOIN alarm_mttr_job_owners o
-                      ON o.job_id=m.job_id AND trim(o.assignee)<>''"""
+def _display_name(value):
+    return ' '.join(unicodedata.normalize('NFKC',value).split()) if isinstance(value,str) else ''
+
+
+def _policy_names(values):
+    if not isinstance(values,list) or len(values)>MAX_IDS:
+        raise MttrImportError('名单最多可配置 10,000 人 / Provide up to 10,000 AL names.')
+    names={}
+    for value in values:
+        if not isinstance(value,str) or len(value)>512:
+            raise MttrImportError('AL 姓名无效 / Invalid AL name (max 512 characters).')
+        name=_display_name(value)
+        if name and not _valid_value(name):
+            raise MttrImportError('AL 姓名无效 / Invalid AL name.')
+        if name:names.setdefault(name.casefold(),name)
+    return names
+
+
+def get_al_policy(db):
+    mode=db.execute('SELECT mode FROM alarm_mttr_al_policy WHERE id=1').fetchone()
+    return dict(mode=mode[0] if mode else 'all',
+                names=[r[0] for r in db.execute('SELECT name FROM alarm_mttr_al_names ORDER BY rowid')])
+
+
+def set_al_policy(db,policy):
+    if not isinstance(policy,dict) or set(policy)!={'mode','names'} or policy['mode'] not in ('all','include','exclude'):
+        raise MttrImportError('AL 筛选设置无效 / Invalid AL filter; use all, include, or exclude.')
+    names=_policy_names(policy['names'])
+    if policy['mode']!='all' and not names:
+        raise MttrImportError('启用 AL 名单时至少填写一人 / Include and exclude require at least one name.')
+    db.execute('INSERT OR REPLACE INTO alarm_mttr_al_policy VALUES(1,?)',(policy['mode'],))
+    db.execute('DELETE FROM alarm_mttr_al_names')
+    db.executemany('INSERT INTO alarm_mttr_al_names VALUES(?,?)',names.items())
+    db.execute(_NEW_REVISION)
+    return get_dataset(db)
+
+
+_NAMED_COHORT = """ FROM alarm_mttr_job_max m JOIN alarm_mttr_job_al j ON m.job_id=j.job_id
+                     JOIN alarm_mttr_al_people o ON o.person_key=j.person_key"""
+
+
+def _report_cohort(mode):
+    if mode=='include':return _NAMED_COHORT+' JOIN alarm_mttr_al_names n ON n.person_key=j.person_key'
+    if mode=='exclude':return _NAMED_COHORT+' AND NOT EXISTS (SELECT 1 FROM alarm_mttr_al_names n WHERE n.person_key=j.person_key)'
+    return _NAMED_COHORT
 
 
 def get_dataset(db):
     ids=[r[0] for r in db.execute('SELECT alarm_id FROM alarm_mttr_allowlist ORDER BY rowid')]
+    policy=get_al_policy(db)
     winners = db.execute(f"""
-        SELECT m.day,o.assignee,count(*),sum(m.seconds),sum(m.alarm_count) {_REPORT_COHORT}
+        SELECT m.day,o.assignee,count(*),sum(m.seconds),sum(m.alarm_count) {_report_cohort(policy['mode'])}
         GROUP BY m.day,o.assignee ORDER BY m.day,o.assignee
     """)
     days_by_date,persons={},[]
@@ -144,11 +193,13 @@ def get_dataset(db):
           FROM alarm_mttr_rows r LEFT JOIN alarm_mttr_job_links l USING(signature)""").fetchone()
     last=db.execute('SELECT data FROM alarm_mttr_last_import WHERE id=1').fetchone()
     mapping=db.execute('SELECT data FROM alarm_mttr_job_import WHERE id=1').fetchone()
-    unassigned=db.execute('SELECT count(*) FROM alarm_mttr_job_max').fetchone()[0]-jobs
+    matched=jobs if policy['mode']=='all' else db.execute('SELECT count(*)'+_NAMED_COHORT).fetchone()[0]
+    unassigned=db.execute('SELECT count(*) FROM alarm_mttr_job_max').fetchone()[0]-matched
     return dict(formatVersion=5,source='alarm-jobs',allowlist=ids,days=days,personDays=persons,assignees=sorted(people),
+                alPolicy=policy,alDiagnostics=dict(missingALJobs=unassigned,filteredOutJobs=matched-jobs),
                 revision=db.execute('SELECT token FROM alarm_mttr_revision WHERE id=1').fetchone()[0],
                 totalAlarms=alarms,totalJobs=jobs,storedRows=stored,unassignedJobs=unassigned,
-                mappedJobs=db.execute('SELECT count(*) FROM alarm_mttr_job_owners').fetchone()[0],
+                mappedJobs=db.execute('SELECT count(*) FROM alarm_mttr_job_al').fetchone()[0],
                 legacyUnlinkedRows=unlinked,needsAlarmReimport=bool(unlinked),
                 earliestDate=days[0]['date'] if days else None,latestDate=days[-1]['date'] if days else None,
                 lastImport=json.loads(last[0]) if last else None,lastJobImport=json.loads(mapping[0]) if mapping else None)
@@ -156,7 +207,7 @@ def get_dataset(db):
 
 def clear_alarm(db):
     for table in ('alarm_mttr_job_links','alarm_mttr_rows','alarm_mttr_last_import',
-                  'alarm_mttr_job_owners','alarm_mttr_job_import'):
+                  'alarm_mttr_job_owners','alarm_mttr_job_import','alarm_mttr_job_al','alarm_mttr_al_people'):
         db.execute('DELETE FROM '+table)
     _refresh_max(db)
     return get_dataset(db)
@@ -169,7 +220,7 @@ def _job_key(value):
 
 
 def _valid_value(v):
-    return isinstance(v,str) and 0<len(v)<=512 and v==v.strip() and not re.search(r'[\x00-\x1f]',v)
+    return isinstance(v,str) and 0<len(v)<=512 and v==v.strip() and not re.search(r'[\x00-\x1f\ud800-\udfff]',v)
 
 
 def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=0,limit=100):
@@ -200,19 +251,20 @@ def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=
         clauses.append('m.day>=:since');args['since']=date_from
     if date_to:
         clauses.append('m.day<=:until');args['until']=date_to
-    people=None if assignees is None else list(dict.fromkeys(assignees))
+    people=None if assignees is None else list(dict.fromkeys(_display_name(n).casefold() for n in assignees))
     large_scope=people is not None and len(people)>300
     if large_scope:
         # Older SQLite builds have a 999-bind limit. The temporary lookup also
         # keeps the same query plan for large scopes, without relying on JSON1.
-        clauses.append("o.assignee IN (SELECT name FROM temp.alarm_mttr_detail_scope)")
+        clauses.append("j.person_key IN (SELECT name FROM temp.alarm_mttr_detail_scope)")
     elif people:
         keys=['p'+str(i) for i in range(len(people))]
-        clauses.append("o.assignee IN ("+','.join(':'+key for key in keys)+')')
+        clauses.append("j.person_key IN ("+','.join(':'+key for key in keys)+')')
         args.update(zip(keys,people))
     elif people==[]:
         clauses.append('0')
-    source=_REPORT_COHORT
+    mode=db.execute('SELECT mode FROM alarm_mttr_al_policy WHERE id=1').fetchone()
+    source=_report_cohort(mode[0] if mode else 'all')
     if clauses:source+=' WHERE '+' AND '.join(clauses)
     # Totals and page use one read snapshot. The page can use (day DESC,job_id)
     # directly; an empty or out-of-range page still returns its full totals.
@@ -231,7 +283,7 @@ def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=
         records=db.execute(query,args).fetchall()
     finally:
         if large_scope:db.execute('DROP TABLE temp.alarm_mttr_detail_scope')
-    rows=[dict(jobId=r[3],assignee=r[4],date=r[5],seconds=r[6],alarmCount=r[7],alarmId=r[8])
+    rows=[dict(jobId=r[3],assignee=r[4],alPerson=r[4],date=r[5],seconds=r[6],alarmCount=r[7],alarmId=r[8])
           for r in records if r[3] is not None]
     return dict(rows=rows,total=records[0][0],totalSeconds=records[0][1],revision=records[0][2],
                 offset=offset,limit=limit)
@@ -244,37 +296,40 @@ JOB_QUALITY=('sourceRows','missingJobIds','missingAssignees','validRows','duplic
 def stage_job_import(content,filename):
     """Validate the entire mapping before changing the existing catalogue."""
     with tempfile.TemporaryDirectory(prefix='fmemate-job-owner-') as tmp, closing(sqlite3.connect(tmp+'/owners.db')) as staged:
-        staged.execute('CREATE TABLE owners(job_id TEXT PRIMARY KEY, assignee TEXT NOT NULL)')
+        staged.execute('CREATE TABLE owners(job_id TEXT PRIMARY KEY,person_key TEXT NOT NULL,assignee TEXT NOT NULL)')
         with _rows(content,filename) as (name,meta,rows):
             stats=dict.fromkeys(JOB_QUALITY,0)
-            stats.update(filename=name,sheetName=meta['sheetName'],importedAt=datetime.now(timezone.utc).isoformat())
+            stats.update(filename=name,sheetName=meta['sheetName'],importedAt=datetime.now(timezone.utc).isoformat(),personColumn='AL')
             for row in rows:
                 if row['_row']==1:continue
                 stats['sourceRows']+=1
                 job=_job_key(row.get('C',''))
                 if not _valid_value(job):stats['missingJobIds']+=1;continue
-                person=str(row.get('AG','')).strip()
+                person=_display_name(row.get('AL',''))
                 if not _valid_value(person):stats['missingAssignees']+=1;continue
+                key=person.casefold()
                 stats['validRows']+=1
-                cur=staged.execute('INSERT OR IGNORE INTO owners VALUES(?,?)',(job,person))
+                cur=staged.execute('INSERT OR IGNORE INTO owners VALUES(?,?,?)',(job,key,person))
                 if cur.rowcount:
                     stats['mappedJobs']+=1
                 else:
-                    prev=staged.execute('SELECT assignee FROM owners WHERE job_id=?',(job,)).fetchone()[0]
-                    if prev!=person:
-                        raise MttrImportError(f'工单 {job} 在同一份表中有多个处理人，请确认唯一处理人后重新导入。 / Conflicting assignees for Job {job}; mapping unchanged.')
+                    prev=staged.execute('SELECT person_key FROM owners WHERE job_id=?',(job,)).fetchone()[0]
+                    if prev!=key:
+                        raise MttrImportError(f'工单 {job} 在同一份表中有多个 AL 人员，请核对后导入。 / Conflicting AL names for Job {job}; mapping unchanged.')
                     stats['duplicateRows']+=1
         if not stats['mappedJobs']:
-            raise MttrImportError('没有可关联的工单，请检查 C 列 Job ID 和 AG 列处理人。 / No rows with Job ID in C and assignee in AG. Mapping unchanged.',{'source':'job-owners','lastJobImport':stats})
+            raise MttrImportError('没有可关联的工单，请检查 C 列 Job ID 和 AL 列人员（AG 不参与）。 / No rows with a Job ID in C and a name in AL. Mapping unchanged.',{'source':'job-owners','lastJobImport':stats})
         yield stats,staged
 
 
 def merge_job_import(db,staged):
     stats,incoming=staged
-    db.executemany("""INSERT INTO alarm_mttr_job_owners VALUES(?,?)
-            ON CONFLICT(job_id) DO UPDATE SET assignee=excluded.assignee
-            WHERE alarm_mttr_job_owners.assignee<>excluded.assignee""",
-            incoming.execute('SELECT job_id,assignee FROM owners'))
+    db.executemany('INSERT OR IGNORE INTO alarm_mttr_al_people VALUES(?,?)',
+                   incoming.execute('SELECT person_key,assignee FROM owners ORDER BY rowid'))
+    db.executemany("""INSERT INTO alarm_mttr_job_al VALUES(?,?)
+            ON CONFLICT(job_id) DO UPDATE SET person_key=excluded.person_key
+            WHERE alarm_mttr_job_al.person_key<>excluded.person_key""",
+            incoming.execute('SELECT job_id,person_key FROM owners'))
     db.execute('INSERT OR REPLACE INTO alarm_mttr_job_import VALUES(1,?)',(json.dumps(stats,ensure_ascii=False),))
     db.execute(_NEW_REVISION)
     return get_dataset(db)
@@ -415,16 +470,19 @@ def merge_import(db,staged,allowlist=None):
 
 
 def restore_tables(source,dest,tables):
-    present=(V4_TABLES | JOB_TABLES).intersection(tables)
+    present=(V4_TABLES | JOB_TABLES | AL_TABLES).intersection(tables)
     if not present:return
     def invalid():
         raise MttrImportError('备份告警 MTTR 数据无效 / Invalid alarm MTTR backup.')
-    if present not in (V4_TABLES, V4_TABLES | JOB_TABLES):invalid()
+    if present not in (V4_TABLES, V4_TABLES | JOB_TABLES, V4_TABLES | JOB_TABLES | AL_TABLES):invalid()
     expected={'alarm_mttr_rows':{'signature','alarm_id','day','seconds','copies'},
               'alarm_mttr_allowlist':{'alarm_id'},'alarm_mttr_last_import':{'id','data'}}
     if JOB_TABLES<=present:
         expected.update(alarm_mttr_job_links={'signature','job_id'},alarm_mttr_job_owners={'job_id','assignee'},
                         alarm_mttr_job_import={'id','data'})
+    if AL_TABLES<=present:
+        expected.update(alarm_mttr_job_al={'job_id','person_key'},alarm_mttr_al_people={'person_key','assignee'},
+                        alarm_mttr_al_policy={'id','mode'},alarm_mttr_al_names={'person_key','name'})
     for table,cols in expected.items():
         if {r[1] for r in source.execute('PRAGMA table_info('+table+')')}!=cols:invalid()
     ids=[r[0] for r in source.execute('SELECT alarm_id FROM alarm_mttr_allowlist ORDER BY rowid LIMIT ?', (MAX_IDS+1,))]
@@ -445,17 +503,38 @@ def restore_tables(source,dest,tables):
         for job,person in source.execute('SELECT job_id,assignee FROM alarm_mttr_job_owners'):
             if not _valid_value(job) or job!=_job_key(job) or not _valid_value(person):invalid()
             dest.execute('INSERT INTO alarm_mttr_job_owners VALUES(?,?)',(job,person));n+=1
+        al_count=0
+        if AL_TABLES<=present:
+            for key,name in source.execute('SELECT person_key,assignee FROM alarm_mttr_al_people'):
+                if not _valid_value(name) or _display_name(name)!=name or key!=name.casefold():invalid()
+                dest.execute('INSERT INTO alarm_mttr_al_people VALUES(?,?)',(key,name))
+            for job,key,found in source.execute("""SELECT j.job_id,j.person_key,p.person_key FROM alarm_mttr_job_al j
+                                                   LEFT JOIN alarm_mttr_al_people p ON j.person_key=p.person_key"""):
+                if found is None or not _valid_value(job) or _job_key(job)!=job:invalid()
+                dest.execute('INSERT INTO alarm_mttr_job_al VALUES(?,?)',(job,key));al_count+=1
+            policy=list(source.execute('SELECT id,mode FROM alarm_mttr_al_policy LIMIT 2'))
+            names=list(source.execute('SELECT person_key,name FROM alarm_mttr_al_names ORDER BY rowid LIMIT ?', (MAX_IDS+1,)))
+            if len(names)>MAX_IDS or len(policy)>1 or (not policy and names):invalid()
+            if policy:
+                pid,mode=policy[0]
+                if pid!=1 or mode not in ('all','include','exclude') or (mode!='all' and not names):invalid()
+                dest.execute('INSERT INTO alarm_mttr_al_policy VALUES(1,?)',(mode,))
+            for key,name in names:
+                if not _valid_value(name) or _display_name(name)!=name or name.casefold()!=key:invalid()
+                dest.execute('INSERT INTO alarm_mttr_al_names VALUES(?,?)',(key,name))
         jm=list(source.execute('SELECT id,data FROM alarm_mttr_job_import LIMIT 2'))
-        if not jm and n:invalid()
+        if not jm and (n or al_count):invalid()
         if jm:
             if len(jm)!=1 or jm[0][0]!=1 or not isinstance(jm[0][1],str) or len(jm[0][1])>8000:invalid()
             try:
                 q=json.loads(jm[0][1])
-                if not isinstance(q,dict) or set(q)!={'filename','sheetName','importedAt',*JOB_QUALITY}:invalid()
+                receipt_fields={'filename','sheetName','importedAt',*JOB_QUALITY}
+                if not isinstance(q,dict) or set(q) not in (receipt_fields,receipt_fields|{'personColumn'}):invalid()
+                if 'personColumn' in q and q['personColumn']!='AL':invalid()
                 if any(not isinstance(q[k],str) or not 0<len(q[k])<=v for k,v in [('filename',255),('sheetName',200),('importedAt',64)]):invalid()
                 datetime.fromisoformat(q['importedAt'])
                 if any(type(q[k])!=int or not 0<=q[k]<=MAX_ROWS for k in JOB_QUALITY):invalid()
-                if not 0<q['mappedJobs']<=n or q['validRows']!=q['mappedJobs']+q['duplicateRows']:invalid()
+                if not 0<q['mappedJobs']<=(al_count if 'personColumn' in q else n) or q['validRows']!=q['mappedJobs']+q['duplicateRows']:invalid()
                 if q['sourceRows']!=q['missingJobIds']+q['missingAssignees']+q['validRows']:invalid()
             except (TypeError,ValueError,KeyError):invalid()
             dest.execute('INSERT INTO alarm_mttr_job_import VALUES(1,?)',(json.dumps(q,ensure_ascii=False),))
