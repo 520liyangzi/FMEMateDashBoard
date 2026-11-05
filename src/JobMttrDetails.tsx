@@ -66,7 +66,7 @@ function DetailPeriod({t,data,assignees,api,offline,offlineRows,formatDuration,t
     :!response?<p className="job-detail-state" role="status">{t('正在加载工单…','Loading Jobs…')}</p>
     :<>
       <div className="job-detail-rows"><table aria-label={title}><thead><tr><th scope="col">Job ID</th><th scope="col">{t('处理人','Assignee')}</th><th scope="col">{t('最长告警日期','Longest alarm date')}</th><th scope="col">MTTR <small>({t('时:分:秒','h:mm:ss')})</small></th></tr></thead>
-        <tbody>{response.rows.map(r=><tr key={r.jobId}><th scope="row">{r.jobId}</th><td>{r.assignee||<em>{t('未分配','Unassigned')}</em>}</td><td>{r.date}</td><td>{formatDuration(r.seconds)}</td></tr>)}</tbody></table></div>
+        <tbody>{response.rows.map(r=><tr key={r.jobId}><th scope="row">{r.jobId}</th><td>{r.assignee}</td><td>{r.date}</td><td>{formatDuration(r.seconds)}</td></tr>)}</tbody></table></div>
       <div className="job-detail-pages"><small aria-live="polite">{pageInfo}</small><div className="screen-only">
         <button type="button" aria-label={`${title} · ${t('上一页','Previous page')}`} className="btn" disabled={index===0} onClick={()=>setPage(index-1)}><ChevronLeft size={15}/></button>
         <button type="button" aria-label={`${title} · ${t('下一页','Next page')}`} className="btn" disabled={index>=lastPage} onClick={()=>setPage(index+1)}><ChevronRight size={15}/></button></div></div>

@@ -59,7 +59,7 @@ test('legacy Job aggregates cannot enter alarm comparisons through an old offlin
   assert.equal(aggregateAlarmMttr(legacy,baseline).count,0);
 });
 
-import {compareJobProxyMttr,rankJobProxyMttr,getJobProxyAssignees,selectJobProxyDays,type JobProxyMttrDataset} from './alarm-mttr.ts';
+import {compareJobProxyMttr,rankJobProxyMttr,getJobProxyAssignees,resolveJobProxyScope,selectJobProxyDays,type JobProxyMttrDataset} from './alarm-mttr.ts';
 const groups:JobProxyMttrDataset['personDays']=[
   {assignee:'A',date:'2026-10-01',count:1,totalSeconds:310},{assignee:'A',date:'2026-10-02',count:2,totalSeconds:1490},
   {assignee:'A',date:'2026-10-03',count:1,totalSeconds:300},
@@ -89,12 +89,12 @@ test('a selected team combines each Job once rather than averaging person means,
   ]);
 });
 
-test('All includes unattributed Jobs; explicitly empty selection never falls back to All',()=>{
+test('All counts only named Jobs even for older V5 data; empty or blank-only scope never widens',()=>{
   assert.deepEqual(getJobProxyAssignees(jobs),['A','Arrived','B','C','Historic','Left']);
   const all=compareJobProxyMttr(jobs,baseline,current,null);
-  assert.equal(all.baseline.count,7);assert.equal(all.baseline.totalSeconds,3880);
-  assert.equal(all.current.count,7);assert.equal(all.current.totalSeconds,4990);
-  assert.equal(compareJobProxyMttr(jobs,baseline,current,['']).baseline.meanSeconds,160);
+  assert.equal(all.baseline.count,6);assert.equal(all.baseline.totalSeconds,3720);
+  assert.equal(all.current.count,6);assert.equal(all.current.totalSeconds,4800);
+  assert.equal(compareJobProxyMttr(jobs,baseline,current,['']).baseline.meanSeconds,null);
   assert.equal(compareJobProxyMttr(jobs,baseline,current,[]).status,'no_jobs_both_periods');
   assert.deepEqual(rankJobProxyMttr(jobs,baseline,current,[]),[]);
 });
@@ -106,7 +106,7 @@ test('personal rank compares signed reduction, shares ties, and keeps only in-sc
     ['Arrived',null,null,'no_baseline_jobs'],['Left',null,null,'no_current_jobs'],
   ]);
   const subset=rankJobProxyMttr(jobs,baseline,current,['C','Historic','']);
-  assert.deepEqual(subset.map(r=>[r.assignee,r.rank,r.comparison.status]),[['C',1,'available'],['Historic',null,'no_jobs_both_periods']]);
+  assert.deepEqual(subset.map(r=>[r.assignee,r.rank,r.comparison.status]),[['C',1,'available']]);
 });
 
 test('V4 data is not a job proxy; partially recovered data uses only V5 Jobs; wholly unlinked history has no rate',()=>{
@@ -127,14 +127,23 @@ test('comparison supports arbitrary periods including coinciding dates and rejec
 });
 
 
-test('mapped people with zero eligible Jobs are selectable but do not add observations or inflate the all-person ranking',()=>{
-  const additional=Array.from({length:9},(_,i)=>`No jobs ${i}`);
-  const catalogue={...jobs,assignees:['A','B',...additional]};
-  for(const name of additional) assert.ok(getJobProxyAssignees(catalogue).includes(name));
-  const ten=['A',...additional];
-  assert.deepEqual(compareJobProxyMttr(catalogue,baseline,current,ten),compareJobProxyMttr(jobs,baseline,current,['A']));
-  const selected=rankJobProxyMttr(catalogue,baseline,current,ten);
-  assert.equal(selected.length,10);assert.equal(selected[0].assignee,'A');
-  assert.ok(selected.slice(1).every(p=>p.rank===null&&p.comparison.status==='no_jobs_both_periods'&&p.comparison.baseline.meanSeconds===null));
-  assert.deepEqual(rankJobProxyMttr(catalogue,baseline,current),rankJobProxyMttr(jobs,baseline,current));
+test('period eligibility comes only from named positive Job groups, not the catalogue or the gap between periods',()=>{
+  const late={from:'2026-10-10',to:'2026-10-10'};
+  const snapshot={...jobs,assignees:['Catalogue only','Old selection'],personDays:[...groups,
+    {assignee:'Gap only',date:'2026-10-07',count:1,totalSeconds:18},
+    {assignee:'Late',date:'2026-10-10',count:1,totalSeconds:123},
+    {assignee:'  ',date:'2026-10-10',count:1,totalSeconds:300},
+    {assignee:'Zero jobs',date:'2026-10-01',count:0,totalSeconds:5},
+    {assignee:'Zero duration',date:'2026-10-10',count:1,totalSeconds:0},
+  ]};
+  assert.deepEqual(getJobProxyAssignees(snapshot,baseline,late),['A','B','C','Late','Left']);
+  assert.deepEqual(getJobProxyAssignees(snapshot,undefined,late),['Late']);
+  assert.ok(getJobProxyAssignees(snapshot).includes('Gap only'));
+  const selected=['Late','Historic','Gap only','','A','Late','Catalogue only','  '];
+  assert.deepEqual(resolveJobProxyScope(snapshot,selected,baseline,late),['Late','A']);
+  assert.deepEqual(resolveJobProxyScope(snapshot,['Catalogue only','Gap only'],baseline,late),[]);
+  assert.equal(resolveJobProxyScope(snapshot,null,baseline,late),null);
+  assert.deepEqual(rankJobProxyMttr(snapshot,baseline,late,selected).map(r=>[r.assignee,r.rank,r.comparison.status]),
+    [['A',null,'no_current_jobs'],['Late',null,'no_baseline_jobs']]);
+  assert.equal(compareJobProxyMttr(snapshot,baseline,late).current.count,1);
 });

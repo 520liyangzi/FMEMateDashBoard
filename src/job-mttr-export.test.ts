@@ -29,13 +29,15 @@ test('detail sheets match weighted group means in the period comparison and iden
   const long=cur.find(r=>r['Job ID']==='0006')!;
   assert.deepEqual([long.Assignee,long['Winning alarm date (K)'],long['Longest eligible duration (seconds)'],long['Longest eligible duration (hh:mm:ss)']],['Lin',b,100800,'28:00:00']);
 });
-test('empty periods retain their selected dates, people, count and unavailable mean; all includes unmapped owners',()=>{
+test('empty periods retain scope and dates; even all owners exclude unmapped Jobs in old snapshots',()=>{
  const empty=jobMttrSheets(data,baseline,current,[],'zh',detail);
  const [br,cr]=['基准期工单明细','对比期工单明细'].map(name=>empty.find(s=>s.name===name)!.rows);
  assert.equal(br.length,1);assert.equal(cr.length,1);
- assert.deepEqual([br[0]['有效工单数'],br[0]['平均 MTTR（秒）'],br[0]['人员范围'],br[0].From,cr[0].To],[0,'','未选择人员',a,b]);
+ assert.deepEqual([br[0]['有效工单数'],br[0]['平均 MTTR（秒）'],br[0]['人员范围'],br[0].From,cr[0].To],[0,'','无符合条件的所选人员',a,b]);
  const all=jobMttrSheets(data,baseline,current,null,'en',detail).find(s=>s.name==='Baseline Job details')!.rows;
- assert.equal(all[0]['Eligible Jobs'],4);assert.equal(all.find(r=>r['Job ID']==='0004')!.Assignee,'Unmatched owner');
+ assert.equal(all[0]['Eligible Jobs'],3);assert.equal(all[0]['Mean MTTR (seconds)'],360);
+ assert.equal(all[0]['Excluded Jobs without matched owners (all dates)'],1);
+ assert.equal(all[0]['Owner selection'],'All matched owners');assert.equal(all.some(r=>r['Job ID']==='0004'),false);
  const noSource=jobMttrSheets(null,baseline,current,null,'en',[])[1].rows;
  assert.deepEqual([noSource[0]['Eligible Jobs'],noSource[0]['Mean MTTR (seconds)'],noSource[0]['Comparison status']],['','','no_dataset']);
 });
@@ -60,4 +62,13 @@ test('Excel round trip keeps IDs as text, durations numeric, and detail sheets i
    assert.deepEqual(rows.slice(1).map(row=>row['Job ID']).sort(),ids);
    assert.equal(typeof rows[1]['最长有效告警时长（秒）'],'number');
  }
+});
+
+test('direct export drops out-of-period, catalogue-only and blank names while keeping one-period owners unranked',()=>{
+ const oldJob={jobId:'999',assignee:'Old',date:'2025-01-01',seconds:180};
+ const mixed={...data,assignees:['Mei','Lin','Ada','Old','Catalogue only'],personDays:[...data.personDays,{date:oldJob.date,assignee:'Old',count:1,totalSeconds:180}]};
+ const sheets=jobMttrSheets(mixed,baseline,current,['Ada','Old','Catalogue only',''], 'en',[...detail,oldJob]);
+ assert.equal(sheets[1].rows[0]['Owner selection'],'Ada');assert.equal(sheets[1].rows[0]['Eligible Jobs'],0);
+ assert.deepEqual(sheets[2].rows.slice(1).map(r=>r['Job ID']),['0007']);
+ assert.deepEqual(sheets[3].rows.map(r=>[r.Assignee,r.Rank,r['Reduction (%)']]),[['Ada','','']]);
 });

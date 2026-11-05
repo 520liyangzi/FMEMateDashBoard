@@ -77,21 +77,20 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertFalse(self.call('/api/state')['hasLegacyMttr'])
         result = self.call(self.stage(data) + '/import', 'POST', {'allowlist': '26540'})
         self.assertEqual((result['formatVersion'], result['source']), (5, 'alarm-jobs'))
-        self.assertEqual(result['totalAlarms'], 2)
-        self.assertEqual(result['totalJobs'], 1)
+        self.assertEqual(result['totalAlarms'], 0)
+        self.assertEqual(result['totalJobs'], 0)
         self.assertEqual(result['unassignedJobs'], 1)
         self.assertEqual(result['storedRows'], 3)
-        self.assertEqual([(d['date'], d['totalSeconds']) for d in result['days']],
-                         [('2026-10-21', 3000)])
+        self.assertEqual((result['days'],result['personDays'],result['assignees']),([],[],[]))
         self.assertEqual(result, self.call(BASE))
         refreshed = self.call(BASE + '/allowlist', 'POST', {'allowlist': '26564,26540'})
-        self.assertEqual(refreshed['totalAlarms'], 3)
-        self.assertEqual(sum(d['totalSeconds'] for d in refreshed['days']), 10200)
-        self.assertEqual(refreshed['totalJobs'], 2)
+        self.assertEqual((refreshed['totalAlarms'],refreshed['totalJobs'],refreshed['unassignedJobs']), (0,0,2))
         jobs = workbook([{'B':'TT ID','C':'Job ID','AG':'jb_assign_to'},
                          {'B':'ignored','C':'JOB-A','AG':'Alice'},
                          {'B':'ignored','C':'JOB-B','AG':'Bob'}])
         refreshed = self.call(self.stage(jobs, 'jobs.xlsx', True) + '/import', 'POST', {})
+        self.assertEqual((refreshed['totalAlarms'],refreshed['totalJobs'],refreshed['assignees']), (3,2,['Alice','Bob']))
+        self.assertEqual(sum(d['totalSeconds'] for d in refreshed['days']),10200)
         self.assertEqual(refreshed['unassignedJobs'], 0)
         self.assertEqual([(r['assignee'],r['count'],r['totalSeconds']) for r in refreshed['personDays']],
                          [('Alice',1,3000),('Bob',1,7200)])
@@ -108,6 +107,8 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertIsNone(self.call('/api/mttr'))
 
     def test_excel_reupload_and_invalid_file_do_not_change_ledger(self):
+        self.call(self.stage(workbook([{'C':'Job ID','AG':'jb_assign_to'},{'C':'JOB-A','AG':'Alice'}]),
+                             'jobs.xlsx',True)+'/import','POST',{})
         header = {'B':'Alarm ID','I':'Duration','K':'Occurred','AE':'Job ID'}
         alarm = {'B':26540, 'I':('n',0.5), 'K':'2026/11/03 23:59:00', 'AE':'JOB-A'}
         data = workbook([header, alarm, alarm])
@@ -136,9 +137,8 @@ class AlarmHttpTests(unittest.TestCase):
                          ('26540','00:30:00','2026-10-29','J2'),
                          ('26564','02:00:00','2026-11-01','J1'))
         first=self.call(self.stage(data)+'/import','POST',{'allowlist':'26540'})
-        self.assertEqual((first['totalJobs'],first['unassignedJobs']), (2,1))
-        self.assertEqual(first['days'],[{'date':'2026-10-19','count':1,'totalSeconds':3600},
-                                        {'date':'2026-10-29','count':1,'totalSeconds':1800}])
+        self.assertEqual((first['totalJobs'],first['unassignedJobs']), (1,1))
+        self.assertEqual(first['days'],[{'date':'2026-10-19','count':1,'totalSeconds':3600}])
         for _ in range(2):
             second=owners('Bob')
             self.assertEqual(second['days'],first['days'])
@@ -146,9 +146,40 @@ class AlarmHttpTests(unittest.TestCase):
             self.assertEqual([(r['assignee'],r['date'],r['count'],r['totalSeconds']) for r in named],
                              [('Bob','2026-10-19',1,3600)])
         updated=self.call(BASE+'/allowlist','POST',{'allowlist':'26564,26540'})
-        self.assertEqual(updated['totalJobs'],2)
+        self.assertEqual(updated['totalJobs'],1)
         self.assertEqual(next(r for r in updated['personDays'] if r['assignee']=='Bob'),
                          {'assignee':'Bob','date':'2026-11-01','count':1,'totalSeconds':7200})
+
+    def test_multiple_job_workbooks_merge_in_order_with_independent_commits(self):
+        alarms = alarm_sheet(('26540','00:30:00','2026-10-19','J1'),
+                             ('26540','01:00:00','2026-10-19','J1'),
+                             ('26540','02:00:00','2026-10-19','J2'),
+                             ('26540','03:00:00','2026-10-19','J3'))
+        before = self.call(self.stage(alarms) + '/import', 'POST', {'allowlist':'26540'})
+        self.assertEqual((before['totalJobs'],before['unassignedJobs']), (0,3))
+
+        def owner_file(filename, pairs):
+            rows = [{'C':'Job ID','AG':'jb_assign_to'}] + [{'C':j,'AG':p} for j,p in pairs]
+            return self.stage(workbook(rows), filename, True) + '/import'
+
+        first = self.call(owner_file('part-1.xlsx',[('J1','Alice'),('J2','Bob')]), 'POST', {})
+        self.assertEqual((first['assignees'],first['totalJobs'],first['unassignedJobs']), (['Alice','Bob'],2,1))
+        self.assertEqual(first['lastJobImport']['filename'], 'part-1.xlsx')
+        # Even a valid reassignment at the start of the bad file must not leak.
+        bad = owner_file('conflict.xlsx',[('J1','Wrong owner'),('J3','Carol'),('J3','Other owner')])
+        with self.assertRaises(HTTPError) as exc:
+            self.call(bad, 'POST', {})
+        self.assertEqual(exc.exception.code, 400)
+        self.assertEqual(self.call(BASE), first)
+
+        final = self.call(owner_file('part-2.xlsx',[('J1','Dana'),('J3','Carol')]), 'POST', {})
+        self.assertEqual((final['lastJobImport']['filename'],final['lastJobImport']['mappedJobs']), ('part-2.xlsx',2))
+        self.assertEqual((final['mappedJobs'],final['totalJobs'],final['totalAlarms'],final['unassignedJobs']), (3,3,4,0))
+        self.assertEqual(final['assignees'], ['Bob','Carol','Dana'])
+        self.assertEqual(final['days'], [{'date':'2026-10-19','count':3,'totalSeconds':21600}])
+        details = self.call(BASE + '/job-details', 'POST', {})
+        self.assertEqual([(r['jobId'],r['assignee'],r['seconds']) for r in details['rows']],
+                         [('J1','Dana',3600),('J2','Bob',7200),('J3','Carol',10800)])
 
     def test_reject_incomplete_or_invalid_mapping_without_changing_ownership(self):
         raw=workbook([{'C':'Job ID','AG':'jb_assign_to'},{'C':'J1','AG':'Owner'}])
@@ -180,7 +211,8 @@ class AlarmHttpTests(unittest.TestCase):
         empty = details()
         self.assertEqual(empty['rows'], [])
         owners = workbook([{'C':'Job ID', 'AG':'jb_assign_to'},
-                           {'C':'J-A','AG':'Alice'}, {'C':'J-B','AG':'Bob'}, {'C':'J-C','AG':'Bob'}])
+                           {'C':'J-A','AG':'Alice'}, {'C':'J-B','AG':'Bob'}, {'C':'J-C','AG':'Bob'},
+                           {'C':'never-alarmed','AG':'Catalogue only'}])
         self.call(self.stage(owners,'jobs.xlsx',True) + '/import','POST',{})
         dashboard = import_alarms([
             ('26540','00:10:00','2026-10-21','J-A'),
@@ -194,27 +226,29 @@ class AlarmHttpTests(unittest.TestCase):
         full = details()
         self.assertEqual(full['revision'],dashboard['revision'])
         self.assertNotEqual(full['revision'],empty['revision'])
-        self.assertEqual((full['total'],full['totalSeconds']), (4,12600))
+        self.assertEqual((dashboard['assignees'],dashboard['mappedJobs'],dashboard['unassignedJobs']), (['Alice','Bob'],4,1))
+        self.assertEqual((full['total'],full['totalSeconds']), (3,7200))
         self.assertEqual((full['total'],full['totalSeconds']),
                          (dashboard['totalJobs'],sum(d['totalSeconds'] for d in dashboard['days'])))
-        self.assertEqual([r['jobId'] for r in full['rows']], ['J-C','J-D','J-A','J-B'])
+        self.assertEqual([r['jobId'] for r in full['rows']], ['J-C','J-A','J-B'])
         self.assertEqual([(r['assignee'],r['date'],r['seconds'],r['alarmCount'],r['alarmId'])
                           for r in full['rows'] if r['jobId']=='J-A'],
                          [('Alice','2026-10-22',1200,2,'26564')])
         first, second = details(limit=2), details(limit=2,offset=2)
         self.assertEqual(first['revision'],second['revision'])
         self.assertEqual(first['rows'] + second['rows'],full['rows'])
-        self.assertEqual((second['total'],second['totalSeconds'],second['limit'],second['offset']), (4,12600,2,2))
+        self.assertEqual((second['total'],second['totalSeconds'],second['limit'],second['offset']), (3,7200,2,2))
         past = details(limit=2,offset=99)
-        self.assertEqual((past['rows'],past['total'],past['totalSeconds']), ([],4,12600))
+        self.assertEqual((past['rows'],past['total'],past['totalSeconds']), ([],3,7200))
         for filters, ids, seconds in [
-            ({'assignees':None}, ['J-C','J-D','J-A','J-B'], 12600),
+            ({'assignees':None}, ['J-C','J-A','J-B'], 7200),
             ({'assignees':[]}, [], 0),
-            ({'assignees':['']}, ['J-D'], 5400),
+            ({'assignees':['']}, [], 0),
+            ({'assignees':['','Catalogue only','Alice']}, ['J-A'], 1200),
             ({'assignees':['Bob']}, ['J-C','J-B'], 6000),
             ({'assignees':['Bob','Alice','Bob'], 'start':'2026-10-22','end':'2026-10-22'}, ['J-A','J-B'], 3600),
             ({'end':'2026-10-21'}, [], 0),
-            ({'start':'2026-10-23'}, ['J-C','J-D'], 9000),
+            ({'start':'2026-10-23'}, ['J-C'], 3600),
         ]:
             with self.subTest(filters=filters):
                 page = details(**filters)
@@ -254,8 +288,12 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertEqual(archived['allowlist'],current['allowlist'])
         recovered=self.call(self.stage(data)+'/import','POST',{'allowlist':'26540'})
         self.assertFalse(recovered['needsAlarmReimport'])
-        self.assertEqual((recovered['totalJobs'],recovered['legacyUnlinkedRows'],recovered['totalAlarms']), (1,0,2))
+        self.assertEqual((recovered['totalJobs'],recovered['legacyUnlinkedRows'],recovered['totalAlarms'],recovered['unassignedJobs']), (0,0,0,1))
         self.assertEqual(recovered['days'],current['days'])
+        owners=workbook([{'C':'Job ID','AG':'jb_assign_to'},{'C':'J1','AG':'Alice'}])
+        restored=self.call(self.stage(owners,'jobs.xlsx',True)+'/import','POST',{})
+        self.assertEqual((restored['totalJobs'],restored['totalAlarms'],restored['unassignedJobs']), (1,2,0))
+        self.assertEqual(restored['days'],[{'date':'2026-10-21','count':1,'totalSeconds':420}])
 
     def test_http_rejects_bad_requests_without_consuming_retry(self):
         prefix = self.stage(alarm_sheet(('26540', '12:00:00','2026-10-01', 'J')))
@@ -268,7 +306,7 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertEqual(exc.exception.code, 403)
         self.assertEqual(self.call(BASE)['storedRows'], 0)
         result = self.call(prefix + '/import', 'POST', {'allowlist':'26540'})
-        self.assertEqual(result['totalAlarms'], 1)
+        self.assertEqual((result['storedRows'],result['unassignedJobs'],result['totalAlarms']), (1,1,0))
         with self.assertRaises(HTTPError) as exc:
             self.call(prefix, 'DELETE')
         self.assertEqual(exc.exception.code, 404)

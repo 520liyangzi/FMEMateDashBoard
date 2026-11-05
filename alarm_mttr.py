@@ -1,8 +1,8 @@
 """Work-order MTTR based on the maximum eligible alarm duration per Job ID.
 
-Job scopes use the C -> AG owner catalogue; an unseen owner never removes a Job
-from the overall comparison. A Job belongs to the occurrence date of its longest
-eligible alarm (earliest such date in a tie), so it appears only once.
+Only Jobs with an eligible alarm and a named C -> AG owner enter the report.
+Unmatched Jobs stay in the alarm ledger for later mapping. A Job belongs to the
+occurrence date of its longest eligible alarm (earliest such date in a tie).
 
 The maximum observed multiplicity of identical rows makes repeated/overlapping
 exports idempotent while preserving repetitions within a single export. With
@@ -117,29 +117,35 @@ def _refresh_max(db):
     db.execute(_NEW_REVISION)
 
 
+# Share the same inner join for the overall report, named scopes and Job detail
+# exports. Keep the wider winner cache so joining a later Job file is immediate.
+_REPORT_COHORT = """ FROM alarm_mttr_job_max m JOIN alarm_mttr_job_owners o
+                      ON o.job_id=m.job_id AND trim(o.assignee)<>''"""
+
+
 def get_dataset(db):
     ids=[r[0] for r in db.execute('SELECT alarm_id FROM alarm_mttr_allowlist ORDER BY rowid')]
-    winners = db.execute("""
-        SELECT day,coalesce(o.assignee,''),count(*),sum(seconds),sum(alarm_count)
-        FROM alarm_mttr_job_max LEFT JOIN alarm_mttr_job_owners o USING(job_id)
-        GROUP BY day,coalesce(o.assignee,'') ORDER BY day,coalesce(o.assignee,'')
+    winners = db.execute(f"""
+        SELECT m.day,o.assignee,count(*),sum(m.seconds),sum(m.alarm_count) {_REPORT_COHORT}
+        GROUP BY m.day,o.assignee ORDER BY m.day,o.assignee
     """)
     days_by_date,persons={},[]
-    alarms=jobs=unassigned=0
+    alarms=jobs=0
+    people=set()
     for day,person,n,seconds,k in winners:
         d=days_by_date.setdefault(day,dict(date=day,count=0,totalSeconds=0))
         d['count']+=n;d['totalSeconds']+=seconds
         persons.append(dict(date=day,assignee=person,count=n,totalSeconds=seconds))
         jobs+=n;alarms+=k
-        if not person:unassigned+=n
+        people.add(person)
     days=list(days_by_date.values())
     stored,unlinked=db.execute("""SELECT coalesce(sum(copies),0),
           coalesce(sum(CASE WHEN l.signature IS NULL THEN copies ELSE 0 END),0)
           FROM alarm_mttr_rows r LEFT JOIN alarm_mttr_job_links l USING(signature)""").fetchone()
     last=db.execute('SELECT data FROM alarm_mttr_last_import WHERE id=1').fetchone()
     mapping=db.execute('SELECT data FROM alarm_mttr_job_import WHERE id=1').fetchone()
-    assignees=[r[0] for r in db.execute("SELECT DISTINCT assignee FROM alarm_mttr_job_owners WHERE assignee<>'' ORDER BY assignee")]
-    return dict(formatVersion=5,source='alarm-jobs',allowlist=ids,days=days,personDays=persons,assignees=assignees,
+    unassigned=db.execute('SELECT count(*) FROM alarm_mttr_job_max').fetchone()[0]-jobs
+    return dict(formatVersion=5,source='alarm-jobs',allowlist=ids,days=days,personDays=persons,assignees=sorted(people),
                 revision=db.execute('SELECT token FROM alarm_mttr_revision WHERE id=1').fetchone()[0],
                 totalAlarms=alarms,totalJobs=jobs,storedRows=stored,unassignedJobs=unassigned,
                 mappedJobs=db.execute('SELECT count(*) FROM alarm_mttr_job_owners').fetchone()[0],
@@ -169,9 +175,9 @@ def _valid_value(v):
 def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=0,limit=100):
     """Read a page of the Jobs included in the mean and totals over the full selection.
 
-    A missing assignee filter includes every Job; [] includes none; '' selects
-    unassigned Jobs. The one global winning alarm per Job is determined before
-    applying either inclusive date bound.
+    A missing assignee filter includes all matched Jobs; [] or [''] includes
+    none. The one global winning alarm per Job is determined before applying
+    either inclusive date bound.
     """
     for bound in (date_from,date_to):
         if bound is None:continue
@@ -199,20 +205,20 @@ def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=
     if large_scope:
         # Older SQLite builds have a 999-bind limit. The temporary lookup also
         # keeps the same query plan for large scopes, without relying on JSON1.
-        clauses.append("coalesce(o.assignee,'') IN (SELECT name FROM temp.alarm_mttr_detail_scope)")
+        clauses.append("o.assignee IN (SELECT name FROM temp.alarm_mttr_detail_scope)")
     elif people:
         keys=['p'+str(i) for i in range(len(people))]
-        clauses.append("coalesce(o.assignee,'') IN ("+','.join(':'+key for key in keys)+')')
+        clauses.append("o.assignee IN ("+','.join(':'+key for key in keys)+')')
         args.update(zip(keys,people))
     elif people==[]:
         clauses.append('0')
-    source=' FROM alarm_mttr_job_max m LEFT JOIN alarm_mttr_job_owners o USING(job_id)'
+    source=_REPORT_COHORT
     if clauses:source+=' WHERE '+' AND '.join(clauses)
     # Totals and page use one read snapshot. The page can use (day DESC,job_id)
     # directly; an empty or out-of-range page still returns its full totals.
     query=f"""
         WITH totals AS (SELECT count(*) n,coalesce(sum(m.seconds),0) seconds {source}),
-        page AS (SELECT m.job_id,m.day,m.seconds,m.alarm_count,m.alarm_id,coalesce(o.assignee,'') assignee
+        page AS (SELECT m.job_id,m.day,m.seconds,m.alarm_count,m.alarm_id,o.assignee
                  {source} ORDER BY m.day DESC,m.job_id ASC LIMIT :take OFFSET :skip)
         SELECT t.n,t.seconds,v.token,p.job_id,p.assignee,p.day,p.seconds,p.alarm_count,p.alarm_id
         FROM totals t JOIN alarm_mttr_revision v ON v.id=1 LEFT JOIN page p ON 1=1

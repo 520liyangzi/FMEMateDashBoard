@@ -736,7 +736,14 @@ test('job-proxy evidence reports pooled Jobs and signed individual ranking withi
   assert.equal(mttr.dataQuality.legacyUnlinkedRows,3);
   assert.deepEqual(mttr.people.ranking.map(x=>[x.assignee,x.rank,x.baselineJobs,x.reductionRate]),[['Alice',1,3,50],['Bo',2,1,0]]);
   assert.equal(facts({...input,selectedAssignees:[]}).effectiveness.mttr.baseline.count,0);
-  assert.equal(facts({...input,selectedAssignees:null}).effectiveness.mttr.baseline.count,6);
+  const all=facts({...input,selectedAssignees:null}).effectiveness.mttr;
+  assert.equal(all.baseline.count,5);assert.equal(all.baseline.meanSeconds,280);
+  assert.equal(all.cohortRule,'matched-named-owners-v1');assert.equal(all.selectedScope.type,'all_matched_owners');
+  assert.equal(all.selectedScope.includesUnassigned,false);assert.equal(all.dataQuality.excludedJobsWithoutNamedOwnerAcrossAllDates,1);
+  const narrowed=facts({...input,selectedAssignees:['','Lost','Alice','Other'],alarmJobMttr:{...alarmJobMttr,assignees:['Alice','Bo','Other','Lost']},mttrCurrent:{from:'2026-11-01',to:'2026-11-01'}}).effectiveness.mttr;
+  assert.deepEqual(new Set(narrowed.selectedScope.names),new Set(['Alice','Other']));
+  assert.equal(narrowed.people.rankedCount,0);assert.equal(narrowed.people.unrankedCount,2);
+  assert.ok(narrowed.people.unrankedExamples.every(p=>p.reductionRate===null));
   const missing=facts({...input,alarmJobMttr:null,...{alarmMttr:null}}).effectiveness.mttr;
   assert.equal(missing.businessRule,'one-job-max-eligible-alarm-duration');assert.equal(missing.status,'no_dataset');assert.equal(missing.reductionRate,null);
   assert.equal(missing.baseline.count,null);

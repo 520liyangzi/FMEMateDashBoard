@@ -22,8 +22,10 @@ function prepareFilter({from, to, assignees}: JobProxyDetailFilter) {
   if (assignees != null && (!Array.isArray(assignees) || !assignees.every(name => typeof name === 'string'))) {
     throw new Error('工单负责人筛选无效 / Invalid assignee filter')
   }
-  const owners = assignees == null ? null : new Set(assignees)
-  return (row: JobProxyDetailRow) => (!from || row.date >= from) && (!to || row.date <= to) && (!owners || owners.has(row.assignee))
+  const owners = assignees == null ? null : new Set(assignees.filter(name => name.trim().length > 0))
+  const matches = (row: JobProxyDetailRow) => row.assignee.trim().length > 0 && (!from || row.date >= from) &&
+    (!to || row.date <= to) && (!owners || owners.has(row.assignee))
+  return {matches, assignees:owners ? [...owners] : assignees}
 }
 
 function checkPagination(offset: number, limit: number) {
@@ -56,7 +58,7 @@ const order = (a: JobProxyDetailRow, b: JobProxyDetailRow) => a.date === b.date 
 const sameSeconds = (a: number, b: number) => Math.abs(a - b) <= 1e-6 + 1e-12 * Math.max(Math.abs(a), Math.abs(b))
 
 export function filterJobProxyDetails(rows: readonly JobProxyDetailRow[], filter: JobProxyDetailFilter = {}): JobProxyDetailRow[] {
-  const matches = prepareFilter(filter)
+  const {matches} = prepareFilter(filter)
   const seen = new Set<string>()
   return rows.filter(row => {
     if (!isRow(row) || seen.has(row.jobId)) throw inconsistent()
@@ -73,11 +75,11 @@ export function getOfflineJobProxyDetailPage(rows: readonly JobProxyDetailRow[],
 
 export async function loadJobProxyDetailPage(api: DetailApi, filter: JobProxyDetailFilter = {}, offset = 0, limit = 100, signal?: AbortSignal): Promise<JobProxyDetailPage> {
   checkPagination(offset, limit)
-  const matches = prepareFilter(filter)
+  const {matches,assignees} = prepareFilter(filter)
   signal?.throwIfAborted()
   const response = await api('/api/mttr/alarms/job-details', {
     method:'POST', headers:{'Content-Type':'application/json'}, signal,
-    body:JSON.stringify({start:filter.from, end:filter.to, assignees:filter.assignees, offset, limit}),
+    body:JSON.stringify({start:filter.from, end:filter.to, assignees, offset, limit}),
   })
   signal?.throwIfAborted()
   if (response == null || typeof response !== 'object') throw inconsistent()

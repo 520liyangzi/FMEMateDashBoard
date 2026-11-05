@@ -1,6 +1,6 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
 import { compareMttr, previousMttrPeriod, analyzeMttrPeople, selectMttrDayScope, selectMttrScope, filterMttrPeopleByGap, type MttrDataset, type MttrPeriod } from './mttr.ts';
-import { compareAlarmMttr, compareJobProxyMttr, rankJobProxyMttr, type JobProxyMttrDataset, type AlarmMttrDataset } from './alarm-mttr.ts';
+import { compareAlarmMttr, compareJobProxyMttr, rankJobProxyMttr, resolveJobProxyScope, type JobProxyMttrDataset, type AlarmMttrDataset } from './alarm-mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -51,6 +51,7 @@ const LIMITS = {
   feedbackCharacters: 1200, identifierCharacters: 200, sceneCharacters: 200,
 } as const;
 
+export const JOB_PROXY_COHORT_RULE = 'matched-named-owners-v1' as const;
 export const JOB_PROXY_MTTR_RULE = 'one-job-max-eligible-alarm-duration' as const;
 export const ALARM_MTTR_RULE = 'allowlisted-alarm-duration-by-occurrence-date' as const;
 
@@ -81,7 +82,7 @@ function jobProxyEvidence(
   assignees:readonly string[]|null, clip:(s:string,limit:number,field:string)=>string,
 ) {
   if (data?.formatVersion!==5 || data.source!=='alarm-jobs') data=null;
-  const names=assignees===null?null:[...new Set(assignees)];
+  const names=resolveJobProxyScope(data,assignees,baseline,current);
   const comparison=compareJobProxyMttr(data,baseline,current,names);
   const measured=comparison.status!=='no_dataset' && comparison.status!=='invalid_range' && comparison.status!=='alarm_reimport_required';
   // Unknown coverage or invalid ranges do not establish that zero Jobs occurred.
@@ -98,25 +99,25 @@ function jobProxyEvidence(
     }));
   }
   return {
-    ...comparison,baseline:period(comparison.baseline),current:period(comparison.current),businessRule:JOB_PROXY_MTTR_RULE,
+    ...comparison,baseline:period(comparison.baseline),current:period(comparison.current),businessRule:JOB_PROXY_MTTR_RULE,cohortRule:JOB_PROXY_COHORT_RULE,
     selectedScope:{
-      type:names===null?'all_jobs':!names.length?'none':names.length===1?'single':'group',
-      selectedCount:names?.length??null, includesUnassigned:names===null||names.includes(''),
+      type:names===null?'all_matched_owners':!names.length?'none':names.length===1?'single':'group',
+      selectedCount:names?.length??null, includesUnassigned:false,
       names:names?.slice(0,LIMITS.mttrPeople).map((v,i)=>name(v,'selectedScope.names['+i+']'))??null,
       omittedNames:Math.max(0,(names?.length??0)-LIMITS.mttrPeople),
     },
     people:{
       rankedCount:ranked.length,unrankedCount:unranked.length,
       ranking:people(ranked,LIMITS.mttrPeople,'people.ranking'),unrankedExamples:people(unranked,LIMITS.mttrUnrankedPeople,'people.unrankedExamples'),
-      scope:'Same selected population and periods as the comparison. Ranked by signed reduction percentage; only named people with computable comparisons. Samples are bounded; blank owner is not a person.',
+      scope:'Same selected population and periods as the comparison. Ranked by signed reduction percentage; only named people with computable comparisons. Samples are bounded; people with no eligible Jobs in either period are omitted; owners with Jobs in just one period are unranked.',
     },
     dataQuality:{
-      storedEligibleJobsAcrossAllDates:data?.totalJobs??null, eligibleAlarmsAcrossAllDates:data?.totalAlarms??null,
-      unassignedJobsAcrossAllDates:data?.unassignedJobs??null,mappedJobsAcrossAllDates:data?.mappedJobs??null,
+      jobOwnerMappingsInCatalogue:data?.mappedJobs??null, excludedJobsWithoutNamedOwnerAcrossAllDates:data?.unassignedJobs??null,
+      countsScope:'The mapping catalogue can contain Jobs with no eligible alarms. Catalogue size and all-history exclusion counts are not period Job counts.',
       allowlistSize:data?.allowlist.length??0,needsAlarmReimport:data?.needsAlarmReimport??false,
       legacyUnlinkedRows:data?.legacyUnlinkedRows??null,jobMapImported:!!data?.lastJobImport,
     },
-    method:'Use alarm rows whose B code is allowed, I duration is positive, K date valid and AE Job ID nonblank. For each Job take the longest eligible duration globally, assign that Job once to the K date of its maximum (earliest K when tied). Link alarm AE to Job C for owner AG. Unmapped or unassigned Jobs are included in all Jobs, not personal rankings. Counts are Jobs and means are summed Job maxima divided by Job count. Do not average person means or percentages.',
+    method:'Use alarm rows whose B code is allowed, I duration is positive, K date valid and AE Job ID nonblank. For each Job take the longest eligible duration globally, assign that Job once to the K date of its maximum (earliest K when tied). Link alarm AE to Job C for owner AG. All scopes exclude Jobs without a matched named owner. The excluded count is an all-history import diagnostic, never a period denominator. Counts are Jobs and means are summed Job maxima divided by Job count. Do not average person means or percentages.',
     limitations:'This estimates MTTR with a duration proxy, not actual ticket elapsed time or labor savings. Differences in case mix, sample sizes and coverage preclude attributing change to FMEMate. Incomplete migrations exclude unlinked legacy alarms; reimport original alarm workbooks for full history.',
   };
 }

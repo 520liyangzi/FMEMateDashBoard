@@ -8,14 +8,14 @@ const rows: JobProxyDetailRow[] = [
   {jobId:'B',assignee:'Li',date:'2026-10-22',seconds:75.5},
   {jobId:'A',assignee:'Wang',date:'2026-10-22',seconds:225.5},
 ]
-test('offline page totals cover all selected Jobs independent of paging, including open date bounds and unassigned scope', () => {
+test('offline page totals cover all selected Jobs independent of paging, including open date bounds and exclusion of legacy unassigned Jobs', () => {
   assert.deepEqual(getOfflineJobProxyDetailPage(rows,{from:'2026-10-21',to:'2026-10-22',assignees:['Wang','Li']},1,1),
     {rows:[rows[2]],total:3,totalSeconds:3901})
-  assert.deepEqual(filterJobProxyDetails(rows,{from:'2026-10-22'}).map(row=>row.jobId),['unmatched','A','B'])
+  assert.deepEqual(filterJobProxyDetails(rows,{from:'2026-10-22'}).map(row=>row.jobId),['A','B'])
   assert.deepEqual(filterJobProxyDetails(rows,{to:'2026-10-21'}),[rows[0]])
-  assert.deepEqual(filterJobProxyDetails(rows,{assignees:['']}),[rows[1]])
+  assert.deepEqual(filterJobProxyDetails(rows,{assignees:['']}),[])
   assert.deepEqual(filterJobProxyDetails(rows,{assignees:[]}),[])
-  assert.deepEqual(filterJobProxyDetails(rows,{assignees:null}).map(row=>row.jobId),['unmatched','A','B','007'])
+  assert.deepEqual(filterJobProxyDetails(rows,{assignees:null}).map(row=>row.jobId),['A','B','007'])
 })
 test('live page sends inclusive bounds, owners, and pagination; abort or invalid ranges never expand into an unfiltered request', async () => {
   let calls=0
@@ -26,7 +26,7 @@ test('live page sends inclusive bounds, owners, and pagination; abort or invalid
     assert.deepEqual(JSON.parse(String(options?.body)),{start:'2026-10-22',end:'2026-10-22',assignees:['Wang','Li'],offset:1,limit:1})
     return {rows:[rows[2]],total:2,totalSeconds:301,offset:1,limit:1,revision:'a'}
   }
-  const page=await loadJobProxyDetailPage(api,{from:'2026-10-22',to:'2026-10-22',assignees:['Wang','Li']},1,1)
+  const page=await loadJobProxyDetailPage(api,{from:'2026-10-22',to:'2026-10-22',assignees:['Wang','','Li','Wang','  ']},1,1)
   assert.equal(page.totalSeconds,301)
   assert.equal(page.revision,'a')
   for (const bounds of [{from:'2026-02-30'},{to:''},{from:'2026-10-23',to:'2026-10-22'}]) {
@@ -34,6 +34,13 @@ test('live page sends inclusive bounds, owners, and pagination; abort or invalid
   }
   await assert.rejects(loadJobProxyDetailPage(api,{},0,1,AbortSignal.abort()),{name:'AbortError'})
   assert.equal(calls,1)
+})
+
+test('a stale endpoint cannot quietly return unmatched Jobs in a named-only All export',async()=>{
+  const api=async()=>({rows:[rows[1]],total:1,totalSeconds:300})
+  await assert.rejects(loadAllJobProxyDetails(api,{assignees:null}),/incomplete or changed/)
+  const oldSnapshot=[rows[1],{...rows[1],jobId:'blank-name',assignee:'  '}]
+  assert.deepEqual(getOfflineJobProxyDetailPage(oldSnapshot,{}),{rows:[],total:0,totalSeconds:0})
 })
 
 const many:JobProxyDetailRow[]=Array.from({length:5002},(_,i)=>({jobId:String(i).padStart(6,'0'),date:'2026-10-21',assignee:'Li',seconds:i%2?1.5:2}))

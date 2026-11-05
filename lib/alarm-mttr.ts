@@ -86,17 +86,17 @@ export interface JobProxyMappingImportInfo {
 }
 export interface JobProxyMttrDataset {
   formatVersion:5; source:'alarm-jobs'; allowlist:string[]; revision?:string;
-  /** Current mapping catalogue names, including owners without eligible alarm Jobs. */
+  /** Optional server hint. Older V5 snapshots may include the whole mapping catalogue here. */
   assignees?:string[];
   days:JobProxyDay[];
-  /** Empty assignee means unmapped or unassigned: included in all Jobs but not a person. */
+  /** Older V5 snapshots may include an unassigned bucket; it is never part of the reporting cohort. */
   personDays:(JobProxyDay & {assignee:string})[];
   totalJobs:number; totalAlarms:number; storedRows:number;
   earliestDate:string|null; latestDate:string|null; lastImport:AlarmMttrImportInfo|null;
   lastJobImport:JobProxyMappingImportInfo|null; mappedJobs:number; unassignedJobs:number;
   legacyUnlinkedRows:number; needsAlarmReimport:boolean;
 }
-/** null/undefined = all, [] = no selection. Empty string selects the unassigned bucket explicitly. */
+/** null/undefined = all qualifying named owners; [] = no selection. */
 export type JobProxyScope=readonly string[]|null|undefined;
 export type JobProxyMttrStatus='available'|'invalid_range'|'no_dataset'|'alarm_reimport_required'|'no_jobs_both_periods'|'no_baseline_jobs'|'no_current_jobs'|'zero_baseline';
 export interface JobProxyMttrComparison extends Omit<AlarmMttrComparison,'status'> {status:JobProxyMttrStatus}
@@ -107,20 +107,36 @@ const usableGroup=(day:JobProxyDay)=>Number.isSafeInteger(day.count)&&day.count>
 const asc=(a:string,b:string)=>a<b?-1:a>b?1:0;
 const blocked=(d:JobProxyMttrDataset)=>d.needsAlarmReimport&&d.totalJobs===0;
 
-/** A mapped owner can be selected before their first eligible Job; old V5 snapshots fall back to known owners. */
-export function getJobProxyAssignees(data:ProxyInput):string[]{
-  if(!isProxy(data))return [];
-  return [...new Set([...(data.assignees??[]),...data.personDays.map(d=>d.assignee)].filter(Boolean))].sort(asc);
+const namedOwner=(name:string)=>typeof name==='string'&&name.trim().length>0;
+
+function inComparisonPeriods(baseline?:MttrPeriod,current?:MttrPeriod):(date:string)=>boolean{
+  if(baseline===undefined&&current===undefined)return ()=>true;
+  const ranges=[baseline,current].filter((r):r is MttrPeriod=>!!r&&isValidMttrPeriod(r));
+  return date=>ranges.some(r=>date>=r.from&&date<=r.to);
 }
 
-/** Preserve the backend's Job weighting when combining several assignees on one date. */
+/** Owners with an eligible winning Job in either supplied period (or in all history when neither is supplied). */
+export function getJobProxyAssignees(data:ProxyInput,baseline?:MttrPeriod,current?:MttrPeriod):string[]{
+  if(!isProxy(data)||blocked(data))return [];
+  const included=inComparisonPeriods(baseline,current),names=new Set<string>();
+  for(const d of data.personDays)if(namedOwner(d.assignee)&&usableGroup(d)&&included(d.date))names.add(d.assignee);
+  return [...names].sort(asc);
+}
+
+/** The distinction between All and an empty selection survives a date or allowlist change. */
+export function resolveJobProxyScope(data:ProxyInput,assignees:JobProxyScope,baseline?:MttrPeriod,current?:MttrPeriod):string[]|null{
+  if(assignees==null)return null;
+  const eligible=new Set(getJobProxyAssignees(data,baseline,current));
+  return [...new Set(assignees)].filter(name=>eligible.has(name));
+}
+
+/** Old V5 day totals included ownerless Jobs. Build every report, including All, from named owner groups. */
 export function selectJobProxyDays(data:ProxyInput,assignees?:JobProxyScope):JobProxyDay[]{
   if(!isProxy(data)||blocked(data))return [];
-  if(assignees==null)return data.days.filter(usableGroup);
-  const selected=new Set(assignees),daily=new Map<string,JobProxyDay>();
-  if(!selected.size)return [];
+  const selected=assignees==null?null:new Set(assignees),daily=new Map<string,JobProxyDay>();
+  if(selected?.size===0)return [];
   for(const d of data.personDays){
-    if(!selected.has(d.assignee)||!usableGroup(d))continue;
+    if(!namedOwner(d.assignee)||(selected&&!selected.has(d.assignee))||!usableGroup(d))continue;
     const sum=daily.get(d.date)??{date:d.date,count:0,totalSeconds:0};
     sum.count+=d.count;sum.totalSeconds+=d.totalSeconds;daily.set(d.date,sum);
   }
@@ -158,14 +174,13 @@ export function compareJobProxyMttr(data:ProxyInput,baseline:MttrPeriod,current:
   return compareProxyDays(data,selectJobProxyDays(data,assignees),baseline,current);
 }
 /** Rank signed reductions before rounding for display, and keep one-period-only people visible as unranked.
- * Include names observed in either selected period, plus explicitly selected names with no observations. */
+ * Absent or stale names cannot create rows; an observed owner needs samples in both periods to earn a rank. */
 export function rankJobProxyMttr(data:ProxyInput,baseline:MttrPeriod,current:MttrPeriod,assignees?:JobProxyScope):JobProxyMttrPerson[]{
   if(!isProxy(data)||blocked(data))return [];
   const selected=assignees==null?null:new Set(assignees),grouped=new Map<string,JobProxyDay[]>();
-  if(selected)for(const name of selected)if(name)grouped.set(name,[]);
+  const included=inComparisonPeriods(baseline,current);
   for(const d of data.personDays){
-    if(!d.assignee||(selected&&!selected.has(d.assignee))||!usableGroup(d))continue;
-    if(!(d.date>=baseline.from&&d.date<=baseline.to)&&!(d.date>=current.from&&d.date<=current.to))continue;
+    if(!namedOwner(d.assignee)||(selected&&!selected.has(d.assignee))||!usableGroup(d)||!included(d.date))continue;
     const bucket=grouped.get(d.assignee);if(bucket)bucket.push(d);else grouped.set(d.assignee,[d]);
   }
   const rows:JobProxyMttrPerson[]=[...grouped].map(([assignee,days])=>({assignee,rank:null,comparison:compareProxyDays(data,days,baseline,current)}));
