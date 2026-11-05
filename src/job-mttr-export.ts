@@ -32,12 +32,16 @@ function buildJobSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,curren
  const scope=effective===null?(usesAL?t('AL 规则内全部具名人员','All matched Job AL people under the policy'):t('全部已匹配处理人（历史 AG）','All matched owners (historical AG)')):effective.join(', ')||t('无符合条件的所选人员','No eligible selected owners');
  const range=(p:MttrPeriod)=>`${p.from} — ${p.to}`;
  const c=compareJobProxyMttr(data,baseline,current,effective);
- const common:Record<string,Cell>={[t('人员范围','Owner selection')]:scope,[t('人员归属列','Job personnel column')]:axis};
+ const cap=data?.durationFilter;
+ const capColumn=t('工单 MTTR 上限（小时，含等于）','Maximum Job MTTR (hours, inclusive)');
+ const common:Record<string,Cell>={[t('人员范围','Owner selection')]:scope,[t('人员归属列','Job personnel column')]:axis,
+   [capColumn]:cap?cap.maxDurationHours:t('未启用','Off')};
  if(mode!=='full'){
    common[t('明细视图','Detail view')]=mode==='person'?t('单人','Individual'):t('跟随报表人员范围','Report selection');
    if(usesAL)common[t('已应用 AL 模式','Applied AL mode')]=policy?.mode??'';
    if(data?.needsAlarmReimport)common[t('数据覆盖','Data coverage')]=t('部分历史告警待重传','Partial history; alarm reimport required');
  } else {
+   if(cap)common[t('超出时长上限的工单（全部人员、所有日期，应用人员规则后）','Jobs above the cap (all people and dates after personnel policy)')]=cap.excludedJobs;
    common[t('待重传的历史告警行','Historical alarm rows awaiting reimport')]=data?.legacyUnlinkedRows??'';
    if(usesAL){
    common[t('已应用 AL 模式','Applied AL mode')]=policy?.mode??'';
@@ -51,7 +55,7 @@ function buildJobSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,curren
  const joinRule=usesAL
    ? t('告警 AE 关联 Job C；仅使用 Job AL 筛选人员并排名。AL 模式 all 包含所有具名 AL 人员，include 仅保留名单内人员，exclude 排除名单内人员；AL 未匹配或为空的工单不计。','Link alarm AE to Job C. Scope and rank using Job AL only. All includes named AL people, include keeps listed people, and exclude removes listed people. Missing or unmatched AL is excluded.')
    : t('这是历史快照：告警 AE 关联 Job C，人员来自历史 AG 列。','Historical snapshot: alarm AE joins Job C; personnel came from the historical AG column.');
- const method=joinRule+' '+t('B 白名单，AE 非空，I>0；每个 Job 只取最长有效告警时长，按该告警 K 列日期分期；并列最长取最早发生日期。平均值按工单计；仅计入已关联具名处理人的工单。两期均无有效工单的人不展示，仅一期有工单的人不排名。','B in allowlist, nonblank AE, I>0. Count each Job once using its longest eligible alarm. Assign it to that alarm’s K date (earliest on ties). Mean is Job-weighted. Only Jobs with a matched named owner count. Owners with no Jobs in either period are omitted; owners with Jobs in only one period are unranked.');
+ const method=joinRule+' '+t('B 白名单，AE 非空，I>0；每个 Job 只取最长有效告警时长，按该告警 K 列日期分期；并列最长取最早发生日期。平均值按工单计；仅计入已关联具名处理人的工单。两期均无有效工单的人不展示，仅一期有工单的人不排名。','B in allowlist, nonblank AE, I>0. Count each Job once using its longest eligible alarm. Assign it to that alarm’s K date (earliest on ties). Mean is Job-weighted. Only Jobs with a matched named owner count. Owners with no Jobs in either period are omitted; owners with Jobs in only one period are unranked.')+(cap?' '+t(`按每单最长有效告警时长过滤：超过 ${cap.maxDurationHours} 小时的整单排除，等于上限的保留。`,`Exclude the whole Job if its longest eligible alarm exceeds ${cap.maxDurationHours} hours; keep Jobs exactly at the cap.`):'');
  const summary=(p:typeof c.baseline)=>({
    From:p.from,To:p.to,...common,[t('有效工单数','Eligible Jobs')]:measured?p.count:'',
    [t('工单总时长（秒）','Total Job seconds')]:measured?p.totalSeconds:'',
@@ -72,7 +76,7 @@ function buildJobSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,curren
  }
  const unique=[...winners.values()];
  function detailSheet(name:string,p:typeof c.baseline):Sheet {
-   const rows=measured?filterJobProxyDetails(unique,{from:p.from,to:p.to,assignees:effective}):[];
+   const rows=measured?filterJobProxyDetails(unique,{from:p.from,to:p.to,assignees:effective,maxDurationHours:cap?.maxDurationHours}):[];
    const total=rows.reduce((sum,d)=>sum+d.seconds,0);
    if(measured && (rows.length!==p.count || Math.abs(total-p.totalSeconds)>Math.max(1e-6,Math.abs(total)*1e-10)))throw stale();
    if(rows.length>1_048_574)throw new Error(t('单期工单数超过 Excel 单表容量，请缩小日期或人员范围。','This period exceeds one Excel worksheet. Narrow the dates or owner selection.'));
@@ -92,7 +96,7 @@ function buildJobSheets(data:JobProxyMttrDataset|null,baseline:MttrPeriod,curren
  const ranked=rankJobProxyMttr(data,baseline,current,effective);
  const days=selectJobProxyDays(data,effective);
  return [...comparisons,
-  {name:t('处理人 MTTR 排名','MTTR by owner'),rows:ranked.map(r=>({[t('排名','Rank')]:r.rank??'',[ownerColumn]:r.assignee,[t('基准期','Baseline')]:range(baseline),[t('对比期','Comparison')]:range(current),[t('基准工单数','Baseline Jobs')]:r.comparison.baseline.count,[t('对比工单数','Comparison Jobs')]:r.comparison.current.count,[t('基准均值（秒）','Baseline mean (seconds)')]:r.comparison.baseline.meanSeconds??'',[t('对比均值（秒）','Comparison mean (seconds)')]:r.comparison.current.meanSeconds??'',[t('减少率 (%)','Reduction (%)')]:r.comparison.reductionRate??'',[t('对比状态','Comparison status')]:r.comparison.status}))},
-  {name:t('工单 MTTR 每日明细','Job MTTR by date'),rows:days.filter(d=>(d.date>=baseline.from&&d.date<=baseline.to)||(d.date>=current.from&&d.date<=current.to)).map(d=>({[t('工单归属日期','Job attribution date')]:d.date,[t('有效工单数','Eligible Jobs')]:d.count,[t('工单总时长（秒）','Total Job seconds')]:d.totalSeconds,[t('平均 MTTR（秒）','Mean MTTR (seconds)')]:d.totalSeconds/d.count}))},
+  {name:t('处理人 MTTR 排名','MTTR by owner'),rows:ranked.map(r=>({...(cap?{[capColumn]:cap.maxDurationHours}:{}),[t('排名','Rank')]:r.rank??'',[ownerColumn]:r.assignee,[t('基准期','Baseline')]:range(baseline),[t('对比期','Comparison')]:range(current),[t('基准工单数','Baseline Jobs')]:r.comparison.baseline.count,[t('对比工单数','Comparison Jobs')]:r.comparison.current.count,[t('基准均值（秒）','Baseline mean (seconds)')]:r.comparison.baseline.meanSeconds??'',[t('对比均值（秒）','Comparison mean (seconds)')]:r.comparison.current.meanSeconds??'',[t('减少率 (%)','Reduction (%)')]:r.comparison.reductionRate??'',[t('对比状态','Comparison status')]:r.comparison.status}))},
+  {name:t('工单 MTTR 每日明细','Job MTTR by date'),rows:days.filter(d=>(d.date>=baseline.from&&d.date<=baseline.to)||(d.date>=current.from&&d.date<=current.to)).map(d=>({...(cap?{[capColumn]:cap.maxDurationHours}:{}),[t('工单归属日期','Job attribution date')]:d.date,[t('有效工单数','Eligible Jobs')]:d.count,[t('工单总时长（秒）','Total Job seconds')]:d.totalSeconds,[t('平均 MTTR（秒）','Mean MTTR (seconds)')]:d.totalSeconds/d.count}))},
  ];
 }

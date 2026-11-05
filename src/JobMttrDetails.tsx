@@ -16,18 +16,18 @@ type FocusProps={
 type Props=FocusProps & {
   t:Translate; data:JobProxyMttrDataset|null; report:JobProxyMttrComparison;
   assignees:string[]|null; api:AlarmApi; offline:boolean; offlineRows?:JobProxyDetailRow[];
-  formatDuration:(seconds:number|null)=>string; onExport?:()=>void|Promise<void>;
+  maxDurationHours?:number;formatDuration:(seconds:number|null)=>string; onExport?:()=>void|Promise<void>;
 };
 const PAGE_SIZE=20;
 const count=(n:number)=>n.toLocaleString('en-US');
 type PeriodProps=Omit<Props,keyof FocusProps|'report'|'onExport'> & {title:string;period:MttrAggregate};
 type LoadResult={request:object;page?:JobProxyDetailPage;error?:string};
 
-function DetailPeriod({t,data,assignees,api,offline,offlineRows,formatDuration,title,period}:PeriodProps){
+function DetailPeriod({t,data,assignees,api,offline,offlineRows,formatDuration,title,period,maxDurationHours}:PeriodProps){
   const [page,setPage]=useState(0),[attempt,setAttempt]=useState(0);
   const lastPage=Math.max(0,Math.ceil(period.count/PAGE_SIZE)-1),index=Math.min(page,lastPage);
   const offset=index*PAGE_SIZE;
-  const filter=useMemo(()=>({from:period.from,to:period.to,assignees}),[period.from,period.to,assignees]);
+  const filter=useMemo(()=>({from:period.from,to:period.to,assignees,maxDurationHours}),[period.from,period.to,assignees,maxDurationHours]);
   const request=useMemo(()=>({filter,offset,data,attempt}),[filter,offset,data,attempt]);
   const [loaded,setLoaded]=useState<LoadResult|null>(null);
   const canShow=period.days>0&&period.count>0;
@@ -141,7 +141,7 @@ export default function JobMttrDetails({onExport,report,availablePeople=[],focus
   const scope=focusPerson??(assignees===null?t('当前报表范围（全部入选人员）','Current report scope (all eligible people)'):
     !assignees.length?t('当前报表范围（未选人员）','Current report scope (no people selected)'):
     t(`当前报表范围（${count(assignees.length)} 人）：`,`Current report scope (${count(assignees.length)} selected): `)+assignees.join(t('、',', ')));
-  const scopeKey=JSON.stringify([focusPerson,assignees,data?.revision,data?.allowlist,data?.lastImport?.importedAt,data?.lastJobImport?.importedAt]);
+  const scopeKey=JSON.stringify([focusPerson,assignees,common.maxDurationHours,data?.revision,data?.allowlist,data?.lastImport?.importedAt,data?.lastJobImport?.importedAt]);
   const include=(label:string,period:MttrAggregate)=><DetailPeriod
     key={JSON.stringify([label,period.from,period.to,scopeKey])} {...common} title={label} period={period}/>;
   return <section id="job-mttr-details" tabIndex={-1} className="job-detail-section" aria-label={t('工单明细','Job details')}>
@@ -149,7 +149,8 @@ export default function JobMttrDetails({onExport,report,availablePeople=[],focus
       {onExport&&(!common.offline||common.offlineRows)&&<button className="btn screen-only" type="button" disabled={exporting||!report.baseline.count&&!report.current.count} onClick={async()=>{setExporting(true);try{await onExport()}finally{setExporting(false)}}}><Download size={15}/>{exporting?t('正在导出…','Exporting…'):focusPerson!==null?t('导出此人明细','Export this person’s details'):t('导出完整明细','Export all detail rows')}</button>}
     </header>
     <PersonControl t={t} legacy={legacy} availablePeople={availablePeople} focusPerson={focusPerson} onFocusPersonChange={onFocusPersonChange}/>
-    <MttrCalculationRules t={t} report={report} scope={scope} legacy={legacy} formatDuration={common.formatDuration}/>
+    {common.maxDurationHours!==undefined&&<p className="job-duration-applied">{t(`明细时长条件：保留工单 MTTR ≤ ${common.maxDurationHours} 小时。`,`Detail duration filter: Job MTTR ≤ ${common.maxDurationHours} hours.`)}</p>}
+    <MttrCalculationRules maxDurationHours={common.maxDurationHours} t={t} report={report} scope={scope} legacy={legacy} formatDuration={common.formatDuration}/>
     <FocusSummary t={t} scope={scope} report={report} formatDuration={common.formatDuration}/>
     <p className="job-detail-print-note">{t('明细仅打印当前页；完整筛选结果可导出 Excel。','Only the displayed page of each table is printed. Export Excel for all matching Jobs.')}</p>
     <div className="job-detail-grid">{include(t('基准期工单','Baseline Jobs'),report.baseline)}{include(t('对比期工单','Comparison Jobs'),report.current)}</div>

@@ -125,3 +125,20 @@ test('obsolete explicit focus fails closed, and a null focus over an empty selec
  assert.deepEqual(none.slice(1).map(s=>s.rows.length),[1,1]);
  assert.equal(none[0].rows[0]['Eligible Jobs'],0);
 });
+
+test('capped Excel exports agree with offline winner rows, retaining equality and excluding the whole longer Job',()=>{
+ const snapshot={...data,alPolicy:{mode:'all' as const,names:[]},durationFilter:{maxDurationHours:0.25,excludedJobs:1},
+   totalJobs:5,days:[{date:a,count:3,totalSeconds:1080},{date:b,count:2,totalSeconds:390}],
+   personDays:data.personDays.filter(p=>p.assignee && !(p.assignee==='Lin'&&p.date===b))};
+ const full=jobMttrSheets(snapshot,baseline,current,owners,'en',detail);
+ const one=jobDetailSheets(snapshot,baseline,current,owners,'Lin','en',detail);
+ for(const sheets of [full,one]){
+   assert.equal(sheets[0].rows[0]['Maximum Job MTTR (hours, inclusive)'],0.25);
+   assert.ok(sheets[1].rows.some(r=>r['Job ID']==='0003'&&r['Longest eligible duration (seconds)']===900));
+   assert.doesNotMatch(JSON.stringify(sheets),/0006/);
+ }
+ assert.equal(full[0].rows[0]['Jobs above the cap (all people and dates after personnel policy)'],1);
+ assert.deepEqual(full[0].rows.map(r=>[r['Eligible Jobs'],r['Mean MTTR (seconds)']]),[[3,360],[1,300]]);
+ assert.deepEqual(one[0].rows.map(r=>[r['Eligible Jobs'],r['Mean MTTR (seconds)'],r['Reduction (%)']]),[[1,900,''],[0,'','']]);
+ assert.deepEqual(full[3].rows.map(r=>[r['Job AL person'],r.Rank]),[['Mei',1],['Lin','']]);
+});

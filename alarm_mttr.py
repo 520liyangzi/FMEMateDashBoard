@@ -10,7 +10,7 @@ no unique event key, identical events in disjoint files cannot be distinguished.
 """
 from contextlib import contextmanager, closing
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 import csv
 import hashlib
 import json
@@ -171,13 +171,37 @@ def _report_cohort(mode):
     return _NAMED_COHORT
 
 
-def get_dataset(db):
+def _max_duration_hours(value):
+    if value is None:
+        return None
+    try:
+        if type(value) in (int,float) and value>0 and math.isfinite(float(value)*3600):
+            return float(value)
+    except OverflowError:
+        pass
+    raise MttrImportError('工单时长上限须为有限的正数（小时） / maxDurationHours must be a finite positive number of hours.')
+
+
+def _cap_seconds(hours):
+    # Sources have microsecond precision. Apply the decimal hour limit at
+    # that precision: neither X*3600 nor seconds/3600 preserves every tie.
+    micros=(Decimal(str(hours))*3_600_000_000).to_integral_value(rounding=ROUND_DOWN)
+    return float(micros.scaleb(-6))
+
+
+_WITHIN_MAX_HOURS = 'm.seconds <= :max_seconds'
+
+
+def get_dataset(db,max_duration_hours=None):
+    max_hours=_max_duration_hours(max_duration_hours)
     ids=[r[0] for r in db.execute('SELECT alarm_id FROM alarm_mttr_allowlist ORDER BY rowid')]
     policy=get_al_policy(db)
+    cohort=_report_cohort(policy['mode'])
+    duration_where=' WHERE '+_WITHIN_MAX_HOURS if max_hours is not None else ''
     winners = db.execute(f"""
-        SELECT m.day,o.assignee,count(*),sum(m.seconds),sum(m.alarm_count) {_report_cohort(policy['mode'])}
+        SELECT m.day,o.assignee,count(*),sum(m.seconds),sum(m.alarm_count) {cohort}{duration_where}
         GROUP BY m.day,o.assignee ORDER BY m.day,o.assignee
-    """)
+    """,dict(max_seconds=_cap_seconds(max_hours) if max_hours is not None else None))
     days_by_date,persons={},[]
     alarms=jobs=0
     people=set()
@@ -193,16 +217,22 @@ def get_dataset(db):
           FROM alarm_mttr_rows r LEFT JOIN alarm_mttr_job_links l USING(signature)""").fetchone()
     last=db.execute('SELECT data FROM alarm_mttr_last_import WHERE id=1').fetchone()
     mapping=db.execute('SELECT data FROM alarm_mttr_job_import WHERE id=1').fetchone()
-    matched=jobs if policy['mode']=='all' else db.execute('SELECT count(*)'+_NAMED_COHORT).fetchone()[0]
+    # Duration is a view filter applied after the AL policy. Its exclusions
+    # must not be counted as missing AL mappings or as AL policy exclusions.
+    after_policy=jobs if max_hours is None else db.execute('SELECT count(*)'+cohort).fetchone()[0]
+    matched=after_policy if policy['mode']=='all' else db.execute('SELECT count(*)'+_NAMED_COHORT).fetchone()[0]
     unassigned=db.execute('SELECT count(*) FROM alarm_mttr_job_max').fetchone()[0]-matched
-    return dict(formatVersion=5,source='alarm-jobs',allowlist=ids,days=days,personDays=persons,assignees=sorted(people),
-                alPolicy=policy,alDiagnostics=dict(missingALJobs=unassigned,filteredOutJobs=matched-jobs),
+    report=dict(formatVersion=5,source='alarm-jobs',allowlist=ids,days=days,personDays=persons,assignees=sorted(people),
+                alPolicy=policy,alDiagnostics=dict(missingALJobs=unassigned,filteredOutJobs=matched-after_policy),
                 revision=db.execute('SELECT token FROM alarm_mttr_revision WHERE id=1').fetchone()[0],
                 totalAlarms=alarms,totalJobs=jobs,storedRows=stored,unassignedJobs=unassigned,
                 mappedJobs=db.execute('SELECT count(*) FROM alarm_mttr_job_al').fetchone()[0],
                 legacyUnlinkedRows=unlinked,needsAlarmReimport=bool(unlinked),
                 earliestDate=days[0]['date'] if days else None,latestDate=days[-1]['date'] if days else None,
                 lastImport=json.loads(last[0]) if last else None,lastJobImport=json.loads(mapping[0]) if mapping else None)
+    if max_hours is not None:
+        report['durationFilter']=dict(maxDurationHours=max_hours,excludedJobs=after_policy-jobs)
+    return report
 
 
 def clear_alarm(db):
@@ -223,12 +253,12 @@ def _valid_value(v):
     return isinstance(v,str) and 0<len(v)<=512 and v==v.strip() and not re.search(r'[\x00-\x1f\ud800-\udfff]',v)
 
 
-def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=0,limit=100):
+def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=0,limit=100,max_duration_hours=None):
     """Read a page of the Jobs included in the mean and totals over the full selection.
 
     A missing assignee filter includes all matched Jobs; [] or [''] includes
     none. The one global winning alarm per Job is determined before applying
-    either inclusive date bound.
+    either inclusive date bound or the optional maximum duration.
     """
     for bound in (date_from,date_to):
         if bound is None:continue
@@ -247,6 +277,9 @@ def list_job_proxy_details(db,date_from=None,date_to=None,assignees=None,offset=
 
     clauses=[]
     args=dict(skip=offset,take=limit)
+    max_hours=_max_duration_hours(max_duration_hours)
+    if max_hours is not None:
+        clauses.append(_WITHIN_MAX_HOURS);args['max_seconds']=_cap_seconds(max_hours)
     if date_from:
         clauses.append('m.day>=:since');args['since']=date_from
     if date_to:

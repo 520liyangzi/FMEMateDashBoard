@@ -222,7 +222,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.2.2**。从 2.2.0 或 2.2.1 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.2.3**。从 2.2.0–2.2.2 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -260,7 +260,7 @@ Overview and User analytics always explain the user-count methodology. A logging
 Date filters apply to visit counts, visit days and photo totals independently of Scene. Click photos to view them in full. Excel includes visit text and photo counts; use offline HTML or Print / Save PDF to share photos. Offline HTML embeds the complete visit archive and images, remains read-only, and excludes real visits from demo exports. Local persistence and ZIP backups include visits/photos; old backups without visits remain compatible. Clearing application logs preserves site visits.
 
 
-## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.2.2)
+## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.2.3)
 
 进入 **成效统计**。在告警白名单中填入 `26540,26564,26568` 这样的逗号分隔列表，导入告警文件和一份或多份 Job 人员文件；这两类数据的先后顺序不限。计算整体、多人或个人 MTTR 都需要告警和人员归属。Job 表用 C 列关联工单、用 AL 列确定人员，不使用它的创建、关闭时间，也不需要 TT 表。每个 Excel 工作簿仅读取第一个工作表，第 1 行为表头，从第 2 行开始读取。
 
@@ -274,6 +274,8 @@ Date filters apply to visit counts, visit days and photo totals independently of
 | Job | AL | 此工单的统计人员；整体筛选、个人分组及提升率排名均以此列为准。 / Person used for global filtering, grouping and individual ranking. |
 
 **先归并工单，再选日期。** 对每个 Job，只保留白名单命中、Job ID 非空、K 日期有效且 Duration 大于 0 的告警。将这些告警中**最长的一条 Duration** 作为该 Job 的估算 MTTR，并以这条告警的 K 日期作为工单的统计日期。最长时长并列时取最早的发生日期。比如某 Job 在周日有一条 8 分钟的告警、周一有一条 11 分钟的告警，该 Job 只归到周一，时长为 11 分钟。先对全部已导入数据归并，避免在两个不重叠区间重复计入同一工单。更改白名单或补传更长告警后，该 Job 的时长和统计日期都可能变化。
+
+**可选的工单时长上限。** 在成效统计中启用上限，输入大于 0 的小时数（可以是小数）并应用。先取每张工单最长的有效告警时长，再排除**严格超过**上限的整张工单。例如上限为 2 小时，一张工单有 30 分钟和 3 小时两条有效告警，则整单不计；恰好 2 小时的工单保留。两期、人员排名、工单明细、Excel 与 AI 总结使用同一上限。页面标注的超时排除数覆盖全部日期、所有通过 AL 名单的工单。此设置默认关闭，记在当前浏览器；关闭即可恢复未限时结果，原始数据不变。新版离线 HTML 保存 AL 规则允许的全部有效工单（包括当前超过上限的工单）和导出时的设置，可离线调整或关闭上限；没有逐单数据的旧快照不能按时长重算。
 
 **哪些工单算有效？** 告警 AE 列的 Job ID 必须与 Job 表 C 列匹配，且 AL 列有人名。即使 AG 与 AL 不同，所有筛选、分组和排名都只看 AL；AG 可以为空，AL 为空时不取 AG 补齐。只有既有合格告警、又能关联到 AL 人员且符合已保存名单规则的工单才计入整体均值、个人统计和工单明细。只有 Job 记录而无合格告警的工单也不计入。页面分别列出全部已导入日期中“未匹配 AL”和“已匹配 AL 但被名单排除”的工单数；这些告警仍保留，以后补传人员表即可纳入，不必重传告警。
 
@@ -304,6 +306,8 @@ Date filters apply to visit counts, visit days and photo totals independently of
 **English.** Under **Effectiveness**, enter the comma-separated alarm ID allowlist and import the alarm export and one or more Job-to-assignee files. Either source can be imported first. Both are required for overall, group and individual MTTR. In every workbook only the first worksheet is read, with headers in row 1 and data from row 2. Job timestamps are not used.
 
 The dashboard first groups eligible alarms across all imported dates by their nonblank Job ID. It excludes IDs outside the allowlist, invalid occurrence dates and nonpositive durations. For each Job, it takes the **maximum eligible alarm duration** as a proxy for its resolution time. The K date of that alarm determines which period contains the Job; tied maxima use the earliest occurrence date. Each Job therefore counts once across nonoverlapping periods. Changing the allowlist or importing a longer alarm for the same Job can change both its contribution and its period.
+
+**Optional Job duration cap.** Under **Effectiveness**, enable the cap, enter a positive number of hours (decimals are accepted) and apply it. The dashboard first finds each Job’s longest eligible alarm, then excludes the entire Job only if that duration **exceeds** the cap. At a 2-hour cap, a Job with eligible alarms of 30 minutes and 3 hours is excluded; a Job lasting exactly 2 hours stays in. Both periods, personal rankings, Job details, Excel and AI summaries use the same cap. The displayed exclusion count covers all dates and all Jobs admitted by the AL policy. It starts off and is remembered in the current browser. Turning it off restores the uncapped report without changing imported data. A new offline HTML snapshot includes every Job admitted by the saved AL policy, even Jobs hidden by the current cap, along with the captured setting, so the cap can be adjusted or disabled offline. Older snapshots without individual Job rows cannot recalculate it.
 
 A Job also needs a matching ID in Job column C and a name in column AL. All filtering, grouping, and rankings use AL. AG can be blank or different; it is never a fallback when AL is blank. Unmatched Jobs stay out of the overall mean, individual statistics and detail tables. Across all imported dates, the dashboard counts missing AL assignments separately from Jobs with a known AL person excluded by the saved list. It keeps their alarm records. Import a missing assignment later and the Job can count without reimporting alarms. A Job containing no eligible alarms does not count even if its owner is known.
 

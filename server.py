@@ -29,7 +29,7 @@ import alarm_mttr
 from mttr_uploads import AlarmJobUploads, AlarmUploads, MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '2.2.2'
+APP_VERSION = '2.2.3'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -194,19 +194,22 @@ class Store:
                     'hasLegacyMttr': bool(db.execute('SELECT EXISTS(SELECT 1 FROM mttr_dataset)').fetchone()[0]),
                     'total': db.execute('SELECT count(*) FROM logs').fetchone()[0]}
 
-    def get_alarm_mttr(self):
-        with self.lock, self.connect() as db:
-            return alarm_mttr.get_dataset(db)
+    def get_alarm_mttr(self, max_duration_hours=None):
+        try:
+            with self.lock, self.connect() as db:
+                return alarm_mttr.get_dataset(db,max_duration_hours)
+        except MttrImportError as exc:
+            raise ApiError(400, str(exc), exc.details) from exc
 
     def alarm_job_details(self, payload):
-        if set(payload) - {'start', 'end', 'assignees', 'offset', 'limit'}:
+        if set(payload) - {'start', 'end', 'assignees', 'offset', 'limit', 'maxDurationHours'}:
             raise ApiError(400, '未知的工单筛选条件 / Unknown Job detail filter.')
         try:
             with self.lock, self.connect() as db:
                 return alarm_mttr.list_job_proxy_details(
                     db, date_from=payload.get('start'), date_to=payload.get('end'),
                     assignees=payload.get('assignees'), offset=payload.get('offset', 0),
-                    limit=payload.get('limit', 100))
+                    limit=payload.get('limit', 100),max_duration_hours=payload.get('maxDurationHours'))
         except MttrImportError as exc:
             raise ApiError(400, str(exc), exc.details) from exc
 
@@ -1086,7 +1089,16 @@ class Handler(BaseHTTPRequestHandler):
             path = unquote(url.path)
             params = parse_qs(url.query)
             if path == '/api/mttr/alarms':
-                return self.json(self.server.store.get_alarm_mttr())
+                query=parse_qs(url.query,keep_blank_values=True)
+                if set(query)-{'maxDurationHours'} or len(query.get('maxDurationHours',[]))>1:
+                    raise ApiError(400,'Specify at most one maxDurationHours filter.')
+                hours=None
+                if 'maxDurationHours' in query:
+                    value=query['maxDurationHours'][0]
+                    if not re.fullmatch(r'(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?',value):
+                        raise ApiError(400,'maxDurationHours must be a finite positive number of hours.')
+                    hours=float(value)
+                return self.json(self.server.store.get_alarm_mttr(hours))
             if path == '/api/mttr/jobs':
                 audit_params=parse_qs(url.query,keep_blank_values=True)
                 if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit','excludeCrossDay','maxHours','gapHours','baselineFrom','baselineTo','currentFrom','currentTo'} or any(len(values)!=1 for values in audit_params.values()):

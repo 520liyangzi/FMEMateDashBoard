@@ -260,3 +260,20 @@ test('new proxy prompts explicitly exclude unmatched Jobs while archived proxy e
  assert.match(fresh,/所有日期的诊断数，不是本期分母/);assert.doesNotMatch(fresh,/AG 是处理人/);
  assert.doesNotMatch(prior,/整体也排除未匹配或未分配的工单/);
 });
+
+test('Job proxy prompt quotes the inclusive cap applied to the filtered sample, not a legacy threshold',()=>{
+ const base='2026-10-01',current='2026-10-08';
+ const dates=[{date:base,count:1,totalSeconds:1800},{date:current,count:1,totalSeconds:900}];
+ const facts=buildAiFacts({records:[],presets:[],groups:[],feedback:[],failureNotes:{},from:base,to:current,scene:'',demo:false,
+   mttrBaseline:{from:base,to:base},mttrCurrent:{from:current,to:current},
+   alarmJobMttr:{formatVersion:5,source:'alarm-jobs',allowlist:['26540'],storedRows:7,totalAlarms:7,totalJobs:2,earliestDate:base,latestDate:current,
+     lastImport:null,lastJobImport:null,mappedJobs:6,unassignedJobs:1,legacyUnlinkedRows:0,needsAlarmReimport:false,alPolicy:{mode:'all',names:[]},
+     days:dates,personDays:dates.map(d=>({...d,assignee:'Mei'})),durationFilter:{maxDurationHours:0.5,excludedJobs:3}}});
+ const mttr=facts.effectiveness.mttr;
+ assert.equal(mttr.businessRule,'one-job-max-eligible-alarm-duration');
+ if(!('durationFilter' in mttr)||!mttr.durationFilter||!('excludedJobsAcrossAllDates' in mttr.durationFilter))assert.fail('Missing Job cap evidence');
+ assert.deepEqual([mttr.durationFilter.maxDurationHours,mttr.durationFilter.excludedJobsAcrossAllDates,mttr.baseline.count,mttr.reductionRate],[0.5,3,1,50]);
+ const prompt=buildAiReportPrompt(facts);
+ assert.match(prompt,/本次工单 MTTR 上限为 0.5 小时/);assert.match(prompt,/超过上限才整单排除，等于上限保留/);
+ assert.match(prompt,/不是某期或所选个人的排除数/);assert.doesNotMatch(prompt,/仅保留严格小于/);
+});

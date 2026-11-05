@@ -36,6 +36,11 @@ export function buildAiReportPrompt(facts: AiFacts, instructions = ''): string {
   const proxyMode = facts.effectiveness.mttr.businessRule === JOB_PROXY_MTTR_RULE;
   const matchedOwnerMode = proxyMode && 'cohortRule' in facts.effectiveness.mttr && facts.effectiveness.mttr.cohortRule===JOB_PROXY_COHORT_RULE;
   const alMode = proxyMode && 'personnelColumn' in facts.effectiveness.mttr && facts.effectiveness.mttr.personnelColumn==='AL';
+  const proxyDuration=facts.effectiveness.mttr.businessRule===JOB_PROXY_MTTR_RULE && 'durationFilter' in facts.effectiveness.mttr
+    ? facts.effectiveness.mttr.durationFilter : null;
+  const capRule=proxyDuration && 'maxDurationHours' in proxyDuration
+    ? `本次工单 MTTR 上限为 ${proxyDuration.maxDurationHours} 小时。中英文都说明：每单先取最长有效告警时长，超过上限才整单排除，等于上限保留。两期与人员排行只代表保留的工单。excludedJobsAcrossAllDates 是应用人员规则后全部人员、所有日期的排除数，不是某期或所选个人的排除数。`
+    : '';
   const personnelRule=alMode
     ? '告警表 AE 关联 Job 表 C，所有人员选择和排名只用 Job 表 AL 列。按快照 alPolicy 说明已应用的模式、名单和所选人员范围：all 包含全部具名 AL 人员，include 仅保留名单内人员，exclude 排除名单内人员。按 alDiagnostics 说明 AL 缺失或不匹配的工单数、名单过滤的工单数；两者都是所有日期的诊断数，不是本期分母。若 omittedNames 大于零，说明名单仅列举部分，不猜其余姓名；无策略快照或诊断时不补数字。'
     : '这份历史快照中，告警表 AE 关联 Job 表 C，AG 是处理人。只报告该快照的历史人员归属，不套用后来的 AL 列或名单。';
@@ -50,7 +55,7 @@ export function buildAiReportPrompt(facts: AiFacts, instructions = ''): string {
     : `2. 成效统计：结合窗口留存或周期复用说明持续使用；不要重复上一节已写的数字。仅在 effectiveness.mttr 的 businessRule 为 TT-category-filter-joined-to-completed-JOB-by-TT-ID 时，引用新口径：基准期和对比期的具体起止日期、各期有效完成 JOB 数、平均耗时（将 meanSeconds 换算为小时或天，标明单位）及 MTTR 减少率。必须说明 calendarDayFilter、durationFilter 与 meanGapFilter 是否启用；时长过滤启用时写清 X 小时阈值，耗时大于等于 X 小时的 JOB 均排除、仅保留严格小于 X 小时的 JOB，支持小数。先应用跨天与单 JOB 时长条件，再按所选两期一次性计算处理人均值差筛选；使用 reportFilters 的最终两期排除数（每个 JOB 只计一次），不得把跨天排除数与总排除数相加。reportFilters 不可用时说明原因，不引用占位的 0 个 JOB 或未筛选均值；跨天筛选启用时称为“同日创建并完成的 JOB”，注明所选范围两期排除的跨天数量（可用时），不能表述为全部 JOB 成效。明确 selectedScope 是整体、具体处理人还是未分配；overall 是独立的整体比较，不受人员选择影响。有可用人员排名时可以写少量 Top 人员及其本人两期 JOB 数、均值、减少率，并标注按百分比排序及样本量。正数写平均时长缩短，负数写平均时长增加；不能把增加说成提升或把全负值中的第一名称为已实现正向提升。旧版数据必须说明需重新导入 TT 和 JOB 两张表，不引用成新口径或人员排名。缺 JOB、零基准等不可用时说明原因，不补百分比。只陈述工单系统的观察结果，不写成 FMEMate 导致的效率提升。`;
   const mttrRules = proxyMode
     ? `- 告警表只取 AE 有 Job ID、B 列告警 ID 命中白名单、K 日期有效且 I 列 Duration 大于零的行。零时长表示未清除。先按 Job ID 在全部符合条件的告警中取最大 Duration；每个工单只计一次，以最长告警的 K 列发生日期分期；最长时长并列时取最早 K 日期。日期含两端，与应用日志日期和 Scene 无关。
-- ${personnelRule}${scopeRule}单人或所选多人只引用该范围的结果，未选择任何人不等于全部。每期 count 是工单数；meanSeconds 是各工单最长告警时长之和除以工单数，不能平均各人或各日均值。MTTR 减少率=(基准期均值−对比期均值)÷基准期均值×100%；正为缩短，负为延长，缺少任一期时不能补为 0%。仅在 status=available 且 reductionRate 非 null 时引用。若有重叠日期、两期长度不同或样本少，应交代。
+- ${personnelRule}${scopeRule}${capRule}单人或所选多人只引用该范围的结果，未选择任何人不等于全部。每期 count 是工单数；meanSeconds 是各工单最长告警时长之和除以工单数，不能平均各人或各日均值。MTTR 减少率=(基准期均值−对比期均值)÷基准期均值×100%；正为缩短，负为延长，缺少任一期时不能补为 0%。仅在 status=available 且 reductionRate 非 null 时引用。若有重叠日期、两期长度不同或样本少，应交代。
 - 人员排行只覆盖所选范围中的具名处理人；列名次时附本人两期工单数、均值与减少率。只有负数时不能说第一名已改善；无两期可比数据不排名。排名示例受限，不外推。若 needsAlarmReimport 为真，必须说明未关联 Job ID 的旧版告警尚未参与，需重传原告警文件；仅对已有可计算范围陈述，无法比较时不报数字。
 - 这是工单处理时间的代理指标，不是工单真实起止耗时。告警组合、工单难度、样本量都可能不同；不能归因于 FMEMate，也不能推算实际节省工时。`
     : alarmMode

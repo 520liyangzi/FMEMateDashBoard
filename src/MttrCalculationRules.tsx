@@ -3,13 +3,13 @@ import type {JobProxyMttrComparison} from '../lib/alarm-mttr';
 type Props={
   t:(zh:string,en:string)=>string;
   report:JobProxyMttrComparison;
-  scope:string;
+  scope:string;maxDurationHours?:number;
   legacy:boolean;
   formatDuration:(seconds:number|null)=>string;
 };
 
 /** Read the same aggregates as the adjacent cards, including when viewing an offline snapshot. */
-export default function MttrCalculationRules({t,report,scope,legacy,formatDuration}:Props){
+export default function MttrCalculationRules({t,report,scope,legacy,formatDuration,maxDurationHours}:Props){
   const {baseline,current,reductionRate}=report;
   // Keep a positive subsecond divisor visible, even when the metric card rounds to 0:00:00.
   const auditTime=(seconds:number|null)=>seconds!==null&&seconds>0&&seconds<1
@@ -31,6 +31,9 @@ export default function MttrCalculationRules({t,report,scope,legacy,formatDurati
           {' '}{legacy?t('此历史快照沿用原有的 AG 人员归属。','This historical snapshot uses its original AG assignees.'):t('用 AE 关联 Job 表 C 列，按 AL 列姓名归属。未匹配或 AL 为空的工单排除，再应用已保存的人员名单和页面选人范围。','Match AE to column C in the Job file and use AL for the person. Exclude unmatched Jobs and blank AL names, then apply the saved personnel list and the people selected for this view.')}</li>
         <li><strong>{t('一单多条告警怎么算？','What if a Job has several alarms?')}</strong>{' '}
           {t('每个 Job ID 只取其所有有效告警中最长的时长，作为这张工单处理时间的估算值。用最长告警的 K 列日期归期；并列最长时取最早日期。两期都包含起止当天；日期重叠的工单在每期各计一次。','Use the longest eligible alarm across all dates as the estimate for each Job ID. Assign the Job to that alarm’s K date; if tied, use the earliest date. Both date ranges are inclusive. A Job on an overlapping date counts once in each period.')}</li>
+        <li><strong>{t('工单时长上限','Job duration limit')}</strong>{' '}
+          {maxDurationHours===undefined?t('当前未启用时长筛选。','No duration limit is applied.'):
+            t(`最长有效告警时长 ≤ ${maxDurationHours} 小时的工单才计入；等于上限保留。超过上限的整单排除，不会用较短告警替代。`,`Only Jobs whose longest eligible alarm lasts at most ${maxDurationHours} hours count. Equality is included. An over-limit Job is excluded entirely; a shorter alarm is never substituted.`)}</li>
         <li><strong>{t('平均 MTTR','Mean MTTR')}</strong>{' '}
           {t('= 当期工单时长之和 ÷ 当期工单数。选多人时合并他们的工单，每单权重相同。','= sum of Job durations in the period ÷ number of Jobs in that period. For a group, pool the Jobs across people; each Job has the same weight.')}</li>
         <li><strong>{t('提升率','Improvement rate')}</strong>{' '}

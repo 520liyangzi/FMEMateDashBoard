@@ -104,6 +104,11 @@ function jobProxyEvidence(
     alPolicy:policy?{mode:policy.mode,names:policy.names.slice(0,LIMITS.alPolicyNames).map((v,i)=>name(v,'alPolicy.names['+i+']')),
       totalNames:policy.names.length,omittedNames:Math.max(0,policy.names.length-LIMITS.alPolicyNames)}:null,
     alDiagnostics:usesAL&&data?.alDiagnostics?{missingALJobs:data.alDiagnostics.missingALJobs,filteredOutJobs:data.alDiagnostics.filteredOutJobs}:null,
+    durationFilter:data?.durationFilter?{
+      maxDurationHours:data.durationFilter.maxDurationHours,
+      excludedJobsAcrossAllDates:data.durationFilter.excludedJobs,
+      rule:'Exclude the whole Job only if its longest eligible alarm duration exceeds the cap. Equality is included. Exclusions span all dates and people after the personnel policy, before report dates or person selection.',
+    }:null,
     selectedScope:{
       type:names===null?(usesAL?'all_named_people_under_AL_policy':'all_matched_owners'):!names.length?'none':names.length===1?'single':'group',
       selectedCount:names?.length??null, includesUnassigned:false,

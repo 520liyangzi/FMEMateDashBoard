@@ -17,6 +17,8 @@ export type AlarmMttrPanelProps={
   selectedAssignees:string[]|null;onSelectedAssigneesChange:(values:string[]|null)=>void;
   onUseToday?:()=>void;readOnly:boolean;legacyPresent?:boolean;api:AlarmApi;
   onDatasetChange:(data:JobProxyMttrDataset)=>void;
+  baseDataset?:JobProxyMttrDataset|null;maxDurationHours?:number;onMaxDurationHoursChange:(hours:number|undefined)=>void;
+  durationFilterPending?:boolean;durationFilterError?:string;onRetryDurationFilter?:()=>void;
   detailFocus:JobDetailFocus;onDetailPersonChange:(person:string|null)=>void;
   offlineJobRows?:JobProxyDetailRow[];onExportJobDetails?:()=>void|Promise<void>;
 };
@@ -61,6 +63,40 @@ function AssigneeScope({t,names,selected,onChange,emptyNote,validDates,legacy}:{
     {matches.length>limit&&<button type="button" className="text-button" onClick={()=>setLimit(n=>n+40)}>{t('显示更多人员','Show more assignees')}</button>}
   </details></div>;
 }
+type DurationLimitProps={
+  t:Translate;hours?:number;onChange:(h:number|undefined)=>void;
+  pending:boolean;error:string;retry?:()=>void;excluded?:number;canApply:boolean;
+};
+function JobDurationLimit({t,hours,onChange,pending,error,retry,excluded,canApply}:DurationLimitProps){
+  const [editing,setEditing]=useState(hours!==undefined),[draft,setDraft]=useState(hours===undefined?'':String(hours));
+  const input=useRef<HTMLInputElement|null>(null);
+  useEffect(()=>{setEditing(hours!==undefined);if(hours!==undefined)setDraft(String(hours))},[hours]);
+  const parsed=draft.trim()===''?NaN:Number(draft);
+  const valid=Number.isFinite(parsed)&&parsed>0&&Number.isFinite(parsed*3600);
+  const changed=editing&&(!valid||parsed!==hours);
+  const summary=hours===undefined?t('无时长上限','No duration limit'):t(`工单 MTTR ≤ ${hours} 小时`,`Job MTTR ≤ ${hours} hours`);
+  return <section className="job-duration-limit" aria-label={t('工单时长筛选','Job duration filter')}>
+    <h3>{t('工单时长筛选','Job duration filter')}</h3>
+    <p className="alarm-note">{t('先取每个工单所有有效告警的最长时长。整单超过上限才排除，等于上限仍计入；不会改用较短的告警。','First take the longest eligible alarm for each Job. Exclude the whole Job only if it exceeds the limit; equality counts. A shorter alarm never replaces the longest one.')}</p>
+    <form className="job-duration-form screen-only" noValidate onSubmit={e=>{e.preventDefault();if(canApply&&editing&&valid&&changed)onChange(parsed)}}>
+      <label className="job-duration-switch"><input type="checkbox" checked={editing} disabled={!canApply&&!editing} onChange={e=>{
+        const checked=e.target.checked;setEditing(checked);
+        if(checked)requestAnimationFrame(()=>input.current?.focus());else onChange(undefined);
+      }}/>{t('启用 MTTR 时长上限','Enable a Job MTTR limit')}</label>
+      {editing&&<><label className="job-duration-hours">{t('上限（小时）','Maximum hours')}<input ref={input} type="number" step="any" min="0" inputMode="decimal" placeholder="8" value={draft} disabled={!canApply} aria-invalid={!valid}
+        aria-describedby="job-duration-draft" onChange={e=>setDraft(e.currentTarget.value)}/></label>
+        <button className="btn" type="submit" disabled={!canApply||!valid||!changed}>{t('应用上限','Apply limit')}</button></>}
+    </form>
+    {editing&&<small id="job-duration-draft" className="job-duration-draft screen-only">{!valid?t('请输入大于 0 的小时数（例如 0.5）。输入未应用，当前报表条件见下方。','Enter a positive number of hours, such as 0.5. This entry has not been applied; the report condition is shown below.'):
+      changed?t('新上限尚未应用，报表仍使用下方条件。','The new limit has not been applied. The report still uses the condition below.'):''}</small>}
+    <p className="job-duration-applied"><b>{pending||error?t('请求的时长条件','Requested duration filter'):t('当前报表条件','Applied duration filter')}:</b> {summary}
+      {!pending&&!error&&hours!==undefined&&excluded!==undefined&&<> · {t(`在所有日期符合名单的工单中，已排除 ${count(excluded)} 个超时工单。`,`Excluded ${count(excluded)} over-limit Jobs across all dates after personnel filtering.`)}</>}</p>
+    {!canApply&&<p className="alarm-note">{t('此离线快照缺少逐单数据，无法按时长重新计算。请在本地服务中重新导出离线报表。','This snapshot has no individual Job rows, so it cannot recalculate a duration limit. Export a new offline report from the local service.')}</p>}
+    {pending?<p className="job-duration-state" role="status">{t('正在按时长条件重新计算…','Recalculating with the duration filter…')}</p>:
+      error&&<div className="job-duration-state" role="alert">{error} {retry&&<button className="text-button screen-only" type="button" onClick={retry}>{t('重试','Retry')}</button>}</div>}
+  </section>;
+}
+
 type JobQueueRow={status:'pending'|'upload'|'parse'|'saved'|'failed'|'cancelled';progress?:AlarmProgress;mapped?:number;error?:string};
 function ImportEditor({dataset,t,api,onDatasetChange}:{dataset:JobProxyMttrDataset|null;t:Translate;api:AlarmApi;onDatasetChange:(v:JobProxyMttrDataset)=>void}){
   const listKey=(dataset?.allowlist??[]).join(',');const [list,setList]=useState(listKey);
@@ -169,10 +205,14 @@ function ImportEditor({dataset,t,api,onDatasetChange}:{dataset:JobProxyMttrDatas
   </details><JobAlPolicyPanel data={dataset} t={t} disabled={!!busy} saving={busy==='al'} onSave={saveAlPolicy}/></>;
 }
 
-export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBaselineChange,onCurrentChange,selectedAssignees=null,onSelectedAssigneesChange,onUseToday,readOnly,legacyPresent,api,onDatasetChange,offlineJobRows,onExportJobDetails,detailFocus,onDetailPersonChange}:AlarmMttrPanelProps){
+export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBaselineChange,onCurrentChange,selectedAssignees=null,onSelectedAssigneesChange,onUseToday,readOnly,legacyPresent,api,onDatasetChange,offlineJobRows,onExportJobDetails,detailFocus,onDetailPersonChange,baseDataset,maxDurationHours,onMaxDurationHoursChange,durationFilterPending=false,durationFilterError='',onRetryDurationFilter}:AlarmMttrPanelProps){
   const t:Translate=(zh,en)=>lang==='zh'?zh:en;
   const data=input?.formatVersion===5&&input.source==='alarm-jobs'?input:null;
-  const legacy=getJobProxyAxis(data)==='AG';
+  const source=baseDataset===undefined?data:baseDataset;
+  const capMismatch=(data?.durationFilter?.maxDurationHours??undefined)!==maxDurationHours;
+  const filterError=durationFilterError||(!durationFilterPending&&capMismatch?t('未能确认所请求的时长条件，请重试或关闭上限。','The requested limit could not be confirmed. Retry or turn off the limit.'):'');
+  const hideResults=durationFilterPending||!!filterError;
+  const legacy=getJobProxyAxis(source)==='AG';
   const person=legacy?t('历史人员','Historical assignee'):t('AL 人员','AL person');
   const validDates=isValidMttrPeriod(baseline)&&isValidMttrPeriod(current);
   const names=useMemo(()=>getJobProxyAssignees(data,baseline,current),[data,baseline,current]);
@@ -181,10 +221,11 @@ export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBa
   const matchedCount=useMemo(()=>matchedDays.reduce((sum,day)=>sum+day.count,0),[matchedDays]);
   const legacyAlarmCount=useMemo(()=>data?.personDays.some(d=>!d.assignee.trim()&&d.count>0),[data]);
   const emptyNote=!validDates?t('请先选择有效的基准期和对比期。','Choose valid baseline and comparison dates first.')
-    :data?.needsAlarmReimport&&!matchedCount?t('请重新导入原告警表，恢复已有工单关联。','Re-import the original alarm files to restore Job links.')
+    :data?.needsAlarmReimport&&!matchedCount&&!data.durationFilter?.excludedJobs?t('请重新导入原告警表，恢复已有工单关联。','Re-import the original alarm files to restore Job links.')
     :!data?.storedRows?t('尚无已导入的告警数据。','No alarms have been imported.')
     :!data.mappedJobs&&!legacy?t('请导入 Job 表，用 C 列 Job ID 关联 AL 列姓名。如果之前已导入旧版 Job 表，只需重传 Job 表。','Import the Job file with Job ID in C and person in AL. If you previously imported Job files without AL, re-import just those files.')
     :legacy?t('所选两期内没有匹配到历史人员和有效工单。','Neither period has an eligible Job with a historical assignee.')
+    :maxDurationHours!==undefined?t('所选两期没有同时符合名单和时长上限的工单。','No Jobs in either period match both the personnel and duration filters.')
     :t('应用 AL 名单及所选日期后，没有匹配到有效工单。','No eligible Jobs match the applied AL list and selected periods.');
   const report=useMemo(()=>compareJobProxyMttr(data,baseline,current,selectedAssignees),[data,baseline,current,selectedAssignees]);
   function openPersonJobs(name:string){
@@ -195,7 +236,7 @@ export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBa
     });
   }
   const ranking=useMemo(()=>rankJobProxyMttr(data,baseline,current,selectedAssignees),[data,baseline,current,selectedAssignees]);
-  const latest=matchedDays.at(-1)?.date,alarms=data?.lastImport,jobs=data?.lastJobImport;
+  const latest=matchedDays.at(-1)?.date,alarms=source?.lastImport,jobs=source?.lastJobImport;
   const listKey=data?.allowlist.join(', ')||t('未配置','None');
   const unavailable=(status:string)=>{
     if(status==='alarm_reimport_required')return t('需重新导入原告警表。','Re-import the original alarm files.');
@@ -219,23 +260,25 @@ export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBa
   return <section className="card alarm-mttr" aria-label={t('工单 MTTR','Job MTTR')}>
     <h2 className="alarm-intro"><Clock3 size={20}/>{t('工单 MTTR（按最长告警时长）','Job MTTR (longest alarm per Job)')}</h2>
     <p className="alarm-sub">{t('一个 Job 计一次，使用该工单最长的有效告警 Duration 估算处理时长。','Each Job counts once. Its longest eligible alarm duration is used to estimate its resolution time.')}</p>
-    {data?.needsAlarmReimport&&<p className="alarm-warning job-coverage-warning" role="status">{t(`有 ${count(data.legacyUnlinkedRows)} 条旧版告警记录缺少可关联的 Job ID，未参与本页统计。重新导入原告警文件后可恢复关联。`,`${count(data.legacyUnlinkedRows)} legacy alarm records have no recoverable Job ID and are excluded. Re-import the original alarm files to restore their links.`)}</p>}
-    {legacyPresent&&!data?.storedRows&&<p className="alarm-note">{t('以往按 TT/Job 时间计算的汇总无法换算，请导入原告警文件。','Old TT/Job time summaries cannot be converted. Import the original alarm files.')}</p>}
-    {readOnly?<JobAlPolicyPanel data={data} t={t}/>:<ImportEditor t={t} dataset={data} api={api} onDatasetChange={onDatasetChange}/>}
+    {source?.needsAlarmReimport&&<p className="alarm-warning job-coverage-warning" role="status">{t(`有 ${count(source.legacyUnlinkedRows)} 条旧版告警记录缺少可关联的 Job ID，未参与本页统计。重新导入原告警文件后可恢复关联。`,`${count(source.legacyUnlinkedRows)} legacy alarm records have no recoverable Job ID and are excluded. Re-import the original alarm files to restore their links.`)}</p>}
+    {legacyPresent&&!source?.storedRows&&<p className="alarm-note">{t('以往按 TT/Job 时间计算的汇总无法换算，请导入原告警文件。','Old TT/Job time summaries cannot be converted. Import the original alarm files.')}</p>}
+    {readOnly?<JobAlPolicyPanel data={source} t={t}/>:<ImportEditor t={t} dataset={source} api={api} onDatasetChange={onDatasetChange}/>}
     <div className="alarm-periods">{periodEditor(t('基准期','Baseline period'),baseline,onBaselineChange)}{periodEditor(t('对比期','Comparison period'),current,onCurrentChange)}</div>
-    <div className="alarm-presets screen-only">{[3,7].map(n=><button type="button" className="btn" key={n} disabled={!latest} onClick={()=>quick(n)}>{t(`最新 ${n} 天 vs 前 ${n} 天`,`Latest ${n} days vs prior ${n}`)}</button>)}{onUseToday&&<button type="button" className="btn" onClick={onUseToday}>{t('按今天对比近 7 天','Last 7 days through today')}</button>}</div>
-    <AssigneeScope key={legacy?'historical':'al'} legacy={legacy} t={t} names={names} emptyNote={emptyNote} validDates={validDates} selected={selectedAssignees} onChange={onSelectedAssigneesChange}/>
+    <div className="alarm-presets screen-only">{[3,7].map(n=><button type="button" className="btn" key={n} disabled={!latest||hideResults} onClick={()=>quick(n)}>{t(`最新 ${n} 天 vs 前 ${n} 天`,`Latest ${n} days vs prior ${n}`)}</button>)}{onUseToday&&<button type="button" className="btn" onClick={onUseToday}>{t('按今天对比近 7 天','Last 7 days through today')}</button>}</div>
+    <JobDurationLimit t={t} hours={maxDurationHours} onChange={onMaxDurationHoursChange} pending={durationFilterPending} error={filterError} retry={onRetryDurationFilter}
+      excluded={data?.durationFilter?.excludedJobs} canApply={!readOnly||Array.isArray(offlineJobRows)}/>
+    {!hideResults&&<><AssigneeScope key={legacy?'historical':'al'} legacy={legacy} t={t} names={names} emptyNote={emptyNote} validDates={validDates} selected={selectedAssignees} onChange={onSelectedAssigneesChange}/>
     <p className="job-scope-label"><b>{t('统计对象','Reporting scope')}:</b> {scope}</p>
     <p className="alarm-note">{legacy?t('此处展示快照原有的人员统计，不能从中推算 AL 名单或 AL 人员排名。','This snapshot shows the original assignee metrics. It cannot be used to infer AL list membership or AL rankings.'):t('每个工单按 Job 表 AL 列人员归属，均值、提升率、排名与明细均使用相同的名单和报表范围。','Each Job belongs to the person in column AL. Means, improvement rates, rankings and Job details all use the same list and reporting scope.')}</p>
     <div className="alarm-metrics">{periodCard(t('基准期 MTTR','Baseline MTTR'),report.baseline)}{periodCard(t('对比期 MTTR','Comparison MTTR'),report.current)}<article className={rate===null||rate===0?'':rate>0?'alarm-positive':'alarm-negative'}><h3>{t('MTTR 提升率','MTTR improvement')}</h3><strong>{rate===null?'—':`${rate.toFixed(1)}%`}</strong><small>{rate===null?unavailable(report.status):rate>0?t('对比期平均时长缩短。','Shorter mean duration.'):rate<0?t('对比期平均时长延长。','Longer mean duration.'):t('两期均值相同。','No change in mean duration.')}</small></article></div>
     {report.overlap&&<p className="alarm-warning">{t('两个区间有重叠，归属日相同的工单会分别计入两期。','The periods overlap; Jobs on shared dates count in both.')}</p>}
-    <MttrCalculationRules t={t} report={report} scope={scope} legacy={legacy} formatDuration={duration}/>
-    <p className="alarm-note alarm-meta">{t('当前白名单','Applied allowlist')}: {listKey} · {legacy?t('全部日期已匹配工单','Matched Jobs across all dates'):t('所有日期名单筛选后工单','Jobs after AL filtering, all dates')}: {count(matchedCount)}{!legacyAlarmCount&&<> · {t('匹配工单对应告警','Eligible alarms on matched Jobs')}: {count(data?.totalAlarms??0)}</>}{legacy&&<> · {t('全部日期未匹配工单（已排除）','Unmatched Jobs across all dates (excluded)')}: {count(data?.unassignedJobs??0)}</>}{latest&&<> · {matchedDays[0]?.date} — {latest}</>}</p>
+    <MttrCalculationRules t={t} report={report} scope={scope} legacy={legacy} formatDuration={duration} maxDurationHours={maxDurationHours}/>
+    <p className="alarm-note alarm-meta">{t('当前白名单','Applied allowlist')}: {listKey} · {maxDurationHours!==undefined?t('所有日期符合时长及人员条件的工单','Jobs after duration and personnel filters, all dates'):legacy?t('全部日期已匹配工单','Matched Jobs across all dates'):t('所有日期名单筛选后工单','Jobs after AL filtering, all dates')}: {count(matchedCount)}{!legacyAlarmCount&&<> · {t('匹配工单对应告警','Eligible alarms on matched Jobs')}: {count(data?.totalAlarms??0)}</>}{legacy&&<> · {t('全部日期未匹配工单（已排除）','Unmatched Jobs across all dates (excluded)')}: {count(data?.unassignedJobs??0)}</>}{latest&&<> · {matchedDays[0]?.date} — {latest}</>}</p>
     <section className="job-rank" aria-label={legacy?t('历史人员 MTTR 提升率排行','MTTR improvement by historical assignee'):t('AL 人员 MTTR 提升率排行','MTTR improvement by AL person')}><h3>{legacy?t('历史人员 MTTR 提升率排行','MTTR improvement by historical assignee'):t('AL 人员 MTTR 提升率排行','MTTR improvement by AL person')}</h3>
       <p className="alarm-note">{t('按当前人员范围，依提升率从高到低排列。仅一期有工单的人员列在最后，不计算提升率。','Ranked within the selected scope, highest improvement first. People with Jobs in only one period appear last without an improvement rate.')}{!legacy&&' '+t('点击姓名可查看该人员的两期工单。','Select a name to see that person’s Jobs in both periods.')}</p>
       {ranking.length>0?<div className="job-rank-table"><table><thead><tr>{[t('排名','Rank'),person,t('基准期工单数','Baseline Jobs'),t('基准期 MTTR','Baseline MTTR'),t('对比期工单数','Comparison Jobs'),t('对比期 MTTR','Comparison MTTR'),t('提升率','Improvement')].map(h=><th key={h} scope="col">{h}</th>)}</tr></thead><tbody>{ranking.map(r=><tr key={r.assignee}><td>{r.rank??'—'}</td><th scope="row">{legacy?r.assignee:<button type="button" className="job-rank-person" aria-label={t(`查看 ${r.assignee} 的工单明细`,`View Job details for ${r.assignee}`)} onClick={()=>openPersonJobs(r.assignee)}>{r.assignee}</button>}</th><td>{count(r.comparison.baseline.count)}</td><td>{duration(r.comparison.baseline.meanSeconds)}</td><td>{count(r.comparison.current.count)}</td><td>{duration(r.comparison.current.meanSeconds)}</td><td className={r.comparison.reductionRate>0?'positive':''}>{r.comparison.reductionRate===null?<><span>—</span><small>{unavailable(r.comparison.status)}</small></>:`${r.comparison.reductionRate.toFixed(1)}%`}</td></tr>)}</tbody></table></div>:<p className="job-rank-empty">{!names.length||!validDates?emptyNote:t('请选择统计人员，或切换为全部。','Select people for this report, or choose all.')}</p>}
     </section>
-    <JobMttrDetails t={t} data={data} report={detailFocus.comparison} focusPerson={detailFocus.person} availablePeople={detailFocus.availablePeople} onFocusPersonChange={onDetailPersonChange} api={api} offline={readOnly} offlineRows={offlineJobRows} assignees={detailFocus.assignees} formatDuration={duration} onExport={onExportJobDetails}/>
+    <JobMttrDetails maxDurationHours={maxDurationHours} t={t} data={data} report={detailFocus.comparison} focusPerson={detailFocus.person} availablePeople={detailFocus.availablePeople} onFocusPersonChange={onDetailPersonChange} api={api} offline={readOnly} offlineRows={offlineJobRows} assignees={detailFocus.assignees} formatDuration={duration} onExport={onExportJobDetails}/></>}
     {alarms&&<details className="alarm-summary"><summary>{t('告警导入明细','Alarm import details')} · {alarms.filename}</summary><p>{alarms.sheetName} · {alarms.importedAt}</p>{counters([[t('读取行数','Source rows'),alarms.sourceRows],[t('缺少 Job ID','Missing Job ID'),alarms.missingJobIds],[t('缺少告警 ID','Missing alarm ID'),alarms.missingAlarmIds],[t('发生时间无效','Invalid occurrence time'),alarms.invalidDates],[t('未清除（零时长）','Uncleared (zero)'),alarms.zeroDurations],[t('时长无效','Invalid duration'),alarms.invalidDurations],[t('可用于白名单筛选','Valid before allowlist'),alarms.validRows],[t('命中导入时白名单','Matched at import'),alarms.matchedRows],[t('新增保存行','New stored rows'),alarms.addedRows],[t('重复行','Duplicate rows'),alarms.duplicateRows]])}</details>}
     {jobs&&<details className="alarm-summary"><summary>{t('人员归属导入明细','Ownership import details')} · {jobs.filename}</summary><p>{jobs.sheetName} · {jobs.importedAt}</p>{counters([[t('读取行数','Source rows'),jobs.sourceRows],[t('缺少 Job ID','Missing Job ID'),jobs.missingJobIds],[t('导入时姓名为空','Missing name at import'),jobs.missingAssignees],[t('重复 Job ID','Repeated Job IDs'),jobs.duplicateRows],[t('本次导入工单','Jobs in this import'),jobs.mappedJobs]])}</details>}
   </section>;

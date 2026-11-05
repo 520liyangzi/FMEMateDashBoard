@@ -275,6 +275,67 @@ class AlarmHttpTests(unittest.TestCase):
                 self.assertEqual([r['jobId'] for r in page['rows']],ids)
                 self.assertEqual((page['total'],page['totalSeconds']), (len(ids),seconds))
 
+    def test_max_hours_excludes_whole_winning_job_from_summary_scope_and_paginated_details(self):
+        owners=workbook([{'C':'Job ID','AL':'AL person'},
+            {'C':'exact','AL':'Ana'}, {'C':'above','AL':'Ana'}, {'C':'small','AL':'Bo'},
+            {'C':'large','AL':'Only large'}, {'C':'policy','AL':'Other'}])
+        self.call(self.stage(owners,'people.xlsx',True)+'/import','POST',{})
+        alarms=alarm_sheet(
+            ('X','00:33:54','2026-10-20','exact'), # exactly 0.565 hours
+            ('X','00:05:00','2026-10-20','above'),('X','00:33:54.000001','2026-10-22','above'),
+            ('X','00:01:00','2026-10-21','small'), ('Z','01:00:00','2026-10-25','small'),
+            ('X','02:00:00','2026-10-23','large'),('X','03:00:00','2026-10-23','policy'),
+            ('X','04:00:00','2026-10-23','no AL'))
+        self.call(self.stage(alarms)+'/import','POST',{'allowlist':'X'})
+        raw=self.call(BASE+'/al-policy','POST',{'mode':'exclude','names':['Other']})
+        self.assertEqual((raw['totalJobs'],raw['unassignedJobs'],raw['alDiagnostics']['filteredOutJobs']),(4,1,1))
+        filtered=self.call(BASE+'?maxDurationHours=0.565')
+        self.assertEqual(filtered['durationFilter'],{'maxDurationHours':0.565,'excludedJobs':2})
+        self.assertEqual((filtered['totalJobs'],filtered['totalAlarms'],filtered['assignees']),(2,2,['Ana','Bo']))
+        self.assertEqual(filtered['days'],[{'date':'2026-10-20','count':1,'totalSeconds':2034},
+                                           {'date':'2026-10-21','count':1,'totalSeconds':60}])
+        self.assertEqual([(d['assignee'],d['count'],d['totalSeconds']) for d in filtered['personDays']],
+                         [('Ana',1,2034),('Bo',1,60)])
+        for field in ('alDiagnostics','unassignedJobs','mappedJobs','storedRows','lastImport','lastJobImport','revision'):
+            self.assertEqual(filtered[field],raw[field],field)
+        def details(**extra):
+            return self.call(BASE+'/job-details','POST',{'maxDurationHours':0.565,**extra})
+        page=details(limit=1)
+        rest=details(offset=1,limit=1)
+        self.assertEqual([(p['total'],p['totalSeconds'],p['revision']) for p in [page,rest]],[(2,2094,raw['revision'])]*2)
+        self.assertEqual([r['jobId'] for r in page['rows']+rest['rows']],['small','exact'])
+        # The short alarm on the 20th cannot resurrect 'above' after its global winner is rejected.
+        self.assertEqual([r['jobId'] for r in details(assignees=['Ana'],end='2026-10-20')['rows']],['exact'])
+        tiny=self.call(BASE+'?maxDurationHours=1e-3')
+        self.assertEqual((tiny['totalJobs'],tiny['assignees'],tiny['durationFilter']['excludedJobs']),(0,[],4))
+        self.assertEqual(details(maxDurationHours=None)['total'],raw['totalJobs'])
+        self.assertEqual(self.call(BASE),raw)
+
+    def test_duration_cap_decimal_hours_respects_microseconds(self):
+        self.store.import_alarm_jobs(workbook([{'C':'Job ID','AL':'AL person'},
+            {'C':'exact','AL':'Ana'},{'C':'micro-longer','AL':'Ana'}]),'owners.xlsx')
+        self.store.import_alarm_mttr(alarm_sheet(('X','00:00:39.600000','2026-10-01','exact'),
+            ('X','00:00:39.600001','2026-10-01','micro-longer')),'alarms.csv','X')
+        # Binary multiplication undershoots, while comparing 39.6 / 3600
+        # overshoots. Decimal conversion correctly retains the exact boundary.
+        for hours,ids in [(0.011,['exact']), (0.010999999999999998,[]), (0.01101,['exact','micro-longer'])]:
+            with self.subTest(hours=hours):
+                result=self.call(BASE+'?maxDurationHours='+str(hours))
+                detail=self.call(BASE+'/job-details','POST',{'maxDurationHours':hours})
+                self.assertEqual(result['totalJobs'],len(ids))
+                self.assertEqual([r['jobId'] for r in detail['rows']],ids)
+                self.assertEqual(result['durationFilter']['excludedJobs'],2-len(ids))
+
+    def test_bad_job_max_hours_get_or_post_is_rejected_and_never_widens_query(self):
+        for text in ('', '0', '-1', 'NaN','Infinity','0.2x','1e308','1e-999','2&maxDurationHours=3'):
+            with self.subTest(query=text), self.assertRaises(HTTPError) as exc:
+                self.call(BASE+'?maxDurationHours='+text)
+            self.assertEqual(exc.exception.code,400)
+        for value in (0,-1,False,True,'2',{},[],float('nan'),float('inf'),1e308,10**400):
+            with self.subTest(body=value), self.assertRaises(HTTPError) as exc:
+                self.call(BASE+'/job-details','POST',{'maxDurationHours':value})
+            self.assertEqual(exc.exception.code,400)
+
     def test_job_detail_filters_reject_invalid_arguments(self):
         for filters in ({'dateFrom':'2026-10-01'}, {'offset':-1}, {'limit':True}, {'limit':5001},
                         {'start':'2026-02-31'}, {'start':'2026-10-02','end':'2026-10-01'},

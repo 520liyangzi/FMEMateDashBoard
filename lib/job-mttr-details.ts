@@ -1,3 +1,4 @@
+import type {JobProxyMttrDataset,JobProxyDay} from './alarm-mttr.ts';
 // A row is a unique Job after its longest eligible alarm has been selected.
 export type JobProxyDetailRow = {
   jobId: string; assignee: string; date: string; seconds: number;
@@ -5,7 +6,7 @@ export type JobProxyDetailRow = {
   /** Present for new AL reports; older snapshots only have their historical assignee. */
   alPerson?: string;
 }
-export type JobProxyDetailFilter = {from?: string; to?: string; assignees?: readonly string[] | null}
+export type JobProxyDetailFilter = {from?: string; to?: string; assignees?: readonly string[] | null; maxDurationHours?: number | null}
 export type JobProxyDetailPage = {rows: JobProxyDetailRow[]; total: number; totalSeconds: number; revision?: string}
 type DetailApi = (url: string, options?: RequestInit) => Promise<unknown>
 const MAX_PAGE = 5000
@@ -17,7 +18,27 @@ function isDate(value: unknown): value is string {
   return Number.isFinite(date.getTime()) && date.toISOString().startsWith(value + 'T')
 }
 
-function prepareFilter({from, to, assignees}: JobProxyDetailFilter) {
+function checkJobDurationLimit(hours: number|null|undefined):void {
+  if (hours!=null && (typeof hours!=='number' || !Number.isFinite(hours) || hours<=0))
+    throw new Error('工单时长上限必须是大于零的小时数 / The Job duration limit must be a positive finite number of hours.')
+}
+/** Durations in the alarm ledger have microsecond precision. Treat decimal hours exactly
+ * like the server's Decimal conversion. Floor to the last included microsecond, then parse
+ * decimal seconds once. Neither binary hours*3600 nor seconds/3600 preserves all ties. */
+export function getJobDurationMaxSeconds(hours:number|null|undefined):number|null {
+  checkJobDurationLimit(hours)
+  if(hours==null)return null
+  const [mantissa,exp='0']=String(hours).toLowerCase().split('e')
+  const [whole,fraction='']=mantissa.split('.')
+  const power=Number(exp)-fraction.length
+  const coefficient=BigInt(whole+fraction)*3600000000n
+  const micros=power>=0 ? coefficient*10n**BigInt(power) : coefficient/10n**BigInt(-power)
+  return Number(String(micros)+'e-6')
+}
+const withinDuration=(seconds:number,maxSeconds:number|null)=>maxSeconds==null || seconds<=maxSeconds
+
+function prepareFilter({from, to, assignees,maxDurationHours}: JobProxyDetailFilter) {
+  const maxSeconds=getJobDurationMaxSeconds(maxDurationHours)
   if ((from !== undefined && !isDate(from)) || (to !== undefined && !isDate(to)) || (from && to && from > to)) {
     throw new Error('工单明细日期无效 / Invalid Job detail dates')
   }
@@ -25,7 +46,7 @@ function prepareFilter({from, to, assignees}: JobProxyDetailFilter) {
     throw new Error('工单负责人筛选无效 / Invalid assignee filter')
   }
   const owners = assignees == null ? null : new Set(assignees.filter(name => name.trim().length > 0))
-  const matches = (row: JobProxyDetailRow) => row.assignee.trim().length > 0 && (!from || row.date >= from) &&
+  const matches = (row: JobProxyDetailRow) => row.assignee.trim().length > 0 && withinDuration(row.seconds,maxSeconds) && (!from || row.date >= from) &&
     (!to || row.date <= to) && (!owners || owners.has(row.assignee))
   return {matches, assignees:owners ? [...owners] : assignees}
 }
@@ -82,7 +103,7 @@ export async function loadJobProxyDetailPage(api: DetailApi, filter: JobProxyDet
   signal?.throwIfAborted()
   const response = await api('/api/mttr/alarms/job-details', {
     method:'POST', headers:{'Content-Type':'application/json'}, signal,
-    body:JSON.stringify({start:filter.from, end:filter.to, assignees, offset, limit}),
+    body:JSON.stringify({start:filter.from, end:filter.to, assignees, maxDurationHours:filter.maxDurationHours??undefined, offset, limit}),
   })
   signal?.throwIfAborted()
   if (response == null || typeof response !== 'object') throw inconsistent()
@@ -120,4 +141,74 @@ export async function loadAllJobProxyDetails(api: DetailApi, filter: JobProxyDet
   }
   if (!sameSeconds(rows.reduce((sum,row) => sum+row.seconds, 0),first.totalSeconds)) throw inconsistent()
   return rows
+}
+
+const oldSnapshot = () => new Error('离线报表缺少完整的原始工单明细，请从本地服务重新导出离线报表。 / The offline report lacks complete original Job details. Export a new offline report from the local server.')
+/** Rebuild the same per-Job cohort as the online query. Never filter daily means or substitute
+ * a shorter alarm of the same Job. The input snapshot and winners must both be uncapped. */
+export function applyOfflineJobDurationFilter(
+  data:JobProxyMttrDataset|null, rows:readonly JobProxyDetailRow[]|null|undefined, maxDurationHours:number|null,
+):JobProxyMttrDataset|null {
+  const maxSeconds=getJobDurationMaxSeconds(maxDurationHours)
+  if (!data)return null
+  if (data.durationFilter)throw oldSnapshot() // Reapplication must begin with the original population.
+  if (maxDurationHours==null)return data
+  if (!Array.isArray(rows) || data.source!=='alarm-jobs' || data.formatVersion!==5)throw oldSnapshot()
+
+  // Old V5 summaries may contain unassigned Jobs; only the named per-person aggregates
+  // define the denominator, as on the screen. A date/owner/total check prevents partial or
+  // out-of-date details from becoming a plausible but incorrect offline report.
+  type Slice = JobProxyDay & {assignee:string}
+  type Buckets = Map<string,Map<string,Slice>>
+  const base:Buckets=new Map(),actual:Buckets=new Map(),kept:Buckets=new Map()
+  const add=(map:Buckets,date:string,owner:string,count:number,seconds:number)=>{
+    let people=map.get(date);if(!people){people=new Map();map.set(date,people)}
+    const value=people.get(owner)
+    if(value){value.count+=count;value.totalSeconds+=seconds}
+    else people.set(owner,{date,assignee:owner,count,totalSeconds:seconds})
+  }
+  for(const d of data.personDays){
+    if(d.assignee.trim() && d.count>0) add(base,d.date,d.assignee,d.count,d.totalSeconds)
+  }
+  let retained=0,removed=0,keptAlarmCount=0,removedAlarmCount=0,unknownKept=0,unknownRemoved=0
+  const seen=new Set<string>()
+  for(const d of rows){
+    if(!isRow(d)||seen.has(d.jobId))throw oldSnapshot()
+    seen.add(d.jobId)
+    if(!d.assignee.trim())continue
+    const source=base.get(d.date)?.get(d.assignee)
+    if(!source||source.count<1)throw oldSnapshot()
+    add(actual,d.date,d.assignee,1,d.seconds)
+    if(withinDuration(d.seconds,maxSeconds)){
+      add(kept,d.date,d.assignee,1,d.seconds);retained++
+      if(d.alarmCount===undefined)unknownKept++;else keptAlarmCount+=d.alarmCount
+    } else {
+      removed++;if(d.alarmCount===undefined)unknownRemoved++;else removedAlarmCount+=d.alarmCount
+    }
+  }
+  for(const people of base.values())for(const source of people.values()){
+    const got=actual.get(source.date)?.get(source.assignee)
+    if(!got||got.count!==source.count||!sameSeconds(got.totalSeconds,source.totalSeconds))throw oldSnapshot()
+  }
+  // Older detail rows sometimes omitted per-Job alarm multiplicities. Recover the exact
+  // number only if determined by the remaining metadata; never pass an invented total as fact.
+  const wholePopulation=retained+removed===data.totalJobs
+  if(data.alPolicy && !wholePopulation)throw oldSnapshot()
+  const minimumAlarms=keptAlarmCount+removedAlarmCount+unknownKept+unknownRemoved
+  if(wholePopulation && (data.totalAlarms<minimumAlarms || (!unknownKept && !unknownRemoved && data.totalAlarms!==minimumAlarms)))throw oldSnapshot()
+  if(unknownKept){
+    if(wholePopulation && !unknownRemoved)keptAlarmCount=data.totalAlarms-removedAlarmCount
+    else if(wholePopulation && data.totalAlarms===minimumAlarms)keptAlarmCount+=unknownKept
+    else throw oldSnapshot()
+  }
+  const personDays=[...kept.values()].flatMap(m=>[...m.values()]).sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:compareId(a.assignee,b.assignee))
+  const days:JobProxyDay[]=[]
+  for(const p of personDays){
+    const last=days.at(-1)
+    if(last?.date===p.date){last.count+=p.count;last.totalSeconds+=p.totalSeconds}
+    else days.push({date:p.date,count:p.count,totalSeconds:p.totalSeconds})
+  }
+  return {...data,days,personDays,totalJobs:retained,totalAlarms:keptAlarmCount,
+    assignees:[...new Set(personDays.map(d=>d.assignee))].sort(compareId),earliestDate:days[0]?.date??null,latestDate:days.at(-1)?.date??null,
+    durationFilter:{maxDurationHours,excludedJobs:removed}}
 }

@@ -102,8 +102,11 @@ export interface JobProxyMappingImportInfo {
   filename:string; sheetName:string; importedAt:string; sourceRows:number; missingJobIds:number;
   missingAssignees:number; validRows:number; duplicateRows:number; mappedJobs:number;
 }
+/** A report-time cap on the final winning alarm per Job. Exclusions follow the saved AL policy
+ * and cover all dates/people before period or report-owner selection. Absent means no cap. */
+export type JobDurationFilter = {maxDurationHours:number;excludedJobs:number};
 export interface JobProxyMttrDataset {
-  formatVersion:5; source:'alarm-jobs'; allowlist:string[]; revision?:string;
+  formatVersion:5; source:'alarm-jobs'; allowlist:string[]; revision?:string; durationFilter?:JobDurationFilter;
   /** Absent on historical AG reports: their aggregates must not be relabelled as AL. */
   alPolicy?:JobAlPolicy; alDiagnostics?:{missingALJobs:number; filteredOutJobs:number};
   /** Optional server hint. Older V5 snapshots may include the whole mapping catalogue here. */
@@ -135,7 +138,7 @@ export function getJobProxyAxis(data:ProxyInput):'AL'|'AG'{
 }
 const usableGroup=(day:JobProxyDay)=>Number.isSafeInteger(day.count)&&day.count>0&&Number.isFinite(day.totalSeconds)&&day.totalSeconds>0;
 const asc=(a:string,b:string)=>a<b?-1:a>b?1:0;
-const blocked=(d:JobProxyMttrDataset)=>d.needsAlarmReimport&&d.totalJobs===0;
+const blocked=(d:JobProxyMttrDataset)=>d.needsAlarmReimport&&d.totalJobs===0&&!(d.durationFilter?.excludedJobs);
 
 const namedOwner=(name:string)=>typeof name==='string'&&name.trim().length>0;
 
