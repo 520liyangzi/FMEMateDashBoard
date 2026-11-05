@@ -1,5 +1,6 @@
 import { analyze, parseTime, type LogRecord } from './analytics.ts';
 import { compareMttr, previousMttrPeriod, analyzeMttrPeople, selectMttrDayScope, selectMttrScope, filterMttrPeopleByGap, type MttrDataset, type MttrPeriod } from './mttr.ts';
+import { compareAlarmMttr, type AlarmMttrDataset } from './alarm-mttr.ts';
 import { analyzeRepeatUsage, analyzeRetention, type RetentionDay, type RepeatMode } from './retention.ts';
 
 export type AiReport = {
@@ -27,6 +28,8 @@ export type AiFactsInput = {
   minimumActiveDays?: number;
   retentionDays?: number;
   repeatMode?: RepeatMode;
+  /** Pass null when no alarm data exist. Omitted only for legacy callers. */
+  alarmMttr?: AlarmMttrDataset | null;
   mttr?: MttrDataset | null;
   mttrBaseline?: MttrPeriod;
   mttrCurrent?: MttrPeriod;
@@ -45,6 +48,30 @@ const LIMITS = {
   feedbackCharacters: 1200, identifierCharacters: 200, sceneCharacters: 200,
 } as const;
 
+export const ALARM_MTTR_RULE = 'allowlisted-alarm-duration-by-occurrence-date' as const;
+
+function alarmMttrEvidence(data: AlarmMttrDataset | null, baseline: MttrPeriod, current: MttrPeriod) {
+  if (data?.source !== 'alarms' || data.formatVersion !== 4) data = null;
+  const last = data?.lastImport;
+  return {
+    ...compareAlarmMttr(data, baseline, current),
+    businessRule: ALARM_MTTR_RULE,
+    allowlistSize: data?.allowlist?.length ?? 0,
+    sourceColumns: { alarmId: 'B', duration: 'I', occurrenceDate: 'K', jobId: 'AE' },
+    definition: 'Overall mean per eligible alarm row. Include only a nonblank Job ID, an Alarm ID in the configured allowlist, a valid occurrence date and a strictly positive Duration. Use the occurrence date as shown in column K, independent of app dates and Scene. An empty allowlist includes no alarms. Repeated alarm codes or Job IDs alone do not identify duplicate occurrences. Read column I as h:mm:ss (or native Excel elapsed time); zero means uncleared and is excluded.',
+    units: 'Period count is eligible alarm rows. meanSeconds = sum of eligible durations in seconds / eligible row count; do not average daily means or group by Job ID. reductionRate is percent: (baseline mean - current mean) / baseline mean × 100. savedSeconds is the change in the mean per alarm, not total labor time saved.',
+    dataQuality: {
+      formatVersion: 4, storedRows: data?.storedRows ?? null, totalEligibleAlarms: data?.totalAlarms ?? null,
+      earliestEligibleDate: data?.earliestDate ?? null, latestEligibleDate: data?.latestDate ?? null,
+      lastImport: last ? { sourceRows: last.sourceRows, missingJobIds: last.missingJobIds, missingAlarmIds: last.missingAlarmIds,
+        invalidDates: last.invalidDates, zeroDurations: last.zeroDurations, invalidDurations: last.invalidDurations,
+        validRows: last.validRows, matchedRows: last.matchedRows, duplicateRows: last.duplicateRows, addedRows: last.addedRows } : null,
+      countsScope: 'Last-import diagnostics describe that upload and the allowlist in effect then. totalEligibleAlarms covers stored rows under the current allowlist, across all dates; neither number is a period denominator.',
+    },
+    limitations: 'Report the selected dates, eligible alarm counts and means in each period. No computable comparison means no reduction percentage. Disclose overlapping or unequal periods and uncertain import completeness. Differences in alarm mix or severity may affect means; there is no linkage to app usage and no evidence of causation or labor savings.',
+  };
+}
+
 /** Build bounded evidence with the same metrics as the dashboard. No API settings enter this object. */
 export function buildAiFacts(input: AiFactsInput) {
   const stats = analyze(input.records, input.presets, input.from, input.to, input.scene);
@@ -54,7 +81,8 @@ export function buildAiFacts(input: AiFactsInput) {
   // MTTR has its own ticket-system ranges and is independent of app Scene filters.
   const mttrCurrent = input.mttrCurrent ?? { from, to };
   const mttrBaseline = input.mttrBaseline ?? previousMttrPeriod(mttrCurrent) ?? { from: '', to: '' };
-  const mttrV3 = input.mttr?.formatVersion === 3;
+  const useAlarmMttr = input.alarmMttr !== undefined;
+  const mttrV3 = !useAlarmMttr && input.mttr?.formatVersion === 3;
   const mttrExcludeCrossDay = input.mttrExcludeCrossDay === true;
   const mttrAllData = mttrV3 ? input.mttr! : null;
   const mttrDayData = selectMttrDayScope(mttrAllData, mttrExcludeCrossDay);
@@ -243,7 +271,7 @@ export function buildAiFacts(input: AiFactsInput) {
       },
     },
     effectiveness: {
-      mttr: {
+      mttr: useAlarmMttr ? alarmMttrEvidence(input.alarmMttr ?? null, mttrBaseline, mttrCurrent) : {
         ...mttrComparison,
         businessRule: mttrV3 ? 'TT-category-filter-joined-to-completed-JOB-by-TT-ID' : 'legacy-single-table-reimport-TT-and-JOB-required',
         overall: mttrOverall,
@@ -396,10 +424,12 @@ export function buildAiFacts(input: AiFactsInput) {
       `Window retention is not a first-use or registration cohort. It uses baseline-day identifiable accounts and counts each account once if it returns on ANY of the following ${retention.windowDays} calendar days. The baseline is windowDays before the selected end. The baseline day is excluded from follow-up; new later accounts do not enter the numerator. It does not require activity exactly on day N or on every day. Scene filtering is consistent and browser is excluded.`,
       'retention.latest describes the selected end date and its preceding window, not an average over the selected period. Always state previousDate (baseline), windowStart, date (window end), windowDays and retainedUsers/previousUsers. Missing baseline or any unobserved follow-up date makes rate null. Present logs are not confirmed complete; absent observations do not establish churn.',
       'Retention statuses other than available have a null rate; missing previous/current logs, no prior identifiable users, or an invalid range must not become a claimed 0% or 100%. Log completeness is unconfirmed for the baseline and every follow-up day, including a possibly partial current day, even when status is available; report observed evidence only, and do not label non-observation as confirmed churn.',
+      ...(useAlarmMttr ? ['Alarm MTTR compares the two independently selected periods using eligible alarm rows from a single alarm workbook. The configured allowlist is applied to both periods. State the counts and mean durations with units, and report shorter or longer means without attributing the change to FMEMate.'] : [
       'MTTR meanGapFilter is a one-pass named-assignee cohort filter after Job filters: exclude abs(two means gap) >= gapHours in either direction, including zero means. Keep unassessed records and disclose counts. Use reportFilters for final exclusions; this does not equalize complexity or establish causation. Invalid settings mean unavailable.',
       'The MTTR durationFilter and reportFilters apply uniformly to all MTTR scopes. A valid enabled duration limit excludes durations greater than or equal to X hours, retaining strictly less; disclose X and the equality boundary. Combine enabled day and duration conditions with AND. Combined excluded counts come from reportFilters and count a Job once even if it fails both conditions; do not add day-only exclusions to combined exclusions. If reportFilters is unavailable, explain its reason, omit filtered rates and do not report placeholder zero counts as measured facts.',
       'The MTTR calendarDayFilter option applies to all MTTR scopes. When excludeCrossDay=true, only Jobs with equal source creation and finish calendar dates remain; a short interval crossing midnight is excluded. Always disclose this selected subset and available excluded Job counts. Import diagnostic counters and totalJobs remain all-data counts before this optional filter. When same-day aggregates are unavailable, report the limitation and no filtered rate; do not substitute the unfiltered comparison.',
       'MTTR is independent of app log metrics, Scene filtering and app reporting dates. V3 joins Radio-OSP/Radio-ISP TT IDs to completed JOBs (Done/Close); TT status is not filtered. Use selected JOB finish-create elapsed time, finish-date grouping and unique jb_id denominators, allowing multiple Jobs per TT. State both ranges/counts/means and the reduction sign. Overall comparison and global person ranking stay independent of the selected person; never average person percentages or daily means. Do not infer total labor hours saved or FMEMate causation. Legacy v1/v2 is not this rule and requires reimporting both tables.',
+      ]),
       'Preset matching ignores case, whitespace, punctuation and symbols. MML records are always excluded from custom questions. Empty MML answers are normal.',
       'Only answers containing Sorry (case-insensitive) count as logged failures. Absence of Sorry is not proof of success, resolution, satisfaction, time saved or business value.',
       'Failure reasons are human-entered notes; missing reasons are under investigation. Evidence examples are samples, not all failures. Do not infer causes from error wording alone.',
@@ -411,7 +441,7 @@ export function buildAiFacts(input: AiFactsInput) {
       'demo=true means every claim must be clearly labeled synthetic demonstration data. Multi-day selections are period reports, not a single-day report.',
     ],
     evidence: {
-      limits: LIMITS,
+      limits: useAlarmMttr ? Object.fromEntries(Object.entries(LIMITS).filter(([key]) => !key.startsWith('mttr'))) : LIMITS,
       coverage: {
         topUsers: coverage(stats.users.length, topUsers.length, 'Most interactions first'),
         repeatUsageUsers: coverage(repeatUsage.users.length, repeatUsageUsers.length, 'Most observed active dates, then longest calendar-day streak; excludes browser'),

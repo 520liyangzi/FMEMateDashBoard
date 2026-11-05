@@ -25,10 +25,11 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from ai_service import AiError, AiService, make_prompt
 from mttr_import import stage_mttr, finish_dataset, aggregate_tickets, validate_dataset, MttrImportError
 from job_mttr_import import stage_pair, joined_aggregates, duration_groups, finish_pair, validate_v3, RADIO
-from mttr_uploads import MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
+import alarm_mttr
+from mttr_uploads import AlarmUploads, MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '1.9.7'
+APP_VERSION = '2.0.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -51,7 +52,7 @@ CREATE INDEX IF NOT EXISTS mttr_jobs_tt ON mttr_jobs(ttId);
 CREATE TABLE IF NOT EXISTS mttr_tickets (ticketId TEXT PRIMARY KEY, createdAt TEXT NOT NULL, closedAt TEXT NOT NULL, durationSeconds REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS mttr_dataset (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, name TEXT NOT NULL, createdAt TEXT NOT NULL, added INTEGER NOT NULL DEFAULT 0, duplicates INTEGER NOT NULL DEFAULT 0, rejected INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0);
-"""
+""" + alarm_mttr.ALARM_SCHEMA
 
 class ApiError(Exception):
     def __init__(self, status, message, details=None):
@@ -165,6 +166,7 @@ class Store:
         with self.connect() as db:
             db.executescript(SCHEMA)
             db.execute('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)', ('presets', json.dumps(DEFAULT_PRESETS)))
+        self.alarm_uploads = AlarmUploads(self.root / '.alarm-uploads',max_file_bytes=mttr_max_file_bytes)
         self.mttr_uploads = MttrUploads(self.root / '.mttr-uploads',max_file_bytes=mttr_max_file_bytes)
 
     @contextmanager
@@ -188,7 +190,34 @@ class Store:
                     'aiReportsTotal': db.execute('SELECT count(*) FROM ai_reports').fetchone()[0],
                     'siteVisits': [self.visit_row(r) for r in db.execute('SELECT * FROM site_visits ORDER BY date DESC,createdAt DESC,id')],
                     'dailySummaries': [dict(r) for r in db.execute('SELECT date,title,zh,en,createdAt,updatedAt FROM daily_summaries ORDER BY date DESC')],
+                    'hasLegacyMttr': bool(db.execute('SELECT EXISTS(SELECT 1 FROM mttr_dataset)').fetchone()[0]),
                     'total': db.execute('SELECT count(*) FROM logs').fetchone()[0]}
+
+    def get_alarm_mttr(self):
+        with self.lock, self.connect() as db:
+            return alarm_mttr.get_dataset(db)
+
+    def update_alarm_allowlist(self, payload):
+        if set(payload) != {'allowlist'} or not isinstance(payload['allowlist'], str):
+            raise ApiError(400, '请填写逗号分隔的告警 ID 白名单 / Supply a comma-separated alarm ID allowlist.')
+        try:
+            with self.lock, self.connect() as db:
+                return alarm_mttr.set_allowlist(db, payload['allowlist'])
+        except MttrImportError as exc:
+            raise ApiError(400, str(exc), exc.details) from exc
+
+    def import_alarm_mttr(self, content, filename, allowlist):
+        try:
+            # Parse/validate in a temporary ledger before entering the DB transaction.
+            with alarm_mttr.stage_import(content, filename) as staged:
+                with self.lock, self.connect() as db:
+                    return alarm_mttr.merge_import(db, staged, allowlist)
+        except MttrImportError as exc:
+            raise ApiError(400, str(exc), exc.details) from exc
+
+    def clear_alarm_mttr(self):
+        with self.lock, self.connect() as db:
+            return alarm_mttr.clear_alarm(db)
 
     def get_mttr(self):
         with self.lock, self.connect() as db:
@@ -745,7 +774,7 @@ class Store:
                 required_tables = {'logs', 'settings', 'groups', 'feedback', 'history'}
                 tables = {r['name'] for r in schema if r['type'] == 'table'}
                 # Legacy backups may omit either of the subsequently added tables.
-                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits', 'mttr_dataset', 'mttr_tickets', 'mttr_tt', 'mttr_jobs'} or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
+                if not required_tables <= tables or not tables <= required_tables | {'failure_notes', 'ai_reports', 'daily_summaries', 'site_visits', 'mttr_dataset', 'mttr_tickets', 'mttr_tt', 'mttr_jobs'} | alarm_mttr.ALARM_TABLES or any(r['type'] not in ('table', 'index') or 'VIRTUAL' in (r['sql'] or '').upper() for r in schema):
                     raise ApiError(400, 'Backup database contains unsupported schema objects.')
                 if 'failure_notes' in tables and {r['name'] for r in source.execute('PRAGMA table_info(failure_notes)')} != {'taskId', 'reason', 'updatedAt'}:
                     raise ApiError(400, 'Backup failure reason columns are invalid.')
@@ -767,6 +796,10 @@ class Store:
                     raise ApiError(400, 'Backup database integrity check failed.')
                 with self.connect(new_db) as dest:
                     dest.executescript(SCHEMA)
+                    try:
+                        alarm_mttr.restore_tables(source, dest, tables)
+                    except MttrImportError as exc:
+                        raise ApiError(400, str(exc), exc.details) from exc
                     mttr_snapshot = None
                     if 'mttr_dataset' in tables:
                         rows = source.execute('SELECT id,data FROM mttr_dataset').fetchall()
@@ -1021,6 +1054,8 @@ class Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             path = unquote(url.path)
             params = parse_qs(url.query)
+            if path == '/api/mttr/alarms':
+                return self.json(self.server.store.get_alarm_mttr())
             if path == '/api/mttr/jobs':
                 audit_params=parse_qs(url.query,keep_blank_values=True)
                 if not {'from','to'}<=set(audit_params) or not set(audit_params)<={'from','to','assignee','offset','limit','excludeCrossDay','maxHours','gapHours','baselineFrom','baselineTo','currentFrom','currentTo'} or any(len(values)!=1 for values in audit_params.values()):
@@ -1103,6 +1138,21 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.handle_error(exc)
 
+    def file_chunk(self, manager, upload_id, source):
+        if self.headers.get_content_type() != 'application/octet-stream':
+            raise ApiError(415, '分块请使用 application/octet-stream / Use application/octet-stream for file chunks.')
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        values = query.get('offset', [])
+        if set(query) != {'offset'} or len(values) != 1 or not re.fullmatch(r'(?:0|[1-9]\d{0,19})', values[0]):
+            raise ApiError(400, '分块偏移量无效 / Specify one nonnegative offset.')
+        try:
+            length = int(self.headers.get('Content-Length', '-1'))
+        except ValueError:
+            raise ApiError(400, 'Invalid chunk content length.')
+        if not 0 < length <= CHUNK_SIZE:
+            raise ApiError(413, '每个上传分块须为 1 字节至 4 MiB / Each upload chunk must contain 1 byte to 4 MiB.')
+        return self.json(manager.append(upload_id, source, int(values[0]), self.body()))
+
     def do_POST(self):
         try:
             self.check_origin()
@@ -1115,17 +1165,17 @@ class Handler(BaseHTTPRequestHandler):
                 upload_id,source=upload.groups()
                 if source=='import':
                     return self.json(store.mttr_uploads.finish(upload_id,self.json_body(),store.import_mttr_pair))
-                if self.headers.get_content_type()!='application/octet-stream':
-                    raise ApiError(415,'分块请使用 application/octet-stream / Use application/octet-stream for file chunks.')
-                query=parse_qs(urlsplit(self.path).query)
-                values=query.get('offset',[])
-                if set(query)!={'offset'} or len(values)!=1 or not re.fullmatch(r'(?:0|[1-9]\d{0,19})',values[0]):
-                    raise ApiError(400,'分块偏移量无效 / Specify one nonnegative offset.')
-                try:length=int(self.headers.get('Content-Length','-1'))
-                except ValueError:raise ApiError(400,'Invalid chunk content length.')
-                if not 0<length<=CHUNK_SIZE:
-                    raise ApiError(413,'每个上传分块须为 1 字节至 4 MiB / Each upload chunk must contain 1 byte to 4 MiB.')
-                return self.json(store.mttr_uploads.append(upload_id,source,int(values[0]),self.body()))
+                return self.file_chunk(store.mttr_uploads, upload_id, source)
+            if path == '/api/mttr/alarms/uploads':
+                return self.json(store.alarm_uploads.create(self.json_body()))
+            alarm_upload = re.fullmatch(r'/api/mttr/alarms/uploads/([0-9a-f]{32})/(alarm|import)', path)
+            if alarm_upload:
+                upload_id, operation = alarm_upload.groups()
+                if operation == 'import':
+                    return self.json(store.alarm_uploads.import_file(upload_id, self.json_body(), store.import_alarm_mttr))
+                return self.file_chunk(store.alarm_uploads, upload_id, operation)
+            if path == '/api/mttr/alarms/allowlist':
+                return self.json(store.update_alarm_allowlist(self.json_body()))
             if path == '/api/ai/config':
                 return self.json(store.ai.save_config(self.json_body()))
             if path == '/api/ai/preview':
@@ -1178,7 +1228,8 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_error(exc)
 
     def do_PUT(self):
-        if re.fullmatch(r'/api/mttr/uploads/[0-9a-f]{32}/(?:tt|job)',urlsplit(self.path).path):
+        path = urlsplit(self.path).path
+        if re.fullmatch(r'/api/mttr/uploads/[0-9a-f]{32}/(?:tt|job)',path) or re.fullmatch(r'/api/mttr/alarms/uploads/[0-9a-f]{32}/alarm',path):
             return self.do_POST()
         self.json({'error':'PUT is supported only for file chunks.'},405)
 
@@ -1188,6 +1239,11 @@ class Handler(BaseHTTPRequestHandler):
             url = urlsplit(self.path)
             params = parse_qs(url.query)
             store = self.server.store
+            alarm_upload = re.fullmatch(r'/api/mttr/alarms/uploads/([0-9a-f]{32})', url.path)
+            if alarm_upload:
+                return self.json(store.alarm_uploads.cancel(alarm_upload[1]))
+            if url.path == '/api/mttr/alarms':
+                return self.json(store.clear_alarm_mttr())
             upload = re.fullmatch(r'/api/mttr/uploads/([0-9a-f]{32})',url.path)
             if upload:
                 return self.json(store.mttr_uploads.cancel(upload[1]))
@@ -1225,7 +1281,7 @@ def main():
     parser.add_argument('--host', default='127.0.0.1', help='Bind address; use 0.0.0.0 only on a trusted LAN.')
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--data-dir', type=Path, default=ROOT / 'data')
-    parser.add_argument('--mttr-max-file-mb', type=positive_mttr_mb, default=1024, help='Maximum TT or Job file size in MiB for chunk uploads (default: 1024).')
+    parser.add_argument('--mttr-max-file-mb', type=positive_mttr_mb, default=1024, help='Maximum alarm or legacy TT/Job file size in MiB for chunk uploads (default: 1024).')
     args = parser.parse_args()
     server = ReportServer((args.host, args.port), Store(args.data_dir, mttr_max_file_bytes=args.mttr_max_file_mb*1024*1024))
     print(f'FMEMate Project Pulse v{APP_VERSION}: http://localhost:{args.port}')

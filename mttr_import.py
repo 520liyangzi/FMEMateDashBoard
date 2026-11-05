@@ -205,7 +205,7 @@ def excel_time(value, date1904=False):
             return None
     return None
 
-def xlsx_rows(content):
+def xlsx_rows(content, numeric_marker_column=None):
     source_size(content)
     try:
         archive = zipfile.ZipFile(io.BytesIO(content) if isinstance(content, bytes) else content)
@@ -301,6 +301,8 @@ def xlsx_rows(content):
                                 nonempty = nonempty or bool(value.strip())
                                 # Read every source column for header mapping.
                                 values[column] = '' if kind in ('e', 'b') else value
+                                if column == numeric_marker_column:
+                                    values['_numericCell'] = kind in ('', 'n')
                             # Preserve physical row 1 even when blank; never treat
                             # the first nonempty data row as a header.
                             if nonempty or row_number == 1:

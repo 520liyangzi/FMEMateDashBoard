@@ -1,10 +1,10 @@
 # FMEMate · Project Pulse
 
-本地运行的中英文项目进展报表：导入应用日志 Excel，查看使用趋势、高频问题、用户主动输入、失败明细，以及 Line group 人数增长与客户反馈；生成 AI 总结提示词，并按日期归档已核对的中英文汇报。中文和英文页面使用同一份数据。
+本地运行的中英文项目进展报表：导入应用日志 Excel，查看使用趋势、高频问题、用户主动输入、失败明细，以及 Line group 人数增长与客户反馈；生成 AI 总结提示词，并按日期归档已核对的中英文汇报。中文和英文页面使用同一份数据。要用一份告警 Excel 对比两个期间的平均恢复时长，见下文「告警 MTTR」。
 
 ## 快速启动
 
-1. 解压完整目录，保留 `dist/`、`server.py`、`ai_service.py`、`mttr_import.py`、`job_mttr_import.py`、`mttr_uploads.py` 和启动脚本的相对位置。
+1. 解压完整目录，保留 `dist/`、`server.py`、`ai_service.py`、`alarm_mttr.py`、`mttr_import.py`、`job_mttr_import.py`、`mttr_uploads.py` 和启动脚本的相对位置。
 2. 安装 **Python 3.10 或更高版本**。运行服务不需要 Node.js，也不需要安装 pip 依赖。
 3. Windows 双击 `start.bat`；macOS / Linux 在目录中执行 `bash start.sh`。也可以执行：
 
@@ -30,7 +30,7 @@ python server.py --data-dir D:\FMEMateData
 
 初次打开时可以浏览明确标注的演示数据。演示数据不写入数据库，也不会混入正式导入结果。导入你的 Excel 后查看正式统计。
 
-## Excel 格式与导入
+## 应用日志 Excel 格式与导入
 
 支持 `.xlsx`、`.xls` 和 `.csv`。建议使用以下列标题；每行为一次调用日志：
 
@@ -193,11 +193,12 @@ This is a local bilingual dashboard for FMEMate application usage and Line group
 2. Run `start.bat` on Windows, `bash start.sh` on macOS / Linux, or `python server.py`.
 3. Open **http://127.0.0.1:8000**. Keep the terminal open; use `Ctrl+C` to stop.
 4. Import Excel logs, configure preset questions, enter daily Line group membership, and add customer feedback with screenshots.
-5. Under **Workspace**, use **AI summary** to prepare a prompt for your local AI tool, then paste or import the reviewed Chinese and English reports into **Project intelligence → Daily summaries** and save them by date.
+5. For **alarm MTTR**, open **Effectiveness**, configure the allowed alarm IDs, import one alarm workbook and select the two date ranges to compare. See the column map and worked example below.
+6. Under **Workspace**, use **AI summary** to prepare a prompt for your local AI tool, then paste or import the reviewed Chinese and English reports into **Project intelligence → Daily summaries** and save them by date.
 
 The package includes a prebuilt `dist/` directory. Node.js and pip packages are not required to run it. To rebuild edited frontend source, use Node.js 22.13+, run `npm install`, then `npm run build`.
 
-Expected columns are **Task Id, Client Id, Question, Time, Answer, Scene**. Time may be an Excel date cell or a string such as `9/22/2026 16:57`; wall-clock values are preserved without timezone conversion. Task Id is globally unique: repeated imports keep the first record and count later occurrences as duplicates, including conflicting records.
+Expected **application log** columns are **Task Id, Client Id, Question, Time, Answer, Scene**. Time may be an Excel date cell or a string such as `9/22/2026 16:57`; wall-clock values are preserved without timezone conversion. Task Id is globally unique: repeated imports keep the first record and count later occurrences as duplicates, including conflicting records.
 
 The invalid Client ID `browser` (case-insensitive, surrounding whitespace ignored) is excluded from all people counts and user rankings. Its records remain in interaction, question and failure totals and raw exports; only non-MML unmatched records count as custom questions. Uses per user is based only on identifiable-user interactions. Existing records are recalculated automatically without reimporting.
 
@@ -221,7 +222,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：1.9.5。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.0.0**。原 TT / Job 工单数据不能还原告警发生时间和时长；要使用新版 MTTR，需要导入告警表。已有的 App 使用日志无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -259,121 +260,38 @@ Overview and User analytics always explain the user-count methodology. A logging
 Date filters apply to visit counts, visit days and photo totals independently of Scene. Click photos to view them in full. Excel includes visit text and photo counts; use offline HTML or Print / Save PDF to share photos. Offline HTML embeds the complete visit archive and images, remains read-only, and excludes real visits from demo exports. Local persistence and ZIP backups include visits/photos; old backups without visits remain compatible. Clearing application logs preserves site visits.
 
 
-### 成效统计 / Effectiveness (v1.9.0)
+## 告警 MTTR / Alarm MTTR (v2.0.0)
 
-“成效统计”集中展示 **Job MTTR、窗口留存、周期复用**。MTTR 使用 TT 表筛选范围，再关联 Job 表计算，旧版直接按 TT 时间计算的口径已停止展示；首次请重新上传覆盖历史的两份表。
+在 **成效统计** 打开告警 MTTR，填写需要观察的告警 ID，例如 `26540,26564,26568`，然后导入**一份告警 Excel（.xlsx）**。请把告警数据放在第一个工作表。第 1 行是表头，数据从第 2 行开始；列位置如下：
 
-| 表 | 字段 | 默认位置 / 用途 |
+| 列 | 字段 / Field | 纳入条件 / Rule |
 | --- | --- | --- |
-| TT | tt_id | B，关联标识 |
-| TT | 分类 | U，只保留 Radio-OSP / Radio-ISP，不限制 TT 状态 |
-| Job | jb_id | 按表头识别，用于 Job 去重 |
-| Job | tt_id | B，必须匹配符合分类的 TT ID |
-| Job | jb_create_date | G，Job 创建时间 |
-| Job | jb_finish_date | I，Job 完成时间 |
-| Job | jb_assign_to | AG，记录的处理人，用于筛选和排名 |
-| Job | jb_status | AR，只统计 Done / Close（忽略大小写与首尾空白） |
+| B | 告警 ID / Alarm ID | 与逗号分隔白名单中的一个完整 ID 匹配。`26540` 不匹配 `265401`。 / Must exactly match one comma-separated allowlisted ID. |
+| I | 持续时长 / Duration | `时:分:秒`；`0:05:10` = **5 分 10 秒**（310 秒）。只接受正时长。 / Hours:minutes:seconds; `0:05:10` means **310 seconds**, not five hours. Only positive durations qualify. |
+| K | 告警发生时间 / Occurrence time | 按表中发生时间的自然日期归入期间，含起止当天。 / Use the calendar date of occurrence, including both period boundaries. |
+| AE | Job ID | 非空；仅用作准入条件。同一个 Job 可有多条有效告警。 / Must be nonblank; multiple eligible alarm occurrences can share a Job ID. |
 
-两份表分别选择文件后一起提交，均读取第一个工作表、从物理第 2 行开始。支持 `.xlsx` 和 UTF-8 CSV；`.xls` 请另存为 `.xlsx`。网页使用 4 MiB 分块上传，每份文件默认最大 1 GiB（1024 MiB），不再受旧版两份文件合计 128 MB 的请求上限影响。上传后从磁盘流式读取，字段确认重试复用已上传文件。表头清晰且唯一时按字段识别；无法确认时页面让你分别选择 TT 的 2 个字段或 Job 的 6 个字段，显示列样例并保留已选择的两份文件。不能用 tt_id 代替 jb_id 去重，也不能把分派日期当作完成时间。
+**计算方法：** 对基准期和对比期分别筛选。`0:00:00` 表示告警还没清除，不参与总时长，也不进入分母。缺少 Job ID、告警 ID 不在白名单中、时长无效或为负、发生日期无效的行也不计入。每期 **平均 MTTR = 有效告警总时长 ÷ 有效告警条数**；同一个告警 ID 出现多次可分别计入。更改并保存白名单后，服务会按新名单重新统计已导入的有效历史，不需要重新上传。
 
-- **处理时长 = jb_finish_date − jb_create_date**，按完成日期归属所选期间，包含夜间、周末及周期开始前的完整自然经过时间，不转换时区。整体 MTTR = Job 总处理时长 ÷ Job 数；不平均每天均值、个人均值或个人减少率。
-- TT 分类先筛为 Radio-OSP / Radio-ISP，再以去重后的 tt_id 匹配 Job，TT 重复行不会放大 Job 数量。同一 TT 下多个不同 Job 分别统计。TT 表同文件重复 ID 中，只要有一行符合分类，该 ID 即符合条件；后续文件对该 TT 的分类更新会重新筛选所有已保存 Job。
-- 按 `jb_id` 在文件内及历史上传中去重，默认保留第一次通过状态、ID、时间校验的记录；显式勾选“按本次文件更新”后，可用本次有效记录修正已保存 Job，数量仍按唯一 ID 统计；Done、Close 以外、缺 ID、无效或负时长的记录不占用有效 Job ID，0 时长有效。处理人为空的 Job 计入整体，并单列“未分配”。
-- 有效但暂未匹配 TT 的 Job 会保存，供后续 TT 数据补充后重新关联。当前匹配结果可为 0：显示无可计算样本，不显示 0% 或虚构提升。结构或字段错误会回滚，两份表一起成功或保持原状；没有任何有效 Job 且没有历史 Job 时拒绝导入并给出诊断。
-- 两期日期默认使用电脑本地当天：最近 7 天（含今天）与前 7 天，支持独立手动选择、最近数据的 3 天/完整周及等长周期前后切换。**减少率 =（基准期均值 − 对比期均值）÷ 基准期均值 × 100%**；正数表示缩短，负数表示变慢。例如 10h→6h 为 40%。没有样本或基准为 0 时百分比不可用。
-- “处理人”可选整体、任一 `jb_assign_to` 或未分配；人员排行始终比较所有人员在相同两期的结果，按减少率从高到低排序。两期均至少 1 个有效 Job、基准均值大于 0、姓名非空才编号；并列共享名次。仅一期有数据、基准为 0 和未分配置后，显示两期数量及均值。请结合样本数解读。
-- 页面、Excel（MTTR 成效、每日汇总、人员排行）、打印、离线 HTML 和 AI 总结采用同一口径；导出会保留整体以及当前选中人员的对比、两期日期和人员选择。日志日期/Scene 筛选不改变 MTTR。整体工单变化本身不证明由 FMEMate 带来的因果提升。
-- 完整备份包含 TT 分类目录、最少 Job 记录及汇总，旧备份仍可恢复。新口径首次成功导入后旧单表导入接口不再覆盖 Job 数据。清除 MTTR 会清除 TT/Job 记录，不影响 App 用户日志；旧每日总结文本不会自动改写。
+**导入与重复记录：** I 列可以是文本 `0:05:10`，也可以是 Excel 数值型时长（一天的分数）；超过 24 小时的时长不会按时钟回绕。K 列可用 Excel 日期时间或明确的年/月/日时刻。缺少必要字段、无效日期或非正时长不会入库。结构有效但当前不在白名单中的记录会保留，便于以后调整名单。没有命中时不会自动把全部 ID 当作有效。
 
-The **Effectiveness** page combines Job MTTR, window retention and repeat usage. Select two files: **TT** and **Job**. TT provides eligible `tt_id` values from Radio-OSP/Radio-ISP categories, without a TT status filter. Jobs must match those TT IDs and have `jb_status` Done or Close. Duration is **jb_finish_date − jb_create_date**, grouped by the Job finish date. Defaults are Job B (tt_id), G (created), I (finished), AG (assignee), AR (status), with `jb_id` identified by its header. Headers can resolve reordered exports; ambiguous fields require explicit mapping. Both tables start at physical row 2.
+告警 ID 是筛选项，Job ID 是关联号，都不是唯一记录号。重复导入不是按 B 或 AE 去重，而是比对规范化后的源行（包括其他有值的列）。同一文件中两条完全相同的行仍算两条；两个重叠文件分别有两条和三条相同行时，全库保留三条。由于没有唯一告警流水号，来自不同文件、所有值都相同的独立告警无法区分；改动其他列的导出也可能被视作新行。
 
-Jobs deduplicate by `jb_id`, so multiple distinct Jobs under one TT remain separate. First valid Job records are retained across imports by default; explicitly selecting Update existing Jobs applies the current file’s valid records without increasing the unique-ID count. Unmatched valid Jobs persist for later TT joins. TT classification updates recalculate the current join; an empty result remains unavailable rather than an invented improvement. Paired imports are atomic and preserve previous data on structural errors.
+**对比示例：** 基准期的两条有效告警各持续 `0:05:10` 和 `0:14:50`，总计 20 分钟，平均 MTTR 为 **10 分钟**。对比期平均为 **8 分钟**时，减少率为 `(10 − 8) ÷ 10 × 100% = 20%`，正值表示耗时缩短，负值表示变长。任一期没有有效告警时无法计算减少率；不能把没有样本当作 `0%` 改善。选择本周和上周、两个三天区间或其他起止日期时均按此规则计算。比较结果反映两个样本的时长变化，不能单独证明改善是由 FMEMate 带来的。
 
-Choose any baseline/comparison periods, then view overall or one assignee. Overall MTTR is total eligible Job duration divided by Job count. Reduction is (baseline mean − comparison mean) / baseline mean × 100%; positive means shorter. Individual ranks use the same periods, require samples in both and a positive baseline, and sort highest percentage first. Unassigned Jobs count in the overall mean but never rank as a person. Counts and both means accompany every result. Missing periods and zero baselines remain unavailable. The comparison alone does not establish FMEMate causation.
+**大文件与导出：** 支持 `.xlsx` 或 UTF-8 `.csv`（旧 `.xls` 请另存为 `.xlsx`）。文件按 4 MiB 分块上传，默认每个源文件最多 1 GiB；可用 `python server.py --mttr-max-file-mb 2048` 修改上传上限。XLSX 解压后的 1 GiB 读取限制独立于上传上限，超过时请拆为多个独立文件、分次导入。Excel 报表和打印页使用所选两期；离线 HTML 保存导出时的白名单与每日汇总，可离线改日期对比。
 
-Excel, offline HTML, print layouts, backups and AI prompts preserve the TT/Job methodology and selected assignee. Legacy single-table MTTR figures are retained for migration but are not presented as Job results; reimport both historical tables once. `.xlsx` and UTF-8 CSV are supported, with 4 MiB binary chunks and a configurable default limit of 1 GiB per file. Uploaded files are parsed from disk; mapping retries reuse the same staging session.
+**从 1.x 升级：** 保留 `data/` 并重启服务。旧版 TT / Job 处理时长与新版告警持续时长是两种指标，不能换算或拼接。新图表需要覆盖所选日期的告警表；以往按 Job 计算的个人排名、跨日过滤和时长阈值不再用于当前 MTTR。窗口留存和周期复用仍基于 App 日志，无需重新导入。历史离线 HTML 是导出当时的快照；如要展示新口径，需用新版重新导出。
 
+**English:** In **Effectiveness**, enter comma-separated alarm IDs (e.g. `26540,26564,26568`) and import a **single alarm workbook** using the fixed columns above. The first row contains headers. Pick the baseline and comparison dates independently. Both use column K’s **occurrence date**, not the clearance date or the date of import. A zero duration marks an uncleared alarm and is excluded from both the sum and the count. Invalid dates, invalid or negative durations, missing Job IDs and alarm IDs outside the allowlist are also excluded. Saving a new allowlist recalculates eligible history from stored records.
 
-### 大表上传 / Large uploads (v1.9.1)
+Use the first worksheet. Native Excel duration values are day fractions; textual elapsed hours can exceed 24. Eligible rows with IDs outside the current allowlist remain stored so that a revised list can include them later. Reimporting the same export does not double its counts. For overlapping exports, identical normalized source rows retain their highest occurrence count in any one file. Neither the alarm ID nor Job ID is a unique event key. Identical independent events in separate exports cannot be distinguished without such a key, and editing other populated columns may produce a distinct row.
 
-旧版 `POST /api/mttr/import-pair` 的 multipart 总请求超过 128 MiB 会返回 413，此时数据尚未解析。新版网页把 TT 与 Job 文件分块保存到本地 `data/.mttr-uploads/`，每个分块最多 4 MiB，然后从磁盘读取两份文件并关联计算；CSV 按行读取，XLSX 流式读取工作表。普通 API 的 128 MiB 请求限制保持不变；旧网页仍走旧接口时，需要重启服务并刷新网页以加载新版。
+Each period’s **mean MTTR** divides the total duration of qualifying alarm occurrences by their count; it is not an average of daily or per-Job averages. Two eligible durations of `0:05:10` and `0:14:50` give a baseline mean of **10 minutes**. Against a comparison mean of **8 minutes**, duration decreased by **20%**: `(baseline mean − comparison mean) / baseline mean × 100%`. If either period has no eligible alarms, the rate is unavailable. Always review both periods’ sample counts before interpreting the change.
 
-- 默认每份文件最大 1 GiB，页面显示总字节上传百分比；上传完成后单独显示“解析计算中”，此时不再显示可取消上传按钮。上传进度 100% 不等于计算完成。
-- 上传阶段可以取消，删除暂存文件，不修改已保存报表。字段选择或解析失败时保留暂存会话，重试字段映射不必再次上传；开始导入新的文件对时会清理上次暂存。
-- 暂存不包含在完整备份或离线导出内，成功导入后自动清理；24 小时过期会话在服务启动或新上传时清理，最多保留 8 个活动会话。
-- 磁盘需容纳两份原文件、Excel 解压读取所需临时文件和数据库。超限、磁盘空间不足、会话过期会显示明确提示，原报表保留。
-- 现有解析保护仍生效：XLSX 解压总量上限 1 GiB，最多 2,000,000 行，单元格内容上限 65,536 字符。提高上传限制不会取消这些解析限制。
+The uploader supports `.xlsx` and UTF-8 `.csv` in 4 MiB chunks. The default limit is 1 GiB per source file; `--mttr-max-file-mb` adjusts that upload limit, not the independent 1 GiB expanded-XLSX limit. For a larger expanded workbook, split the export into separate files and import them one at a time. Excel and print reports use the selected periods; offline HTML keeps the saved allowlist and daily aggregates so recipients can change the dates.
 
-需要支持更大的单文件时，可自行指定上限，例如每份 2 GiB：
-
-```bash
-python server.py --mttr-max-file-mb 2048
-```
-
-The web app stages each source using 4 MiB binary chunks, then parses disk-backed CSV/XLSX sources with bounded memory. The default per-file upload cap is 1 GiB and can be changed with `--mttr-max-file-mb`. Existing report data changes only after the paired import validates and commits. Mapping retries reuse uploaded files. Upload cancellation is available before server-side parsing begins; once parsing starts, wait for its atomic result. Successful uploads clean up staging, and expired sessions are removed on startup or new uploads. Staged source files are excluded from backups and offline exports.
-
-
-### 搜索统计对象 / Search assignees (v1.9.2)
-
-成效统计的“统计对象”支持输入姓名片段查找处理人，中英文界面均可使用，忽略大小写及搜索词首尾空白。“整体”和已有的“未分配”选项保留。输入搜索词只过滤选项，选择姓名后才改变个人 MTTR；没有匹配结果时不会自动改为其他人员。支持键盘方向键、Enter 选择和 Escape 关闭。当前选中人员沿用已有保存、Excel 和离线网页逻辑，搜索词仅用于当前页面查找。
-
-The Scope picker supports partial-name search, ignoring case and surrounding query whitespace. Overall and existing Unassigned choices remain available. Typing only filters options; a click or Enter confirms a selection. No results never changes the current scope. Arrow keys navigate, Escape closes, and the selected assignee continues to persist and export as before.
-
-
-### 自动更新 MTTR 日期 / Automatic MTTR dates
-
-实时页面默认按用户电脑的本地日期，对比近 7 个自然日（含当天）与紧邻的前 7 天。自动模式在重新打开、回到页面以及跨日时更新；不会一直复用旧的 2026-12-14 等缓存日期。旧版日期缓存升级后会重置为自动模式一次。
-
-修改日期输入、点击最新数据快捷范围或前后切换，会进入“手动日期”并保存选择；点“按今天更新”恢复自动模式。自动范围、手动范围均以页面实际显示日期为准，无数据时指标不可用，不自动换成历史日期。最新数据的 3 天/完整周快捷按钮仍以导入数据最新完成日为锚点，页面已明确标注。离线网页保留导出时的日期快照，不会随打开日期静默改变；仍可手动筛选。
-
-Live MTTR dates default to the device's local today: the last seven inclusive calendar days against the preceding seven. Auto mode refreshes on reopening, returning to the page and across midnight. Editing dates or choosing data-based shortcuts switches to saved manual mode; Use today restores automatic dates. Legacy saved dates migrate once to automatic mode. Offline reports preserve the exported date snapshot.
-
-
-### 核对异常日期及显式修正 / Audit and repair saved dates
-
-`2026/10/31  18:04:00` 会按 2026-10-31 18:04:00 解析。若界面在 12 月仍显示 Job，需要核对实际保存记录，而不能仅更改默认日期或隐藏未来日期：
-
-- 点“核对日期数据”查看所有符合条件 Job 的已存创建/完成日期范围、按完成日期的数量，以及最近一次上传的列映射。晚于设备日期的完成记录会提示，但不会被静默删除。
-- 点各期“查看计算明细”或某个日期的“查看该日 Job”，可分页查看 Job ID、TT ID、处理人、状态、已存创建/完成时间和耗时，支持导出当前页。这里是解析后的存储值，历史上传的原始单元格文本未保留；请用 Job ID 回查 Job 原表 G、I 列。日期核对功能需要在线本地服务，不包含在离线报告中。
-- 默认重复 ID 不覆盖首次有效记录。因此，以前保存为 12 月的 Job，即使后来上传同 ID 的 10 月记录，默认也不会自动改正。核对原表后，可勾选“按本次文件更新已存在的 Job”，再上传两表；更新已有 Job 的创建/完成时间、关联 TT、人员和状态，不增加唯一 Job 数。不勾选则保持旧行为；同一文件内仍保留首条有效记录。
-- 更新是明确的选项，默认关闭，更换文件会重置。`updatedJobs` 记录本次实际变化的旧 Job 数（完全相同的不计更新），`duplicatePolicy` 记录 keep/update；字段确认重试保留该选项，备份兼容旧版无此元数据的数据。
-
-Saved-date auditing exposes parsed ledger values and the exact Job IDs behind a period. It does not reconstruct original workbook text or establish an unseen file’s parsing cause. The default duplicate policy keeps prior records; an explicit Update existing Jobs option applies corrected valid data from the current file while preserving unique Job counts. Future dates remain visible for inspection rather than silently removed.
-
-
-### 过滤跨天 Job / Exclude cross-day Jobs (v1.9.3)
-
-成效统计新增“过滤跨天 Job”，默认关闭，并记住当前浏览器的选择。打开后，只有原表 `jb_create_date` 与 `jb_finish_date` 的自然日期相同的 Job 参与计算，不转换时区。例如当日 23:59 到次日 00:01 也会排除，不能按耗时小于 24 小时替代。两期仍按完成日期归属，整体、指定人员、人员排名、计算明细、Excel、打印 / PDF、离线报表和 AI 提示词均使用该选择，并展示两期排除数量。
-
-该选择只改变统计范围，不删除历史记录，不影响 TT 分类、Done / Close、ID 去重规则和原始日期核对。导入质量计数保留全部数据口径。已保存的 V3 TT + Job 数据更新服务后可直接使用，无需重新上传；旧离线快照没有同日汇总时不会推算或展示未经筛选的结果，请从新版服务重新导出。已有每日总结和 AI 汇报文本不会自动改写。
-
-The Effectiveness page adds **Exclude cross-day Jobs**, off by default and remembered in the browser. When enabled, only Jobs whose source creation and finish timestamps share a calendar date enter MTTR calculations. No timezone conversion is applied. A Job from 23:59 to next-day 00:01 is excluded even though it lasts less than 24 hours. Finish dates still determine the reporting period. Overall and assignee comparisons, rankings, calculation details, Excel, print/PDF, offline reports and AI prompts use the selected policy and disclose excluded counts.
-
-The option preserves all saved Jobs and existing TT/status/deduplication rules. Raw date audits and import quality counters remain unfiltered. Existing V3 server data works after updating without reuploading source files. Older offline snapshots lack the subset; export a new report rather than infer it from averages. Saved daily-summary and AI-report text is unchanged.
-
-
-### 可选时长过滤 / Optional duration threshold (v1.9.4)
-
-“成效统计”新增“过滤 ≥ X 小时的 Job”，默认关闭，初始值为 24 小时。X 可填写大于 0 的小数，如 0.5、8、12。启用后只保留耗时 **严格小于 X 小时** 的 Job，恰好 X 小时也排除。该条件与“过滤跨天 Job”可独立启用或同时启用；同时启用时必须同时满足两个条件。页面显示两期按所选条件排除的总数，同一 Job 不重复计数。阈值为空、0 或无效时暂停计算并提示，不会悄悄切回完整统计。
-
-浏览器记住开关与 X。整体、指定人员、排名、计算明细、Excel、打印 / PDF、离线 HTML 和 AI 提示词使用一致的阈值。筛选基于每条 Job 的原始耗时，先筛选再算平均，不按每日或个人均值筛选；不会删除已保存 Job。已有 V3 数据更新服务后即可使用。新离线报表保留调整阈值所需的数据；旧快照缺少这些数据时会明确提示不可用，请从更新后的服务重新导出。
-
-**Exclude Jobs lasting ≥ X hours** is off by default, with an initial value of 24 hours. Enter any valid positive number of hours, including decimals such as 0.5. When enabled, only Jobs lasting **strictly less than X hours** remain; equality is excluded. The calendar-day and duration filters work independently or together using AND. Combined exclusions count each Job once. Blank, zero or invalid thresholds make calculations unavailable with a clear message.
-
-The browser remembers both the option and X. Overall/assignee MTTR, ranking, calculation details, Excel, print/PDF, offline reports and AI prompts use the same rule. Individual Job durations are filtered before weighted means are calculated. History is preserved. Existing V3 server data requires no source reupload. New offline reports support changing X; old snapshots without duration data require a new export.
-
-
-### 人员两期均值差筛选 / Assignee period-mean gap filter (v1.9.5)
-
-“成效统计”新增“过滤两期 MTTR 差距 ≥ X 小时的处理人”，默认关闭，初始 X 为 8，可填写正数或小数。这里比较的是 **同一处理人** 的基准期平均 MTTR 与对比期平均 MTTR，绝对差 **大于或等于 X 小时** 即将该处理人从排行和整体汇总排除。时长缩短和增加对称判断，不按方向选择。
-
-计算顺序固定为：先应用跨天 / 单 Job 时长条件，再用剩余 Job 一次性计算每人的两期均值，得到排除名单；最后用保留 Job 的总时长 ÷ Job 数重新汇总整体，不平均个人均值，也不迭代筛选。选中某个处理人不会改变排除名单。调整两期日期或前置条件会重新判断。缺少任一期数据的具名处理人无法判断差距，继续保留在整体；未分配 Job 也保留，均不作为正常可排名人员。零基准均值仍可判断绝对差，但百分比减少率继续不可用。
-
-页面展示被排除人员、两期 Job 数、均值与绝对差；Excel 增加完整排除人员明细，打印、离线报表、计算明细及 AI 提示词沿用相同规则。原始 Job、原始日期核对和导入质量计数不变。浏览器与新离线报表保留开关及 X；已有 V3 数据无需重新上传。这个规则用于筛查差距过大的人员对比，不能保证工单难度一致，也不能凭筛选后的改善率证明 FMEMate 因果成效。
-
-The optional **Exclude assignees with MTTR gap ≥ X hours** filter is off by default (initial X: 8). It compares each named assignee’s baseline and comparison arithmetic means. If their absolute difference is at least X hours, that assignee is excluded from both ranking and overall aggregation, symmetrically for shorter and longer durations.
-
-Apply Job-level day/duration conditions first. Assess the exclusion cohort once using both selected periods, then recompute overall MTTR from retained Job durations and counts. Never average personal means or iteratively remove people. Selection of one assignee does not change the cohort. Named assignees missing a period and unassigned Jobs remain in overall figures without a gap decision; zero-baseline means can be compared for absolute gaps but percentage reduction stays unavailable. The page and exports disclose exclusions, sample counts and means. This screen does not control ticket complexity or establish causal project benefits. Saved history and import-quality counters remain unchanged.
+**Upgrading from 1.x:** Old TT/Job data cannot be converted into alarm occurrence records. Import the alarm workbook to start the new comparison; existing application logs, retention and repeat-use statistics do not need to be rebuilt. Generate a fresh offline report for recipients who should see the new methodology.
 
 ### v1.9.6 — Daily active users / 每日活跃用户
 

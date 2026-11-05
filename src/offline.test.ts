@@ -200,3 +200,16 @@ test('offline snapshots preserve editable personal mean-gap filter and original 
     assert.ok(!('personDays' in old.mttr));
   });
 });
+
+test('alarm snapshots keep eligible daily sums for changing periods offline, and strip real alarm data from demo exports', async () => {
+  await browserMock(async context => {
+    context.setFetch((async () => Response.json({js:'console.log(1)',css:'body{}'})) as typeof fetch);
+    const alarmMttr={formatVersion:4,source:'alarms',days:[{date:'2026-10-19',count:2,totalSeconds:1200}],allowlist:['26540','26564']};
+    const mttrBaseline={from:'2026-10-19',to:'2026-10-25'}, mttrCurrent={from:'2026-10-26',to:'2026-11-01'};
+    for(const demo of [false,true]){
+      await downloadOfflineReport({demo,state:{},mttrBaseline,mttrCurrent,alarmMttr},'zh');
+      const exported=JSON.parse((await context.generated()!.text()).match(/window\.__PULSE_OFFLINE__=([\s\S]+?);<\/script>/)![1]);
+      assert.deepEqual(exported.alarmMttr,demo?null:alarmMttr);assert.deepEqual(exported.mttrBaseline,mttrBaseline);assert.deepEqual(exported.mttrCurrent,mttrCurrent);
+    }
+  });
+});

@@ -1,4 +1,4 @@
-"""Bounded-memory, resumable disk staging for large TT + Job uploads."""
+"""Bounded-memory disk staging for alarm exports and legacy TT + Job pairs."""
 from contextlib import contextmanager
 import json
 import os
@@ -26,6 +26,8 @@ class Session:
         self.lock=threading.RLock()
 
 class MttrUploads:
+    sources = ('tt', 'job')
+    selection_error = '请选择 TT 和 Job 两份文件 / Specify both TT and Job files.'
     def __init__(self,root,max_file_bytes=DEFAULT_MAX_FILE_BYTES,max_sessions=MAX_SESSIONS,ttl=SESSION_TTL,clock=None):
         if type(max_file_bytes) is not int or not 0<max_file_bytes<=9007199254740991:
             raise ValueError('MTTR maximum file size must be a positive safe integer.')
@@ -55,12 +57,12 @@ class MttrUploads:
                 manifest=path/'metadata.json'
                 if manifest.stat().st_size>4096:raise ValueError()
                 metadata=json.loads(manifest.read_text(encoding='utf-8'))
-                if set(metadata)!={'createdAt','tt','job'} or type(metadata['createdAt']) not in (int,float):raise ValueError()
+                if set(metadata)!=set(self.sources)|{'createdAt'} or type(metadata['createdAt']) not in (int,float):raise ValueError()
                 if not 0<=metadata['createdAt']<=self.clock()+60:raise ValueError()
-                metadata={key:self._spec(metadata[key]) for key in ('tt','job')}|{'createdAt':metadata['createdAt']}
+                metadata={key:self._spec(metadata[key]) for key in self.sources}|{'createdAt':metadata['createdAt']}
                 session=Session(path.name,metadata,path)
                 if self.clock()-metadata['createdAt']>=self.ttl:raise ValueError()
-                for source in ('tt','job'):
+                for source in self.sources:
                     file=self._file(session,source)
                     if file.is_symlink() or not file.is_file() or file.stat().st_size>metadata[source]['size']:raise ValueError()
                 self.sessions[session.id]=session
@@ -102,14 +104,14 @@ class MttrUploads:
         finally:session.lock.release()
 
     def create(self,payload):
-        if not isinstance(payload,dict) or set(payload)!={'tt','job'}:
-            raise MttrUploadError(400,'请选择 TT 和 Job 两份文件 / Specify both TT and Job files.')
-        specs={source:self._spec(payload[source]) for source in ('tt','job')}
+        if not isinstance(payload,dict) or set(payload)!=set(self.sources):
+            raise MttrUploadError(400,self.selection_error)
+        specs={source:self._spec(payload[source]) for source in self.sources}
         self.cleanup()
         with self.lock:
             if len(self.sessions)>=self.max_sessions:
                 raise MttrUploadError(429,'暂存上传过多，请取消旧上传后重试 / Too many staged uploads; cancel an older session first.')
-            remaining=sum(max(0,s.metadata[source]['size']-self._file(s,source).stat().st_size) for s in self.sessions.values() for source in ('tt','job'))
+            remaining=sum(max(0,s.metadata[source]['size']-self._file(s,source).stat().st_size) for s in self.sessions.values() for source in self.sources)
             if shutil.disk_usage(self.root).free < sum(v['size'] for v in specs.values())+remaining+16*1024*1024:
                 raise MttrUploadError(507,'磁盘空间不足 / Insufficient disk space for the declared uploads.')
             upload_id=uuid.uuid4().hex;path=self.root/upload_id
@@ -118,7 +120,7 @@ class MttrUploads:
                 metadata={**specs,'createdAt':self.clock()}
                 session=Session(upload_id,metadata,path)
                 (path/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False),encoding='utf-8')
-                for source in ('tt','job'):self._file(session,source).touch(mode=0o600)
+                for source in self.sources:self._file(session,source).touch(mode=0o600)
                 self.sessions[upload_id]=session
             except OSError as exc:
                 shutil.rmtree(path,ignore_errors=True)
@@ -126,7 +128,7 @@ class MttrUploads:
         return {'uploadId':upload_id,'chunkSize':CHUNK_SIZE,'maxFileBytes':self.max_file_bytes}
 
     def append(self,upload_id,source,offset,content):
-        if source not in ('tt','job') or type(offset) is not int or offset<0:
+        if source not in self.sources or type(offset) is not int or offset<0:
             raise MttrUploadError(400,'分块来源或偏移量无效 / Invalid chunk source or offset.')
         if not isinstance(content,bytes) or not 0<len(content)<=CHUNK_SIZE:
             raise MttrUploadError(413,'每个分块须为 1 字节至 4 MiB / Each chunk must contain 1 byte to 4 MiB.')
@@ -160,7 +162,7 @@ class MttrUploads:
             raise MttrUploadError(400,'updateExistingJobs must be a JSON boolean.')
         with self._session(upload_id) as session:
             fields={}
-            for source in ('tt','job'):
+            for source in self.sources:
                 path=self._file(session,source);received=path.stat().st_size;total=session.metadata[source]['size']
                 if received!=total:
                     raise MttrUploadError(409,f'{source.upper()} 文件未上传完成 / File upload incomplete: {received}/{total} bytes.')
@@ -175,3 +177,21 @@ class MttrUploads:
     def cancel(self,upload_id):
         with self._session(upload_id,blocking=False) as session:self._remove(session)
         return {'ok':True}
+
+
+class AlarmUploads(MttrUploads):
+    """One completed alarm export, retriable until the DB transaction succeeds."""
+    sources = ('alarm',)
+    selection_error = '请选择一份告警文件 / Specify one alarm file.'
+
+    def import_file(self, upload_id, payload, importer):
+        if set(payload) != {'allowlist'} or not isinstance(payload['allowlist'], str):
+            raise MttrUploadError(400, '请填写逗号分隔的告警 ID 白名单 / Supply the comma-separated alarm ID allowlist.')
+        with self._session(upload_id) as session:
+            path = self._file(session, 'alarm')
+            info = session.metadata['alarm']
+            if path.stat().st_size != info['size']:
+                raise MttrUploadError(409, '告警文件未上传完成 / Alarm upload is incomplete.')
+            result = importer(path, info['name'], payload['allowlist'])
+            self._remove(session)
+            return result

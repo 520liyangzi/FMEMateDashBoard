@@ -229,3 +229,10 @@ test('MTTR prompts disclose symmetric personal mean-gap filtering without claimi
   assert.match(prompt, /invalid_gap_threshold/);
   assert.match(prompt, /gap_person_data_unavailable/);
 });
+
+test('alarm MTTR prompt explains source columns, occurrence dates, valid row means and no old TT/JOB filter instructions', () => {
+  const data=buildAiFacts({records:[],presets:[],groups:[],feedback:[],failureNotes:{},from:'2026-11-01',to:'2026-11-02',scene:'',demo:false,alarmMttr:null});
+  const prompt=buildAiReportPrompt(data);
+  for (const rule of [/B 列告警 ID 在当前白名单内/,/AE 列 Job ID 非空/,/0:00:00 表示未清除/,/K 列告警发生日期/,/有效告警行数/,/不能平均每日均值/,/null/,/减少率=\(基准期 meanSeconds−对比期 meanSeconds\)/,/不能归因于 FMEMate/]) assert.match(prompt,rule);
+  assert.doesNotMatch(prompt,/Radio-OSP|meanGapFilter|no_joined_dataset|TT-category-filter|重新导入 TT 和 JOB/);
+});

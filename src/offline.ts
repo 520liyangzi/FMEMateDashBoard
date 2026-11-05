@@ -1,6 +1,8 @@
+import type {AlarmMttrDataset} from '../lib/alarm-mttr';
 type Language = 'zh' | 'en';
 type MutableSnapshot = Record<string, unknown> & {
   demo?: boolean;
+  alarmMttr?: AlarmMttrDataset|null;
   trendExcludeWeekends?: boolean;
   trendRange?: {from:string;to:string}|null;
   lang?: Language;
@@ -96,6 +98,7 @@ export async function downloadOfflineReport(snapshot: unknown, lang: Language): 
   }
   verifyAssets(assets.js, assets.css, lang);
 
+  if (copy.demo) copy.alarmMttr = null;
   if (copy.demo && copy.state) {
     // A synthetic preview must never carry production screenshots into a file.
     copy.state.feedback = [];

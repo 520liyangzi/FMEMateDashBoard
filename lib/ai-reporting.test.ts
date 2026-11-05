@@ -695,3 +695,23 @@ test('mean-gap examples are bounded while exclusions and weighted calculations c
   assert.equal(report.overall.baseline.count, 0);
   assert.equal(report.reductionRate, null);
 });
+
+test('alarm MTTR evidence uses inclusive occurrence-date periods weighted by alarm rows and never mixes job metrics', () => {
+  const alarmMttr = {formatVersion:4 as const,source:'alarms' as const,
+    allowlist:Array.from({length:5000},(_,i)=>String(30000+i)),storedRows:15,totalAlarms:9,
+    earliestDate:'2026-09-01',latestDate:'2026-09-15',lastImport:null,
+    days:[{date:'2026-09-01',count:1,totalSeconds:3600},{date:'2026-09-07',count:3,totalSeconds:32400},
+      {date:'2026-09-08',count:2,totalSeconds:10800},{date:'2026-09-14',count:2,totalSeconds:7200},
+      {date:'2026-09-15',count:1,totalSeconds:500}]};
+  const input = {...meanGapFactsFixture(), alarmMttr, mttrGapHours:1,
+    mttrBaseline:{from:'2026-09-01',to:'2026-09-07'},mttrCurrent:{from:'2026-09-08',to:'2026-09-14'}};
+  const report=facts(input), result=report.effectiveness.mttr;
+  assert.equal(result.businessRule,'allowlisted-alarm-duration-by-occurrence-date');
+  assert.deepEqual([result.baseline.count,result.baseline.meanSeconds,result.current.count,result.current.meanSeconds,result.reductionRate],[4,9000,4,4500,50]);
+  assert.equal(result.allowlistSize,5000);
+  assert.ok(!JSON.stringify(report).includes('34999'),'allowlist is bounded to its size; no source IDs or raw rows');
+  assert.doesNotMatch(JSON.stringify(report),/TT-category-filter|meanGapFilter|updatedJobs|Improved|Radio-OSP/);
+  assert.equal(result.dataQuality.totalEligibleAlarms,9,'all-history count is not either period denominator');
+  const none=facts({...input,alarmMttr:null}).effectiveness.mttr;
+  assert.equal(none.reductionRate,null); assert.equal(none.status,'no_dataset','never substitute old Job data');
+});
