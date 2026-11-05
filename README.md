@@ -222,7 +222,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.2.1**。从 2.2.0 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.2.2**。从 2.2.0 或 2.2.1 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -260,7 +260,7 @@ Overview and User analytics always explain the user-count methodology. A logging
 Date filters apply to visit counts, visit days and photo totals independently of Scene. Click photos to view them in full. Excel includes visit text and photo counts; use offline HTML or Print / Save PDF to share photos. Offline HTML embeds the complete visit archive and images, remains read-only, and excludes real visits from demo exports. Local persistence and ZIP backups include visits/photos; old backups without visits remain compatible. Clearing application logs preserves site visits.
 
 
-## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.2.1)
+## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.2.2)
 
 进入 **成效统计**。在告警白名单中填入 `26540,26564,26568` 这样的逗号分隔列表，导入告警文件和一份或多份 Job 人员文件；这两类数据的先后顺序不限。计算整体、多人或个人 MTTR 都需要告警和人员归属。Job 表用 C 列关联工单、用 AL 列确定人员，不使用它的创建、关闭时间，也不需要 TT 表。每个 Excel 工作簿仅读取第一个工作表，第 1 行为表头，从第 2 行开始读取。
 
@@ -282,6 +282,8 @@ Date filters apply to visit counts, visit days and photo totals independently of
 **选择本次报表的 AL 人员和比较期。** 选择全部时，仍只统计通过已保存 AL 名单规则的有效工单。基准期、对比期任一期有有效工单的人都可搜索、勾选；两期均无单的人不会出现在候选或排名中。粘贴名单时可用逗号或换行分隔姓名。只保留与当前候选人员完全匹配的姓名，并列出已忽略的名字。全部未命中时保留空选择，不会自动切回全部人员。每期均值 = **所选范围内各有效 Job 最长时长之和 ÷ 有效 Job 数**。例如 A 有 2 个 Job（15、9 分钟），B 有 1 个 Job（36 分钟），选择 A+B 的均值是 `(15+9+36)/3=20` 分钟；单看 A 是 12 分钟，单看 B 是 36 分钟。
 
 基准期和对比期都包含起止当天。**减少率 =（基准期均值 − 对比期均值）÷ 基准期均值 × 100%**。上述 A+B 如果对比期均值是 10 分钟，减少率为 50%。个人榜按各人自己的减少率从高到低排序，仅一期有有效 Job 的人员仍可查看该期工单和均值，但没有提升率或名次。解读排名时一起看两期样本量。指标反映的是由告警估算的工单时长变化，不能单独证明 FMEMate 导致了改善。
+
+**查看计算规则。** 在成效统计的整体 MTTR 或“工单明细”旁展开规则，即可核对这组数字的算法。整体说明对应当前报表人员组；个人明细说明对应正在查看的人，返回报表范围后则对应整组。两处均可核对基准期和对比期的实际总时长、工单数、均值和由此得到的提升率。正提升率表示平均工单时长缩短，负值表示延长，0 表示不变。排名按未四舍五入的个人提升率排序：相同的原始提升率并列（如第 1、1、3 名），仅一期有工单时没有名次。新导出的离线 HTML 也可以展开这些说明。打印或保存 PDF 时，只包含打印前已展开的规则；保持收起即可省略。
 
 **按人核对两期工单。** “工单明细”默认跟随当前报表。可以在这里搜索并选中一个 AL 人员，也可以点击提升率排名里的姓名，直接查看此人在基准期和对比期的 Job ID、最长有效告警日期和 MTTR（时:分:秒）。每期独立翻页，工单数和均值按该期全部明细计算。若此人仅一期有单，另一侧显示无单，个人提升率没有可比值。
 
@@ -308,6 +310,8 @@ A Job also needs a matching ID in Job column C and a name in column AL. All filt
 **Save the project-wide AL personnel list.** Choose **No list filter** to keep every matched AL person, **Include listed people** to keep only the listed AL names, or **Exclude listed people** to omit them. Enter full names separated by commas, semicolons or line breaks and save. Names match as a whole after Unicode normalization, case folding and collapsing whitespace. Include and exclude require at least one name; use **Turn off and clear list** to restore all matched AL names. This rule covers historical and future Jobs, including detail rows, Excel, offline reports and AI summaries. The alarm ID allowlist on column B remains a separate condition.
 
 For an individual comparison, search for one AL person, select several, or compare everyone admitted by the saved list. The picker and ranking include only people who have a qualifying Job in at least one of the two periods. Paste names separated by commas or line breaks. Exact matches in the current picker are selected; skipped names are shown. If no names match, the selection stays empty. Within each inclusive date range, the mean is the **sum of the selected Jobs’ maximum durations divided by their Job count**. If A’s two Jobs take 15 and 9 minutes and B’s one Job takes 36 minutes, A+B’s baseline mean is 20 minutes, while A’s own mean is 12 minutes. A comparison mean of 10 minutes for A+B is a 50% reduction. The ranking compares each named assignee’s own baseline and comparison means, sorting signed percentage reductions in descending order. A person with Jobs in only one period remains visible with that period’s mean and count but receives no percentage or rank; check each period’s Job count alongside the percentage.
+
+**View the calculation rules.** Expand the explanation beside the overall MTTR or under **Job details**. The first explains the current report group; the second follows the person in focus, or the group when no one is selected. Each lets you check both periods’ actual total Job durations, Job counts and means, and the resulting improvement rate. Positive improvement means the mean Job duration fell, negative means it rose, and zero means no change. Personal ranks use unrounded rates: equal rates share a rank (for example, 1, 1, 3), and a person with Jobs in just one period has no rank. The explanations also open in a newly exported offline HTML report. Print and Save PDF include only the rules you have expanded; leave them collapsed to omit them.
 
 **Check one person’s Jobs in both periods.** **Job details** follows the current report scope until you search for an AL person there or click their name in the improvement ranking. The baseline and comparison tables then show that person’s Job IDs, longest eligible alarm dates and MTTR (h:mm:ss). Each table pages independently; its count and mean cover the full period. A person with Jobs in only one period can still be inspected. The other table has no Jobs and there is no comparable individual rate.
 

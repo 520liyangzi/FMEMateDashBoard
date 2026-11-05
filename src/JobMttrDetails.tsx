@@ -1,3 +1,4 @@
+import MttrCalculationRules from './MttrCalculationRules';
 import {useEffect,useMemo,useState} from 'react';
 import {ChevronLeft,ChevronRight,Download} from 'lucide-react';
 import {
@@ -148,6 +149,7 @@ export default function JobMttrDetails({onExport,report,availablePeople=[],focus
       {onExport&&(!common.offline||common.offlineRows)&&<button className="btn screen-only" type="button" disabled={exporting||!report.baseline.count&&!report.current.count} onClick={async()=>{setExporting(true);try{await onExport()}finally{setExporting(false)}}}><Download size={15}/>{exporting?t('正在导出…','Exporting…'):focusPerson!==null?t('导出此人明细','Export this person’s details'):t('导出完整明细','Export all detail rows')}</button>}
     </header>
     <PersonControl t={t} legacy={legacy} availablePeople={availablePeople} focusPerson={focusPerson} onFocusPersonChange={onFocusPersonChange}/>
+    <MttrCalculationRules t={t} report={report} scope={scope} legacy={legacy} formatDuration={common.formatDuration}/>
     <FocusSummary t={t} scope={scope} report={report} formatDuration={common.formatDuration}/>
     <p className="job-detail-print-note">{t('明细仅打印当前页；完整筛选结果可导出 Excel。','Only the displayed page of each table is printed. Export Excel for all matching Jobs.')}</p>
     <div className="job-detail-grid">{include(t('基准期工单','Baseline Jobs'),report.baseline)}{include(t('对比期工单','Comparison Jobs'),report.current)}</div>
