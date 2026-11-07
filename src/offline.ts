@@ -10,6 +10,7 @@ type MutableSnapshot = Record<string, unknown> & {
   /** Independent Job detail focus; absent or null follows the selected reporting group. */
   detailFocusPerson?:string|null;
   alarmMttr?: AlarmMttrDataset|null;
+  weeklyUsageMonday?: string;
   trendExcludeWeekends?: boolean;
   trendRange?: {from:string;to:string}|null;
   lang?: Language;

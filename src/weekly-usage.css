@@ -1,0 +1,9 @@
+.weekly-usage { margin-bottom: 20px; }
+.weekly-usage-heading, .weekly-usage-result { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px 24px; }
+.weekly-usage-heading h2 { margin: 0; }
+.weekly-usage-heading p, .weekly-usage-result p { margin: 5px 0; color: #536971; font-size: 13px; line-height: 1.5; }
+.weekly-usage-heading label { display: grid; gap: 4px; color: #455d64; font-size: 12px; }
+.weekly-usage-heading select { max-width: 100%; padding: 7px 10px; border: 1px solid #c6d4ce; border-radius: 6px; background: white; color: inherit; font: inherit; }
+.weekly-usage-result { margin-top: 16px; padding-top: 12px; border-top: 1px solid #dfe9e3; justify-content: flex-start; }
+.weekly-usage-result strong { font-size: 30px; line-height: 1.2; font-variant-numeric: tabular-nums; color: #10644f; }
+.weekly-usage-result span { margin-inline-start: 7px; font-size: 13px; }

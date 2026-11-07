@@ -61,6 +61,12 @@ python server.py --data-dir D:\FMEMateData
 - **新增 / 回访用户**：根据已导入历史中的首次出现日期判断；没有导入的早期日志不参与判断。周期比较仅反映现有日志覆盖范围。
 - 日期筛选同时影响报表中的日志趋势、排名和失败明细。Excel 和 PDF 按页面当前筛选结果生成；离线 HTML 包含完整数据快照并保留当前筛选条件。
 
+## 用户分析 · 人均每周使用天数 / Weekly usage days per active user
+
+在「用户分析」的「统计工作周」选择周一至周五的日期范围，例如 2026-11-02 至 2026-11-06。默认显示页面结束日所在的完整工作周。切换工作周只调整该指标，场景沿用页面筛选。每个可识别账号每天有一次或多次使用都计 1 天。将所有账号的使用天数相加，再除以该周工作日有使用的账号数。例如 A 使用 3 天、B 使用 2 天，人均为 2.5 天。仅在周末出现的账号、空账号和 `browser` 均排除。页面显示全部场景有日志的工作日数，便于判断该周的日志覆盖。无符合条件的账号时均值显示为「—」。
+
+Under **User analytics**, select a Monday–Friday period in **Reporting week**. The default is the week containing the page end date. The metric follows the selected scene. It divides the sum of distinct weekdays used by each identifiable account by the number of weekday-active accounts. Excel includes the selected week's figures, and an offline HTML report reopens with the same week selection.
+
 ## 窗口留存与周期复用 / Retention windows and repeat usage
 
 项目概览和成效统计均可调整留存观察天数，以及周期复用的门槛和是否要求连续。设置在当前浏览器保留；离线网页保留导出时的设置，Excel 和 AI 总结使用相同规则。
@@ -222,7 +228,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.2.3**。从 2.2.0–2.2.2 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.3.0**。从 2.2.0–2.2.3 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
