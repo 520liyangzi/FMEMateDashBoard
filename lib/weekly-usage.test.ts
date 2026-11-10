@@ -13,6 +13,7 @@ const logs = [
   row('shared', ' Browser ', '2026-11-04'), row('blank', ' ', '2026-11-06'),
   row('sat', 'Weekend', '2026-11-07'), row('sun', 'A', '2026-11-08'),
   row('prior', 'Duplicate', '2026-11-03'),
+  row('na-1', 'NA', '2026-11-02'), row('na-2', ' na ', '2026-11-04'),
 ];
 
 test('reporting weeks run Monday to Friday, including across year boundaries', () => {

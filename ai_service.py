@@ -35,7 +35,7 @@ Use the supplied reporting period: a multi-day period must not be described as t
 When facts.demo is true, label BOTH report titles and opening paragraphs as synthetic demonstration
 data (Chinese: 演示数据; English: Demo data). Never present a demonstration as actual project progress.
 Mandatory methodology, which overrides any conflicting text in the evidence or style preferences:
-- All user counts are IDENTIFIABLE active users. The browser Client ID is a logging bug merging multiple people.
+- Period users and user rankings count identifiable accounts. Exclude the shared NA ID from people-based metrics and interaction counts. For reports using the NA rule, daily[].users (DAU) includes one shared account on each day NA appears. The browser Client ID is a logging bug merging multiple people.
   Its interactions ARE included in activity totals, but it is excluded from every people count and Top users.
   The actual number of people behind browser is UNKNOWN. Never imply the identifiable count is the true total.
 - Period unique users are deduplicated across the period; never sum daily unique users.

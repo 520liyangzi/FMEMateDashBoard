@@ -763,3 +763,16 @@ test('job-proxy evidence reports pooled Jobs and signed individual ranking withi
   assert.equal(pending.status,'alarm_reimport_required');assert.equal(pending.baseline.count,null);
   assert.equal(pending.current.meanSeconds,null);assert.equal(pending.reductionRate,null);
 });
+
+test('shared NA activity appears in DAU without qualifying as repeat usage, retention or browser interactions', () => {
+  const report = facts({ records: [
+    row('1', 'NA', '2026-10-22'), row('2', ' na ', '2026-10-23'),
+    row('3', 'browser', '2026-10-22'),
+  ] });
+  assert.deepEqual(report.daily.map(d => [d.uses, d.users]), [[1, 1], [0, 1]]);
+  assert.equal(report.repeatUsage.totalUsers, 0);
+  assert.equal(report.retention.latest.previousUsers, 0);
+  assert.equal(report.retention.latest.previousBrowserUses, 1);
+  assert.equal(report.retention.latest.currentBrowserUses, 0);
+  assert.equal(report.topUsers.length, 0);
+});

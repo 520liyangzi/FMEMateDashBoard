@@ -51,8 +51,9 @@ python server.py --data-dir D:\FMEMateData
 
 ## 统计口径
 
-- **使用次数**：去重后的日志条数；不是会话数。
-- **使用人数**：当前筛选范围内不同 `Client Id` 的数量，排除异常 ID `browser`（忽略大小写和首尾空格）。单日趋势、提问人数、自主提问人数、新增/回访人数和历史周期人数均采用相同规则；Top 使用者与用户排行榜也不展示该 ID。
+- **使用次数**：按 Task Id 去重后，排除共享标识 `NA` 的调用。
+- **使用人数**：当前筛选范围内不同 `Client Id` 的数量，排除共享 ID `NA` 和 `browser`（忽略大小写和首尾空格）。提问人数、自主提问人数、新增/回访人数和历史周期人数均采用相同规则；Top 使用者与用户排行榜也排除这两个 ID。
+- **日活（DAU）**：当天可识别活跃账号数，加上当天出现过的 `NA`（按 1 个账号计）。`NA` 可能对应多人。使用次数、问题次数与失败统计排除其调用，导入和备份保留原始日志。
 - **browser 日志**：因历史问题将多个用户的 ID 统一记为 `browser`，无法还原真实人数。这些日志完整保留，继续参与使用次数、问题次数、失败次数与失败率统计；其中非 MML 且未匹配预置问题的日志仍计入自主提问次数，原始明细和 Excel 导出的 `browser 日志明细` 中也可查看；人均使用次数只使用其他可识别用户的日志计算。历史数据无需重新导入，更新程序后自动按新规则重算。
 - **高频问题**：规范化问题后合并统计，展示排序和使用次数。排名表示文本匹配，不做语义推断。
 - **系统预置问题 / 主动输入**：在设置中维护预置问题，一行一个。匹配忽略大小写、空白、Unicode 标点和符号，例如 `Which cell is faulty?` 与 `which cell is faulty` 会匹配同一预置问题。**Scene 为 MML 的记录一律不算自主提问**（场景比较忽略大小写和首尾空格）；其余场景中，不在预置列表内的归为自主提问。MML 仍计入使用次数、活跃用户、高频问题和失败统计；同一问题横跨多个场景时，高频问题分类会显示混合类型，并在 Excel 中分列导出 MML / 预置 / 自主提问次数。自主提问次数、人数、用户排行中的自主提问次数、每日自主提问及导出明细均采用该口径。修改预置列表后，历史记录会按新规则重新计算。
@@ -63,7 +64,7 @@ python server.py --data-dir D:\FMEMateData
 
 ## 用户分析 · 人均每周使用天数 / Weekly usage days per active user
 
-在「用户分析」的「统计工作周」选择周一至周五的日期范围，例如 2026-11-02 至 2026-11-06。默认显示页面结束日所在的完整工作周。切换工作周只调整该指标，场景沿用页面筛选。每个可识别账号每天有一次或多次使用都计 1 天。将所有账号的使用天数相加，再除以该周工作日有使用的账号数。例如 A 使用 3 天、B 使用 2 天，人均为 2.5 天。仅在周末出现的账号、空账号和 `browser` 均排除。页面显示全部场景有日志的工作日数，便于判断该周的日志覆盖。无符合条件的账号时均值显示为「—」。
+在「用户分析」的「统计工作周」选择周一至周五的日期范围，例如 2026-11-02 至 2026-11-06。默认显示页面结束日所在的完整工作周。切换工作周只调整该指标，场景沿用页面筛选。每个可识别账号每天有一次或多次使用都计 1 天。将所有账号的使用天数相加，再除以该周工作日有使用的账号数。例如 A 使用 3 天、B 使用 2 天，人均为 2.5 天。仅在周末出现的账号、空账号、`NA` 和 `browser` 均排除。页面显示全部场景有日志的工作日数，便于判断该周的日志覆盖。无符合条件的账号时均值显示为「—」。
 
 Under **User analytics**, select a Monday–Friday period in **Reporting week**. The default is the week containing the page end date. The metric follows the selected scene. It divides the sum of distinct weekdays used by each identifiable account by the number of weekday-active accounts. Excel includes the selected week's figures, and an offline HTML report reopens with the same week selection.
 
@@ -75,7 +76,7 @@ Under **User analytics**, select a Monday–Friday period in **Reporting week**.
 - **周期复用率**：所选期间达到门槛的账号数 ÷ 期间全部可识别活跃账号数。门槛默认 3 天，可选 2–3660 天；默认“不要求连续”，按不同活跃日期数判断。选择“要求连续”则按期间内最长连续自然日数判断，中间断一天就重新计算，不跨筛选边界。
 - **活跃天数占比**：已观察活跃日期数 ÷ 所选自然日数；它描述频率，与上面两项比例不同。
 
-两个指标均排除 browser 和空账号，Task Id 去重，MML 正常空回答也算活动。基准日与观察窗口采用同一 Scene；日志覆盖按任意 Scene 判断。基准日或后续任一天无日志时，窗口留存显示不可用，不能直接补成 0%；已有日志也不证明导入完整。周期长度或已观察日志日期数不足复用门槛、无可识别账号时，复用率也不可用。后加入账号观察时间较短，未观察到回访不代表流失。
+两个指标均排除 NA、browser 和空账号，Task Id 去重，MML 正常空回答也算活动。基准日与观察窗口采用同一 Scene；日志覆盖按任意 Scene 判断。基准日或后续任一天无日志时，窗口留存显示不可用，不能直接补成 0%；已有日志也不证明导入完整。周期长度或已观察日志日期数不足复用门槛、无可识别账号时，复用率也不可用。后加入账号观察时间较短，未观察到回访不代表流失。
 
 滚动窗口明细每行使用相同 N 天，以该行日期为观察结束日，最多计算最近 3660 个结束日期；屏幕显示最近 14 行，AI 最多引用 31 行，Excel 导出全部已计算行。基准日及窗口可早于当前筛选开始日，使用完整已导入历史。用户频率明细导出不受屏幕分页限制。
 
@@ -83,7 +84,7 @@ Under **User analytics**, select a Monday–Friday period in **Reporting week**.
 
 **Period repeat-use rate** divides qualifying accounts by all identifiable accounts active in the selected period. Set the threshold to 2–3660 days (default 3). **Any dates** (default) uses distinct active dates; **Consecutive dates** uses the longest consecutive calendar-day streak entirely inside the selected range. A gap resets the streak. The denominator stays the same in both modes.
 
-Both metrics exclude browser and blank IDs, deduplicate Task IDs, and count MML activity. The same Scene filter applies to account sets; all-Scene logs establish observed date coverage. Missing baseline or any follow-up date yields unavailable window retention. Existing logs do not prove complete imports; ongoing days are provisional. Periods shorter than the repeat threshold, insufficient observed log dates or no identifiable users also yield unavailable repeat usage. Settings persist per browser and are captured in offline HTML, Excel and AI prompts. No database migration or log reimport is required.
+Both metrics exclude NA, browser and blank IDs, deduplicate Task IDs, and count MML activity. The same Scene filter applies to account sets; all-Scene logs establish observed date coverage. Missing baseline or any follow-up date yields unavailable window retention. Existing logs do not prove complete imports; ongoing days are provisional. Periods shorter than the repeat threshold, insufficient observed log dates or no identifiable users also yield unavailable repeat usage. Settings persist per browser and are captured in offline HTML, Excel and AI prompts. No database migration or log reimport is required.
 
 ## Line group 与客户反馈
 
@@ -206,7 +207,7 @@ The package includes a prebuilt `dist/` directory. Node.js and pip packages are 
 
 Expected **application log** columns are **Task Id, Client Id, Question, Time, Answer, Scene**. Time may be an Excel date cell or a string such as `9/22/2026 16:57`; wall-clock values are preserved without timezone conversion. Task Id is globally unique: repeated imports keep the first record and count later occurrences as duplicates, including conflicting records.
 
-The invalid Client ID `browser` (case-insensitive, surrounding whitespace ignored) is excluded from all people counts and user rankings. Its records remain in interaction, question and failure totals and raw exports; only non-MML unmatched records count as custom questions. Uses per user is based only on identifiable-user interactions. Existing records are recalculated automatically without reimporting.
+The shared Client ID `NA` counts once per day in DAU and is excluded from period user counts, usage frequency, rankings and interaction statistics. The invalid Client ID `browser` (case-insensitive, surrounding whitespace ignored) is excluded from all people counts and user rankings. Its records remain in interaction, question and failure totals and raw exports; only non-MML unmatched records count as custom questions. Uses per user is based only on identifiable-user interactions. Existing records are recalculated automatically without reimporting.
 
 Preset matching ignores case, whitespace, punctuation and symbols. MML scenes are always excluded from custom-question counts and details (case and surrounding spaces are ignored), while their usage, active users, question frequency and failures remain counted. In other scenes, questions outside the configured presets are classified as custom questions by rule; this does not prove keyboard input. Failures are answers containing `Sorry`, case-insensitively. An empty answer in the MML scene is valid. Each failure row has a saved cause field that persists after refresh/restart and duplicate imports. Clear and save to remove a cause. Excel and offline HTML exports include saved causes. Full failure details can be exported for analysis. Demo data is clearly labelled and never mixed with persisted imports.
 
@@ -228,7 +229,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.3.0**。从 2.2.0–2.2.3 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.3.1**。从 2.2.0–2.2.3 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 

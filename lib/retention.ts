@@ -1,4 +1,4 @@
-import { isCountableClient, parseTime, type LogRecord } from './analytics.ts';
+import { clientKind, isCountableClient, parseTime, type LogRecord } from './analytics.ts';
 
 export type RetentionDay = {
   date: string;
@@ -74,8 +74,9 @@ export function analyzeRetention(records: LogRecord[], from: string, to: string,
     let day = activity.get(record.date);
     if (!day) { day = { users: new Set(), browserUses: 0 }; activity.set(record.date, day); }
     const clientId = record.clientId.trim();
-    if (!isCountableClient(clientId)) day.browserUses++;
-    else if (clientId) day.users.add(clientId);
+    const kind = clientKind(clientId);
+    if (kind === 'browser') day.browserUses++;
+    if (kind === 'identified') day.users.add(clientId);
   }
   // Slide a counted union rather than rescanning N dates for every daily cohort.
   const windowUsers = new Map<string, number>();

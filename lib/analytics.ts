@@ -14,6 +14,7 @@ export type ParseResult = { records: LogRecord[]; rejected: RejectedRow[]; warni
 export type UserRanking = { clientId: string; uses: number; failures: number; custom: number; lastActive: string };
 export type QuestionRanking = { question: string; key: string; uses: number; users: number; isPreset: boolean; mmlUses: number; customUses: number; presetUses: number };
 export type Analysis = {
+  /** Counted interactions in the selected range and scene (excludes NA). */
   filtered: LogRecord[];
   users: UserRanking[];
   questions: QuestionRanking[];
@@ -21,6 +22,7 @@ export type Analysis = {
   customQuestions: QuestionRanking[];
   customRecords: LogRecord[];
   failures: LogRecord[];
+  /** Daily users include one shared NA ID on each date where it occurs. */
   daily: { date: string; uses: number; users: number; failures: number; custom: number }[];
   scenes: { scene: string; uses: number }[];
   totals: { uses: number; browserUses: number; identifiedUses: number; users: number; failures: number; failureRate: number; custom: number; customUsers: number; mmlEmpty: number; newUsers: number; returningUsers: number };
@@ -78,9 +80,15 @@ export function normalizeQuestion(value: unknown): string {
   return String(value ?? "").normalize("NFKC").toLowerCase().replace(/[\p{P}\p{S}\s]+/gu, "");
 }
 
-/** The collapsed browser ID cannot identify a person; its activity is still counted. */
+/** Shared IDs have different rules for interactions and daily active users. */
+export function clientKind(clientId: string): 'na' | 'browser' | 'identified' | 'empty' {
+  const id = clientId.trim().toLowerCase();
+  if (id === 'na' || id === 'browser') return id;
+  return id ? 'identified' : 'empty';
+}
+
 export function isCountableClient(clientId: string): boolean {
-  return clientId.trim().toLowerCase() !== "browser";
+  return clientKind(clientId) === 'identified';
 }
 
 export function isFailure(record: Pick<LogRecord, "answer">): boolean {
@@ -194,7 +202,7 @@ export function analyze(records: LogRecord[], presets: string[], from?: string, 
   const end = validDate(to) ? to : dates[dates.length - 1] || start;
   const days = Math.max(0, Math.round((dateStamp(end) - dateStamp(start)) / DAY) + 1);
   const sceneMatches = (r: LogRecord) => !scene || (scene === "\u0000" ? !r.scene : r.scene === scene);
-  const filtered = records.filter((r) => r.date >= start && r.date <= end && sceneMatches(r));
+  const filtered: LogRecord[] = [];
   const presetKeys = new Set(presets.map(normalizeQuestion).filter(Boolean));
   const userMap = new Map<string, UserRanking>();
   const questions = new Map<string, { question: string; key: string; uses: number; clients: Set<string>; customClients: Set<string>; isPreset: boolean; mmlUses: number; customUses: number; presetUses: number }>();
@@ -208,19 +216,29 @@ export function analyze(records: LogRecord[], presets: string[], from?: string, 
   }
   const sceneMap = new Map<string, number>();
   const failures: LogRecord[] = [], customRecords: LogRecord[] = [];
-  let mmlEmpty = 0, browserUses = 0;
+  let mmlEmpty = 0, browserUses = 0, identifiedUses = 0;
   const customUsers = new Set<string>();
-  for (const r of filtered) {
-    const fail = isFailure(r), key = normalizeQuestion(r.question), preset = presetKeys.has(key), countable = isCountableClient(r.clientId), mml = isMmlScene(r), custom = !mml && !preset;
-    if (!countable) browserUses++;
+  for (const r of records) {
+    if (r.date < start || r.date > end || !sceneMatches(r)) continue;
+    const d = dailyMap.get(r.date) ?? { date: r.date, uses: 0, clients: new Set<string>(), failures: 0, custom: 0 };
+    dailyMap.set(r.date, d);
+    const kind = clientKind(r.clientId);
+    if (kind === 'na') {
+      d.clients.add('NA');
+      continue;
+    }
+    filtered.push(r);
+    const fail = isFailure(r), key = normalizeQuestion(r.question), preset = presetKeys.has(key), countable = kind === 'identified', mml = isMmlScene(r), custom = !mml && !preset;
+    if (kind === 'browser') browserUses++;
     if (countable) {
+      identifiedUses++;
+      d.clients.add(r.clientId);
       const u = userMap.get(r.clientId) || { clientId: r.clientId, uses: 0, failures: 0, custom: 0, lastActive: r.time };
       u.uses++; u.failures += +fail; u.custom += +custom; if (r.time > u.lastActive) u.lastActive = r.time; userMap.set(r.clientId, u);
     }
     const q = questions.get(key) || { question: r.question, key, uses: 0, clients: new Set<string>(), customClients: new Set<string>(), isPreset: preset, mmlUses: 0, customUses: 0, presetUses: 0 };
     q.uses++; q.mmlUses += +mml; q.customUses += +custom; q.presetUses += +(!mml && preset); if (countable) { q.clients.add(r.clientId); if (custom) q.customClients.add(r.clientId); } questions.set(key, q);
-    const d = dailyMap.get(r.date) || { date: r.date, uses: 0, clients: new Set<string>(), failures: 0, custom: 0 };
-    d.uses++; if (countable) d.clients.add(r.clientId); d.failures += +fail; d.custom += +custom; dailyMap.set(r.date, d);
+    d.uses++; d.failures += +fail; d.custom += +custom;
     sceneMap.set(r.scene, (sceneMap.get(r.scene) ?? 0) + 1);
     if (fail) failures.push(r);
     if (custom) { customRecords.push(r); if (countable) customUsers.add(r.clientId); }
@@ -233,7 +251,7 @@ export function analyze(records: LogRecord[], presets: string[], from?: string, 
   // A previous comparison can predate the minimum supported workbook year;
   // no imported records can exist there, so bound the query to that minimum.
   const previousStart = dayString(Math.max(Date.UTC(1900, 0, 1), dateStamp(start) - days * DAY));
-  const prior = records.filter((r) => r.date >= previousStart && r.date <= previousEnd && sceneMatches(r));
+  const prior = records.filter((r) => r.date >= previousStart && r.date <= previousEnd && sceneMatches(r) && clientKind(r.clientId) !== 'na');
   const priorUsers = new Set(prior.filter((r) => isCountableClient(r.clientId)).map((r) => r.clientId)).size;
   const priorFailures = prior.filter(isFailure).length;
   const failureRate = filtered.length ? failures.length / filtered.length * 100 : 0;
@@ -248,7 +266,7 @@ export function analyze(records: LogRecord[], presets: string[], from?: string, 
     failures: failures.sort((a, b) => b.time.localeCompare(a.time)),
     daily: [...dailyMap.values()].sort((a, b) => a.date.localeCompare(b.date)).map(({ clients, ...d }) => ({ ...d, users: clients.size })),
     scenes: [...sceneMap].map(([scene, uses]) => ({ scene, uses })).sort((a, b) => b.uses - a.uses),
-    totals: { uses: filtered.length, browserUses, identifiedUses: filtered.length - browserUses, users: userMap.size, failures: failures.length, failureRate, custom: customRecords.length, customUsers: customUsers.size, mmlEmpty, newUsers, returningUsers: userMap.size - newUsers },
+    totals: { uses: filtered.length, browserUses, identifiedUses, users: userMap.size, failures: failures.length, failureRate, custom: customRecords.length, customUsers: customUsers.size, mmlEmpty, newUsers, returningUsers: userMap.size - newUsers },
     previous: { from: previousStart, to: previousEnd, uses: prior.length, users: priorUsers, failures: priorFailures, failureRate: priorFailureRate },
     changes: { uses: percentageChange(filtered.length, prior.length), users: percentageChange(userMap.size, priorUsers), failureRate: failureRate - priorFailureRate },
     range: { from: start, to: end, days },

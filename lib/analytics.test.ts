@@ -257,3 +257,36 @@ test("mixed MML and normal scenes share frequency but custom ranking uses only e
   assert.deepEqual([result.customQuestions[0].uses, result.customQuestions[0].users, result.customQuestions[0].mmlUses, result.customQuestions[0].customUses, result.customQuestions[0].presetUses], [2, 1, 0, 2, 0]);
   assert.ok(result.questions.every(q => q.uses === q.mmlUses + q.customUses + q.presetUses));
 });
+
+test("NA counts once per matching day and only in DAU, including days with zero counted interactions", () => {
+  const records = [
+    row("p1", "NA", "2026-11-02", "Hidden", "Sorry"),
+    row("p2", "NA-Team", "2026-11-02", "Preset"),
+    row("a", "NA", "2026-11-04", "Hidden", "Sorry"),
+    row("b", "  na ", "2026-11-04", "Hidden", "", "MML"),
+    row("c", "NA-Team", "2026-11-04", "Preset"),
+    row("d", "browser", "2026-11-04", "Other"),
+    row("e", "Na", "2026-11-05", "Hidden", "", "MML"),
+  ];
+  const report = analyze(records, ["Preset"], "2026-11-04", "2026-11-05");
+  assert.deepEqual(report.daily.map(d => [d.uses, d.users, d.failures]), [[2, 2, 0], [0, 1, 0]]);
+  assert.deepEqual(report.filtered.map(r => r.taskId), ["c", "d"]);
+  assert.deepEqual(report.users.map(u => u.clientId), ["NA-Team"]);
+  assert.equal(report.totals.uses, 2);
+  assert.equal(report.totals.identifiedUses, 1);
+  assert.equal(report.totals.browserUses, 1);
+  assert.equal(report.totals.newUsers, 0);
+  assert.equal(report.totals.returningUsers, 1);
+  assert.equal(report.totals.custom, 1);
+  assert.equal(report.totals.mmlEmpty, 0);
+  assert.equal(report.questions.some(q => q.question === "Hidden"), false);
+  assert.equal(report.previous.uses, 1);
+  assert.equal(report.previous.failures, 0);
+  assert.equal(report.changes.uses, 100);
+  const mmlOnly = analyze(records, [], "2026-11-04", "2026-11-05", "MML");
+  assert.equal(mmlOnly.totals.users, 0);
+  assert.equal(mmlOnly.totals.uses, 0);
+  assert.deepEqual(mmlOnly.daily.map(d => d.users), [1, 1]);
+  const tickets = analyze(records, [], "2026-11-05", "2026-11-05", "Ticket diagnosis");
+  assert.equal(tickets.daily[0].users, 0);
+});
