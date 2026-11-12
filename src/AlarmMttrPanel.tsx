@@ -133,19 +133,19 @@ function ImportEditor({dataset,t,api,onDatasetChange}:{dataset:JobProxyMttrDatas
   async function clear(source:ImportSource){
     const alarm=source==='alarm';
     const prompt=alarm?t('清空全部已导入的 MTTR 告警？Job 人员归属和筛选设置会保留。','Clear all imported MTTR alarms? Job ownership and filter settings will be kept.'):
-      t('清空全部已导入的 Job 人员归属？告警和筛选设置会保留。','Clear all imported Job ownership? Alarms and filter settings will be kept.');
+      t('清空所有已导入 Job 文件的工单与人员归属？告警和筛选设置会保留。重新导入 Job 文件后即可重新计算 MTTR。','Clear all assignments from imported Job files? Alarms and filter settings will be kept. Import Job files again to recalculate MTTR.');
     if(!window.confirm(prompt)||!begin(source))return;
     try{
       const updated=await api('/api/mttr/alarms/'+(alarm?'imported-alarms':'imported-jobs'),{method:'DELETE'});
       onDatasetChange(updated);setReset(prior=>({...prior,[source]:prior[source]+1}));
-      setMessage(alarm?t('已清空告警，可以重新导入。','Alarms cleared. You can import them again.'):t('已清空 Job 人员归属，可以重新导入。','Job ownership cleared. You can import it again.'));
+      setMessage(alarm?t('已清空告警，可以重新导入。','Alarms cleared. You can import them again.'):t('已清空已导入的 Job 文件数据，可以重新选择文件导入。','Imported Job data cleared. You can select Job files to import again.'));
     }catch(e){setError(e instanceof Error?e.message:String(e))}
     finally{finish()}
   }
   function queue(source:ImportSource){
     const alarm=source==='alarm';
     return <><MttrImportQueue key={source+reset[source]} source={source} api={api} t={t} disabled={!!busy} canImport={!alarm||!!allowed.length} allowlist={list} begin={()=>begin(source)} finish={finish} onDatasetChange={onDatasetChange}/>
-      {!!(alarm?dataset?.storedRows:dataset?.lastJobImport)&&<button type="button" className="text-button" disabled={!!busy} onClick={()=>clear(source)}>{alarm?t('清空已导入告警','Clear imported alarms'):t('清空已导入 Job 归属','Clear imported Job ownership')}</button>}</>;
+      {alarm&&!!dataset?.storedRows&&<button type="button" className="text-button" disabled={!!busy} onClick={()=>clear('alarm')}>{t('清空已导入告警','Clear imported alarms')}</button>}</>;
   }
   return <><details className="alarm-editor" open={open} onToggle={e=>setOpen(e.currentTarget.open)}><summary><FileSpreadsheet size={15}/>{t('导入告警与 Job 人员表','Import alarm and Job files')}</summary>
     <p className="alarm-note">{t('告警文件与 Job 人员文件可独立更新。每个文件默认读取第一张工作表，第 1 行为表头。','Alarm and Job ownership files can be updated independently. For each file, the first sheet is read with row 1 as its header.')}</p>
@@ -155,7 +155,8 @@ function ImportEditor({dataset,t,api,onDatasetChange}:{dataset:JobProxyMttrDatas
       <p className="alarm-note">{t('A 列 Alarm SN 用于去重，B 为告警 ID，I 为时长，K 为发生时间，AE 为 Job ID。可多选文件。同一 SN 只计一次，以导入顺序中最后一条有效记录为准。','Select one or more files. Column A is the Alarm SN, B the alarm ID, I the duration, K the occurrence time and AE the Job ID. Each SN counts once. The last valid row in import order wins.')}</p>
       {!!dataset?.legacyFingerprintRows&&<p className="alarm-warning">{t(`有 ${count(dataset.legacyFingerprintRows)} 条历史记录未保存 Alarm SN。若原文件带有 SN，可重传原文件补齐。也可清空告警后重导完整的带 SN 数据。`,`${count(dataset.legacyFingerprintRows)} historical rows have no stored Alarm SN. Reimport the original files if they have SNs, or clear alarms and import a complete set with SNs.`)}</p>}
       {queue('alarm')}
-    </section><section><h3>{t('Job 人员归属','Job ownership')}</h3>
+    </section><section><div className="job-import-heading"><h3>{t('Job 人员归属','Job ownership')}</h3>
+      <button type="button" className="btn" disabled={!!busy||!(dataset?.mappedJobs||dataset?.lastJobImport)} onClick={()=>clear('job')}>{t('清空已导入的 Job 文件','Clear imported Job files')}</button></div>
       <p className="alarm-note">{t('C 列 jb_id 用于去重，AL 为统计人员姓名。可多选文件。同一工单只保留一个归属，以最后成功导入的非空 AL 为准。同一文件中归属冲突时会提示核对。','Select one or more files. Column C (jb_id) identifies each Job, and AL gives its owner. Each Job has one owner. The last successfully imported nonblank AL wins. Conflicting owners in one file require review.')}</p>
       {queue('job')}
       {dataset?.lastJobImport&&<p className="alarm-note">{t('最近导入','Last import')}: {dataset.lastJobImport.filename}{!('personColumn' in dataset.lastJobImport)&&t('（历史导入，未记录 AL）',' (historical import, no AL captured)')}</p>}

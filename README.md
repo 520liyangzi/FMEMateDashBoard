@@ -229,7 +229,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.4.0**。升级到 2.4.0 后已有统计可继续查看。要按 Alarm SN 对历史告警去重，重传带 SN 的原告警文件，或单独清空告警后重导完整数据。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.4.1**。升级到 2.4.0 后已有统计可继续查看。要按 Alarm SN 对历史告警去重，重传带 SN 的原告警文件，或单独清空告警后重导完整数据。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -303,7 +303,7 @@ Date filters apply to visit counts, visit days and photo totals independently of
 
 离线 HTML 会记住导出时正在查看的人，同时保留可切换的工单明细。接收者无需联网即可改看另一位 AL 人员或返回报表范围。文件包含已保存 AL 规则允许的所有有效工单（包括初始日期和临时人员筛选之外的 Job ID 与 AL 姓名），以及导出时的名单设置；离线不能扩大该规则或修改它。未记录个人明细选择的快照默认跟随报表范围；旧文件若根本没有逐单数据，需要从当前服务重新导出。
 
-**重复导入告警。** 可多选告警文件，按页面顺序逐份保存。A 列 Alarm SN 在同一文件、不同文件和重复导入之间都只计一次。相同 SN 的最后一条有效记录可更新时长、日期和关联工单；不同 SN 即使 B 列告警 ID 相同也分别计数。带 SN 表头的记录如缺少有效 SN 会跳过。旧格式（A 为站点或未提供 SN 列）沿用原有行指纹规则。升级前已导入的记录没有保存 SN，重传含 SN 的原文件可按原行匹配。若只有更正后的导出，可点“清空已导入告警”后重导完整告警数据。也可单独清空 Job 归属。两项操作均保留筛选设置。
+**重复导入告警。** 可多选告警文件，按页面顺序逐份保存。A 列 Alarm SN 在同一文件、不同文件和重复导入之间都只计一次。相同 SN 的最后一条有效记录可更新时长、日期和关联工单；不同 SN 即使 B 列告警 ID 相同也分别计数。带 SN 表头的记录如缺少有效 SN 会跳过。旧格式（A 为站点或未提供 SN 列）沿用原有行指纹规则。升级前已导入的记录没有保存 SN，重传含 SN 的原文件可按原行匹配。若只有更正后的导出，可点“清空已导入告警”后重导完整告警数据。在“Job 人员归属”右侧点“清空已导入的 Job 文件”，确认后即可重导 Job 文件，无需重传告警。“清空本次选择”只清空当前文件列表，已导入的数据继续保留。两项操作均保留筛选设置。
 
 **批量导入 Job 人员表。** 在 Job 人员文件选择框中可一次选多份 `.xlsx` 或 UTF-8 `.csv`。页面列出的顺序就是导入顺序，每份文件单独保存。不同文件里的工单会累积；同一 Job ID 在多份文件出现时，以最后一份成功导入的非空 AL 姓名为准，工单仍只计一次。例：第一份为 J1→A、J2→B，第二份为 J1→C，结果是 J1→C、J2→B。如果一份更正表必须最后生效，可先完成其他文件，再单独上传更正表。同一文件内，同一 ID 的同名 AL 重复行只计一条；出现不同的非空 AL 姓名时整份文件不保存。AG 的差异不构成冲突。空 AL 行会跳过，不会清除此前从 AL 导入的归属；整份文件均无有效 C、AL 配对时，导入失败。
 
@@ -337,7 +337,7 @@ Offline HTML remembers the captured detail focus but retains the data for switch
 
 Keep the existing data directory on upgrade. Version 2.1.x stored AG assignments, not AL. After upgrading or restoring an older backup, reimport the original Job workbook(s) once. Already linked alarm records are retained. A new backup restores AL assignments and the saved personnel rule; older offline HTML files keep the calculations and data they originally contained. When upgrading from 2.0, old alarm fingerprints cannot reconstruct Job IDs: reimport the original alarm files to recover historical Job links, and import the Job workbook for ownership. Old TT/Job duration data and archived HTML reports keep their previous meanings. Application logs do not need to be reimported.
 
-**Repeat alarm imports.** Select multiple alarm files in the order shown. Each Alarm SN in column A counts once within and across files. The last valid row for a serial updates its duration, date and linked Job. Different serials with the same alarm code count separately. Rows with missing serials in an Alarm SN export are skipped. Older exports with a site in A or no serial column retain row-fingerprint matching. Reimport original SN exports to match previously stored rows, or clear imported alarms and reload the complete corrected dataset. Job ownership can also be cleared separately. Both actions preserve filter settings.
+**Repeat alarm imports.** Select multiple alarm files in the order shown. Each Alarm SN in column A counts once within and across files. The last valid row for a serial updates its duration, date and linked Job. Different serials with the same alarm code count separately. Rows with missing serials in an Alarm SN export are skipped. Older exports with a site in A or no serial column retain row-fingerprint matching. Reimport original SN exports to match previously stored rows, or clear imported alarms and reload the complete corrected dataset. Under **Job ownership**, choose **Clear imported Job files** and confirm to remove all imported assignments. You can then reimport Job files using the saved alarms. **Clear selection** resets only the file list and keeps imported data. Both actions preserve filter settings.
 
 **Import multiple Job files.** Select several `.xlsx` or UTF-8 `.csv` files in the Job file picker. Each file is saved independently, in the displayed order. Distinct Job IDs accumulate; for the same ID, the last successfully imported nonblank AL assignment wins. If file 1 assigns J1 to A and J2 to B, and file 2 assigns J1 to C, the result is J1 → C and J2 → B, with each Job counted once. To make a correction file take precedence, upload it separately after the others. Within one file, repeated identical AL assignments count once, conflicting nonblank AL names reject that file, and differences in AG are ignored. A blank AL cell is skipped and does not erase an existing AL assignment. Files without any valid C/AL pair are rejected.
 

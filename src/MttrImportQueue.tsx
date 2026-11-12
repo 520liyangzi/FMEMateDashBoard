@@ -20,11 +20,11 @@ export default function MttrImportQueue({source,api,allowlist,disabled,canImport
   const pick=alarm?t('选择告警文件','Choose alarm files'):t('选择 Job 人员文件','Choose Job ownership files');
   useEffect(()=>()=>{abort.current?.abort();void batch?.discard().catch(()=>{})},[batch]);
 
-  async function select(files:File[]){
-    if(!files.length||!begin())return;
+  async function replaceSelection(files:File[]){
+    if(!begin())return;
     try{
       await batch?.discard();
-      setBatch(createMttrFileBatch(api,files,source));
+      setBatch(files.length?createMttrFileBatch(api,files,source):null);
       setRows(files.map(()=>({status:'pending'})));setError('');setRun('ready');
     }catch(e){setError(e instanceof Error?e.message:String(e))}
     finally{finish()}
@@ -67,8 +67,8 @@ export default function MttrImportQueue({source,api,allowlist,disabled,canImport
     }
   }
   return <>
-    <input type="file" hidden multiple accept=".xlsx,.csv" aria-label={alarm?t('告警文件（可多选）','Alarm files (multiple)'):t('Job 人员文件（可多选）','Job ownership files (multiple)')} ref={input} disabled={disabled} onChange={e=>{const files=Array.from(e.currentTarget.files??[]);e.currentTarget.value='';void select(files)}}/>
-    <div className="job-batch-pick"><button type="button" className="btn" disabled={disabled} onClick={()=>input.current?.click()}><FileSpreadsheet size={15}/>{batch?t('重新选择文件','Replace file selection'):pick}</button>{total>0&&<small>{t(`已选择 ${total} 个文件`,`${total} selected`)}</small>}</div>
+    <input type="file" hidden multiple accept=".xlsx,.csv" aria-label={alarm?t('告警文件（可多选）','Alarm files (multiple)'):t('Job 人员文件（可多选）','Job ownership files (multiple)')} ref={input} disabled={disabled} onChange={e=>{const files=Array.from(e.currentTarget.files??[]);e.currentTarget.value='';if(files.length)void replaceSelection(files)}}/>
+    <div className="job-batch-pick"><button type="button" className="btn" disabled={disabled} onClick={()=>input.current?.click()}><FileSpreadsheet size={15}/>{batch?t('重新选择文件','Replace file selection'):pick}</button>{!alarm&&batch&&<button type="button" className="btn" disabled={disabled} onClick={()=>replaceSelection([])}>{t('清空本次选择','Clear selection')}</button>}{total>0&&<small>{t(`已选择 ${total} 个文件`,`${total} selected`)}</small>}</div>
     {batch&&<><ol className="job-batch-queue" aria-label={alarm?t('告警文件导入顺序','Alarm file import order'):t('Job 文件导入顺序','Job file import order')}>{batch.files.map((file,i)=>{
       const row=rows[i];
       return <li key={i} data-status={row.status}><div><strong>{file.name}</strong><small>{label(row)}</small></div>{row.error&&<p className="job-batch-error" role="alert">{row.error}</p>}{row.progress?.phase==='upload'&&<progress aria-label={t(`${file.name} 上传进度`,`${file.name} upload progress`)} max={row.progress.total} value={row.progress.loaded}/>}</li>;
