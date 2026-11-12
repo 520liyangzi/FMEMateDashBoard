@@ -229,7 +229,7 @@ Excel 单元格有文本长度上限。超过上限的完整 Answer 等文本会
 
 ## 更新到当前版本
 
-保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.3.1**。从 2.2.0–2.2.3 升级无需重新导入告警或 Job 人员表。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
+保留原目录的 `data/`，覆盖程序文件和完整 `dist/` 后重启服务即可，无需重新导入日志。旧的离线 HTML 是固定快照，更新统计口径后需要重新导出。当前版本：**2.4.0**。升级到 2.4.0 后已有统计可继续查看。要按 Alarm SN 对历史告警去重，重传带 SN 的原告警文件，或单独清空告警后重导完整数据。旧版 Job 人员表只保存了 AG，无法还原 AL。从 2.1.x 升级后，需要重新导入原始 Job 人员工作簿一次；已导入并关联 Job ID 的告警无须重传。从 2.0 升级的旧告警还需重传原文件，才能恢复 Job ID。1.x 的 TT/Job 旧指标不能合并进新指标。已有的 App 使用日志、留存数据和日报无需重新上传。
 
 遇到接口 500 时，启动窗口会显示异常类型、出错文件与行号；`NameError` 还会显示未定义的 Python 变量名。诊断不打印请求内容、源码行、局部变量或原始异常消息。排查时保留这些定位行即可，历史日期的 Line group 人数支持补录和同日更新。
 
@@ -269,15 +269,16 @@ Date filters apply to visit counts, visit days and photo totals independently of
 
 ## 工单 MTTR（按最长告警估算）/ Job MTTR from alarm duration (v2.2.3)
 
-进入 **成效统计**。在告警白名单中填入 `26540,26564,26568` 这样的逗号分隔列表，导入告警文件和一份或多份 Job 人员文件；这两类数据的先后顺序不限。计算整体、多人或个人 MTTR 都需要告警和人员归属。Job 表用 C 列关联工单、用 AL 列确定人员，不使用它的创建、关闭时间，也不需要 TT 表。每个 Excel 工作簿仅读取第一个工作表，第 1 行为表头，从第 2 行开始读取。
+进入 **成效统计**。在告警白名单中填入 `26540,26564,26568` 这样的逗号分隔列表，分别选择一份或多份告警文件、Job 人员文件；这两类数据的先后顺序不限。计算整体、多人或个人 MTTR 都需要告警和人员归属。Job 表用 C 列关联工单、用 AL 列确定人员，不使用它的创建、关闭时间，也不需要 TT 表。每个 Excel 工作簿仅读取第一个工作表，第 1 行为表头，从第 2 行开始读取。
 
 | 来源 / Source | 列 | 用途 / Use |
 | --- | --- | --- |
+| 告警 / Alarms | A | Alarm SN，跨文件去重的告警流水号。 / Unique alarm occurrence serial number across imports. |
 | 告警 / Alarms | B | 告警 ID；完整匹配可配置的白名单。 / Alarm ID; exact match to an allowlisted ID. |
 | 告警 / Alarms | I | Duration，`时:分:秒` 或 Excel 原生时长。`0:05:10` = 310 秒；0 表示未清除，排除。 / Text `h:mm:ss` or a native Excel duration. Zero means uncleared. |
 | 告警 / Alarms | K | 告警发生日期时间，按源表自然日分期。 / Occurrence date and time in the source calendar. |
 | 告警 / Alarms | AE | Job ID；非空才能纳入，用于将同一工单的告警归组。 / Nonblank Job ID used to group alarms. |
-| Job | C | Job ID，与告警 AE 关联。 / Job ID matching column AE in the alarm file. |
+| Job | C | jb_id，按此去重并与告警 AE 关联。 / Unique jb_id matching alarm column AE. |
 | Job | AL | 此工单的统计人员；整体筛选、个人分组及提升率排名均以此列为准。 / Person used for global filtering, grouping and individual ranking. |
 
 **先归并工单，再选日期。** 对每个 Job，只保留白名单命中、Job ID 非空、K 日期有效且 Duration 大于 0 的告警。将这些告警中**最长的一条 Duration** 作为该 Job 的估算 MTTR，并以这条告警的 K 日期作为工单的统计日期。最长时长并列时取最早的发生日期。比如某 Job 在周日有一条 8 分钟的告警、周一有一条 11 分钟的告警，该 Job 只归到周一，时长为 11 分钟。先对全部已导入数据归并，避免在两个不重叠区间重复计入同一工单。更改白名单或补传更长告警后，该 Job 的时长和统计日期都可能变化。
@@ -302,6 +303,8 @@ Date filters apply to visit counts, visit days and photo totals independently of
 
 离线 HTML 会记住导出时正在查看的人，同时保留可切换的工单明细。接收者无需联网即可改看另一位 AL 人员或返回报表范围。文件包含已保存 AL 规则允许的所有有效工单（包括初始日期和临时人员筛选之外的 Job ID 与 AL 姓名），以及导出时的名单设置；离线不能扩大该规则或修改它。未记录个人明细选择的快照默认跟随报表范围；旧文件若根本没有逐单数据，需要从当前服务重新导出。
 
+**重复导入告警。** 可多选告警文件，按页面顺序逐份保存。A 列 Alarm SN 在同一文件、不同文件和重复导入之间都只计一次。相同 SN 的最后一条有效记录可更新时长、日期和关联工单；不同 SN 即使 B 列告警 ID 相同也分别计数。带 SN 表头的记录如缺少有效 SN 会跳过。旧格式（A 为站点或未提供 SN 列）沿用原有行指纹规则。升级前已导入的记录没有保存 SN，重传含 SN 的原文件可按原行匹配。若只有更正后的导出，可点“清空已导入告警”后重导完整告警数据。也可单独清空 Job 归属。两项操作均保留筛选设置。
+
 **批量导入 Job 人员表。** 在 Job 人员文件选择框中可一次选多份 `.xlsx` 或 UTF-8 `.csv`。页面列出的顺序就是导入顺序，每份文件单独保存。不同文件里的工单会累积；同一 Job ID 在多份文件出现时，以最后一份成功导入的非空 AL 姓名为准，工单仍只计一次。例：第一份为 J1→A、J2→B，第二份为 J1→C，结果是 J1→C、J2→B。如果一份更正表必须最后生效，可先完成其他文件，再单独上传更正表。同一文件内，同一 ID 的同名 AL 重复行只计一条；出现不同的非空 AL 姓名时整份文件不保存。AG 的差异不构成冲突。空 AL 行会跳过，不会清除此前从 AL 导入的归属；整份文件均无有效 C、AL 配对时，导入失败。
 
 中途失败或取消时，已完成的文件保留，后面的文件暂不导入。如果取消时服务已经开始解析当前文件，该文件仍可能完成，请以页面显示的结果为准。若只是临时中断，可用“继续导入未完成文件”处理待传文件。文件内容需要更正时，请重新选择**修正后的文件和排在它后面的未完成文件**。重新打开网页或重启服务后，也只需重新选择待传文件；已保存的归属继续有效。导入新文件不会清空以前的 Job，也不需要重传告警。
@@ -310,7 +313,7 @@ Date filters apply to visit counts, visit days and photo totals independently of
 
 **升级：** 从 2.0 升级时保留 `data/`。此前的汇总只保留了告警行指纹和时长，不能反推出 Job ID。按页面提示重新上传原告警文件以补齐历史关联，再上传 Job 人员表。来自 1.x 的 TT/Job 时长也不会计入新版结果。应用日志、群记录和留存不受影响；旧离线文件仍代表导出当时的口径。从 2.1.x 升级或恢复旧备份时，已关联的告警可继续使用，但旧 AG 名单不会作为 AL 人员。重新导入原 Job 文件（多份可批量导入）即可补齐 AL。新备份可恢复已导入的 AL 归属及名单设置；旧离线 HTML 的内容与口径不会随服务更新。
 
-**English.** Under **Effectiveness**, enter the comma-separated alarm ID allowlist and import the alarm export and one or more Job-to-assignee files. Either source can be imported first. Both are required for overall, group and individual MTTR. In every workbook only the first worksheet is read, with headers in row 1 and data from row 2. Job timestamps are not used.
+**English.** Under **Effectiveness**, enter the comma-separated alarm ID allowlist and import one or more alarm exports and one or more Job-to-assignee files. Either source can be imported first. Both are required for overall, group and individual MTTR. In every workbook only the first worksheet is read, with headers in row 1 and data from row 2. Job timestamps are not used.
 
 The dashboard first groups eligible alarms across all imported dates by their nonblank Job ID. It excludes IDs outside the allowlist, invalid occurrence dates and nonpositive durations. For each Job, it takes the **maximum eligible alarm duration** as a proxy for its resolution time. The K date of that alarm determines which period contains the Job; tied maxima use the earliest occurrence date. Each Job therefore counts once across nonoverlapping periods. Changing the allowlist or importing a longer alarm for the same Job can change both its contribution and its period.
 
@@ -333,6 +336,8 @@ The focus picker can only narrow the saved AL rule, the report’s current perso
 Offline HTML remembers the captured detail focus but retains the data for switching to another AL person or following the report group without a server. The file includes Job IDs and AL names across the saved policy’s eligible history, even outside the initial dates and temporary person selection, plus the saved rule and its configured names. The saved project rule cannot be expanded or edited offline. Snapshots without a recorded detail focus default to the report group; if an older file has no individual Job rows, export a new copy from the current service.
 
 Keep the existing data directory on upgrade. Version 2.1.x stored AG assignments, not AL. After upgrading or restoring an older backup, reimport the original Job workbook(s) once. Already linked alarm records are retained. A new backup restores AL assignments and the saved personnel rule; older offline HTML files keep the calculations and data they originally contained. When upgrading from 2.0, old alarm fingerprints cannot reconstruct Job IDs: reimport the original alarm files to recover historical Job links, and import the Job workbook for ownership. Old TT/Job duration data and archived HTML reports keep their previous meanings. Application logs do not need to be reimported.
+
+**Repeat alarm imports.** Select multiple alarm files in the order shown. Each Alarm SN in column A counts once within and across files. The last valid row for a serial updates its duration, date and linked Job. Different serials with the same alarm code count separately. Rows with missing serials in an Alarm SN export are skipped. Older exports with a site in A or no serial column retain row-fingerprint matching. Reimport original SN exports to match previously stored rows, or clear imported alarms and reload the complete corrected dataset. Job ownership can also be cleared separately. Both actions preserve filter settings.
 
 **Import multiple Job files.** Select several `.xlsx` or UTF-8 `.csv` files in the Job file picker. Each file is saved independently, in the displayed order. Distinct Job IDs accumulate; for the same ID, the last successfully imported nonblank AL assignment wins. If file 1 assigns J1 to A and J2 to B, and file 2 assigns J1 to C, the result is J1 → C and J2 → B, with each Job counted once. To make a correction file take precedence, upload it separately after the others. Within one file, repeated identical AL assignments count once, conflicting nonblank AL names reject that file, and differences in AG are ignored. A blank AL cell is skipped and does not erase an existing AL assignment. Files without any valid C/AL pair are rejected.
 

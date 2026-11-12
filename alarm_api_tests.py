@@ -126,6 +126,29 @@ class AlarmHttpTests(unittest.TestCase):
         self.assertFalse(self.call('/api/state')['hasLegacyMttr'])
         self.assertIsNone(self.call('/api/mttr'))
 
+    def test_repeat_both_sources_and_clear_each_independently(self):
+        alarms=workbook([{'A':'Alarm SN','B':'Alarm ID','I':'Duration','K':'Occurred','AE':'Job ID'},
+                         {'A':'SN1','B':'10','I':'00:20:00','K':'2026-11-05','AE':'J1'}])
+        jobs=workbook([{'C':'jb_id','AL':'Engineer'},{'C':'J1','AL':'Alice'},{'C':'J1','AL':'Alice'}])
+        def add_alarm():
+            return self.call(self.stage(alarms,'a.xlsx')+'/import','POST',{'allowlist':'10'})
+        def add_jobs():
+            return self.call(self.stage(jobs,'j.xlsx',True)+'/import','POST',{})
+        add_alarm();add_jobs();add_alarm()
+        self.call(BASE+'/al-policy','POST',{'mode':'include','names':['Alice']})
+        repeated=add_jobs()
+        self.assertEqual((repeated['storedRows'],repeated['mappedJobs'],repeated['totalJobs'],repeated['totalAlarms']),(1,1,1,1))
+        self.assertEqual(repeated['lastJobImport']['existingJobs'],1)
+        self.assertEqual(repeated['lastImport']['addedRows'],0)
+        no_jobs=self.call(BASE+'/imported-jobs','DELETE')
+        self.assertEqual((no_jobs['storedRows'],no_jobs['mappedJobs'],no_jobs['totalJobs'],no_jobs['lastJobImport']),(1,0,0,None))
+        self.assertEqual(add_jobs()['days'],repeated['days'])
+        no_alarms=self.call(BASE+'/imported-alarms','DELETE')
+        self.assertEqual((no_alarms['storedRows'],no_alarms['mappedJobs'],no_alarms['lastImport']),(0,1,None))
+        rebuilt=add_alarm()
+        for field in ('days','personDays','allowlist','alPolicy','totalAlarms','totalJobs'):
+            self.assertEqual(rebuilt[field],repeated[field])
+
     def test_excel_reupload_and_invalid_file_do_not_change_ledger(self):
         self.call(self.stage(workbook([{'C':'Job ID','AL':'AL person'},{'C':'JOB-A','AL':'Alice'}]),
                              'jobs.xlsx',True)+'/import','POST',{})

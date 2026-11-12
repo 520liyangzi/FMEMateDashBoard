@@ -1,20 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createJobOwnerBatch, type JobOwnerBatchEvent} from './job-owner-batch.ts';
+import {createMttrFileBatch, type MttrFileBatchEvent} from './mttr-file-batch.ts';
 
-const base='/api/mttr/alarms/job-uploads';
 const excel=(name:string,contents:string)=>new File([contents],name);
 const fresh=()=>new AbortController();
 function deferred(){let resolve!:()=>void;const promise=new Promise<void>(ok=>{resolve=ok});return {resolve,promise};}
 type Step={type:'chunk'|'import'; name:string; signal?:AbortSignal|null; offset:number};
 
 // Exercise the real single-file uploader against a small chunk endpoint.
-function fakeApi(hook?:(s:Step)=>void|Promise<void>){
+function fakeApi(hook?:(s:Step)=>void|Promise<void>,source:'alarm'|'job'='job'){
+  const base=source==='alarm'?'/api/mttr/alarms/uploads':'/api/mttr/alarms/job-uploads';
   const names:string[]=[],commits:string[]=[],discards:string[]=[];
   const sessions=new Map<string,{name:string;size:number;bytes:string}>();
   async function api(url:string,options?:RequestInit){
     if(url===base){
-      const {job}=JSON.parse(String(options?.body));
+      const job=JSON.parse(String(options?.body))[source];
       const id=String(names.length);
       names.push(job.name);sessions.set(id,{...job,bytes:''});return {uploadId:id,chunkSize:2};
     }
@@ -25,7 +25,9 @@ function fakeApi(hook?:(s:Step)=>void|Promise<void>){
       assert.equal(session.bytes.length,session.size);
       await hook?.({type:'import',name:session.name,signal:options?.signal,offset:session.size});
       commits.push(session.bytes);sessions.delete(id);
-      return {formatVersion:5,source:'alarm-jobs',alPolicy:{mode:'all',names:[]},allowlist:[],days:[],personDays:[],totalJobs:0,totalAlarms:0,storedRows:0,
+      const receipt=source==='alarm'?{lastImport:{filename:session.name,validRows:2,duplicateRows:1,addedRows:1,sourceRows:2,missingJobIds:0}}:{};
+      if(source==='alarm')assert.deepEqual(JSON.parse(String(options?.body)),{allowlist:'X,Y'});
+      return {...receipt,formatVersion:5,source:'alarm-jobs',alPolicy:{mode:'all',names:[]},allowlist:[],days:[],personDays:[],totalJobs:0,totalAlarms:0,storedRows:0,
         unassignedJobs:0,legacyUnlinkedRows:0,mappedJobs:commits.length,lastJobImport:{filename:session.name,
           mappedJobs:1,sourceRows:1,validRows:1,missingJobIds:0,missingAssignees:0,duplicateRows:0}};
     }
@@ -41,8 +43,8 @@ function fakeApi(hook?:(s:Step)=>void|Promise<void>){
 test('preserves the original selection and commits duplicate filenames as separate ordered files',async()=>{
   const http=fakeApi();
   const files=[excel('later.xlsx','one'),excel('earlier.csv','two'),excel('earlier.csv','three')];
-  const batch=createJobOwnerBatch(http.api,files);files.reverse();
-  const events:JobOwnerBatchEvent[]=[];
+  const batch=createMttrFileBatch(http.api,files);files.reverse();
+  const events:MttrFileBatchEvent[]=[];
   await batch.run(fresh().signal,e=>events.push(e));
   assert.deepEqual(http.names,['later.xlsx','earlier.csv','earlier.csv']);
   assert.deepEqual(http.commits,['one','two','three']);assert.equal(batch.completed,3);
@@ -55,8 +57,8 @@ test('preserves the original selection and commits duplicate filenames as separa
 test('a failed parse retains the committed prefix; retry reuses its staged file, then processes only later files',async()=>{
   let fail=true;
   const http=fakeApi(s=>{if(fail&&s.type==='import'&&s.name==='b.csv')throw Error('bad workbook');});
-  const batch=createJobOwnerBatch(http.api,['a','b','c'].map(n=>excel(n+'.csv',n)));
-  const events:JobOwnerBatchEvent[]=[];
+  const batch=createMttrFileBatch(http.api,['a','b','c'].map(n=>excel(n+'.csv',n)));
+  const events:MttrFileBatchEvent[]=[];
   await assert.rejects(batch.run(fresh().signal,e=>events.push(e)),/bad workbook/);
   assert.deepEqual(http.names,['a.csv','b.csv']);assert.deepEqual(http.commits,['a']);assert.equal(batch.completed,1);
   assert.equal(events.at(-1)?.type,'failed');assert.equal(events.at(-1)?.index,1);
@@ -68,9 +70,9 @@ test('a failed parse retains the committed prefix; retry reuses its staged file,
 
 test('an HTTP success without a receipt for the expected file does not advance the batch or publish a dataset',async()=>{
   for(const invalid of [null,{}, {formatVersion:5,source:'alarm-jobs',mappedJobs:1,lastJobImport:{filename:'other.csv'}}]){
-    const http=fakeApi(),events:JobOwnerBatchEvent[]=[];
+    const http=fakeApi(),events:MttrFileBatchEvent[]=[];
     const api=async (url:string,options?:RequestInit)=>url.endsWith('/import')?invalid:http.api(url,options);
-    const batch=createJobOwnerBatch(api,['a','b'].map(n=>excel(n+'.csv',n)));
+    const batch=createMttrFileBatch(api,['a','b'].map(n=>excel(n+'.csv',n)));
     await assert.rejects(batch.run(fresh().signal,e=>events.push(e)),/did not confirm/);
     assert.equal(batch.completed,0);assert.equal(events.some(e=>e.type==='saved'),false);
     assert.equal(events.at(-1)?.type,'failed');assert.deepEqual(http.names,['a.csv']);
@@ -78,13 +80,13 @@ test('an HTTP success without a receipt for the expected file does not advance t
 });
 
 test('a live ownership upload requires an AL receipt; a complete historical AG-only dataset cannot acknowledge it',async()=>{
-  const http=fakeApi(),events:JobOwnerBatchEvent[]=[];
+  const http=fakeApi(),events:MttrFileBatchEvent[]=[];
   const api=async(url:string,options?:RequestInit)=>{
     const result=await http.api(url,options);
-    if(url.endsWith('/import')){delete result.alPolicy;}
+    if(url.endsWith('/import'))return {...result,alPolicy:undefined};
     return result;
   };
-  const batch=createJobOwnerBatch(api,[excel('owners.csv','x')]);
+  const batch=createMttrFileBatch(api,[excel('owners.csv','x')]);
   await assert.rejects(batch.run(fresh().signal,e=>events.push(e)),/did not confirm/);
   assert.equal(batch.completed,0);assert.ok(!events.some(e=>e.type==='saved'));
 });
@@ -97,8 +99,8 @@ test('abort an in-flight file, reject concurrent attempts, and start only its re
       await new Promise<never>((_,reject)=>s.signal!.addEventListener('abort',()=>reject(new DOMException('cancel','AbortError')),{once:true}));
     }
   });
-  const batch=createJobOwnerBatch(http.api,['a','b','c'].map(n=>excel(n+'.csv',n)));
-  const ctl=fresh(),events:JobOwnerBatchEvent[]=[];
+  const batch=createMttrFileBatch(http.api,['a','b','c'].map(n=>excel(n+'.csv',n)));
+  const ctl=fresh(),events:MttrFileBatchEvent[]=[];
   const run=batch.run(ctl.signal,e=>events.push(e));await started.promise;
   await assert.rejects(batch.run(fresh().signal,()=>{}),/already running/);
   await assert.rejects(batch.discard(),/already running/);
@@ -111,8 +113,8 @@ test('abort an in-flight file, reject concurrent attempts, and start only its re
 });
 
 test('cancellation between committed files stops before starting the next upload',async()=>{
-  const http=fakeApi(),ctl=fresh(),events:JobOwnerBatchEvent[]=[];
-  const batch=createJobOwnerBatch(http.api,['a','b'].map(n=>excel(n+'.csv',n)));
+  const http=fakeApi(),ctl=fresh(),events:MttrFileBatchEvent[]=[];
+  const batch=createMttrFileBatch(http.api,['a','b'].map(n=>excel(n+'.csv',n)));
   await assert.rejects(batch.run(ctl.signal,e=>{
     events.push(e);if(e.type==='saved')ctl.abort();
   }),{name:'AbortError'});
@@ -124,10 +126,31 @@ test('cancellation between committed files stops before starting the next upload
 test('cancellation during a noninterruptible parse records the actual receipt before stopping',async()=>{
   const started=deferred(),finish=deferred();
   const http=fakeApi(async s=>{if(s.type==='import'&&s.name==='a.csv'){started.resolve();await finish.promise;}});
-  const ctl=fresh(),events:JobOwnerBatchEvent[]=[];
-  const batch=createJobOwnerBatch(http.api,['a','b'].map(n=>excel(n+'.csv',n)));
+  const ctl=fresh(),events:MttrFileBatchEvent[]=[];
+  const batch=createMttrFileBatch(http.api,['a','b'].map(n=>excel(n+'.csv',n)));
   const run=batch.run(ctl.signal,e=>events.push(e));await started.promise;ctl.abort();finish.resolve();
   await assert.rejects(run,{name:'AbortError'});
   assert.deepEqual(events.filter(e=>e.type==='saved'||e.type==='cancelled').map(e=>[e.type,e.index]),[['saved',0],['cancelled',1]]);
   assert.equal(batch.completed,1);assert.deepEqual(http.names,['a.csv']);assert.deepEqual(http.commits,['a']);
+});
+
+test('alarm batch sends the allowlist to every file, resumes in order and checks the alarm receipt',async()=>{
+  let fail=true;
+  const staged=fakeApi(e=>{if(e.type==='import'&&e.name==='second.csv'&&fail)throw Error('parse failed')},'alarm');
+  const files=[excel('first.xlsx','ab'),excel('second.csv','cd')];
+  const batch=createMttrFileBatch(staged.api,files,'alarm');
+  await assert.rejects(batch.run(fresh().signal,()=>{},'X,Y'),/parse failed/);
+  assert.equal(batch.completed,1);
+  fail=false;
+  await batch.run(fresh().signal,()=>{},'X,Y');
+  assert.deepEqual(staged.commits,['ab','cd']);
+  assert.deepEqual(staged.names,['first.xlsx','second.csv']);
+  const wrong=async(url:string,options?:RequestInit)=>{
+    const data=await staged.api(url,options);
+    if(url.endsWith('/import'))return {...data,lastImport:null};
+    return data;
+  };
+  const unconfirmed=createMttrFileBatch(wrong,[files[0]],'alarm');
+  await assert.rejects(unconfirmed.run(fresh().signal,()=>{},'X,Y'),/did not confirm/);
+  assert.equal(unconfirmed.completed,0);
 });

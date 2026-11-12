@@ -56,6 +56,48 @@ class AlarmMttrTest(unittest.TestCase):
         repeated=self.add([row(),row(site='Tower B')])
         self.assertEqual((repeated['totalAlarms'],repeated['lastImport']['addedRows']),(3,0))
 
+    def test_sn_overlap_in_one_file_across_formats_and_after_restore(self):
+        header={**HEADER,'A':'Alarm SN'}
+        self.jobmap([('J1','Alice'),('J2','Bob')])
+        a=row(site='00123',job='J1')
+        old=row(site='123',job='J1',duration='0:45:00')
+        with stage_import(csv_bytes([header,a,old,old,row(site='')]),'part1.csv') as staged,self.db:
+            first=merge_import(self.db,staged,'26540')
+        self.assertEqual((first['storedRows'],first['lastImport']['addedRows'],first['lastImport']['duplicateRows'],
+                          first['lastImport']['missingAlarmSN']),(2,2,1,1))
+        corrected=row(site=('n','123.0'),job='J2',duration='0:10:00',occurred='2026-11-06')
+        newest={**corrected,'I':'0:20:00'}
+        part2=workbook([header,corrected,newest,newest,{**newest,'I':'0'}])
+        for _ in range(2):
+            with stage_import(part2,'renamed.xlsx') as staged,self.db:
+                result=merge_import(self.db,staged,'26540')
+            self.assertEqual((result['totalJobs'],result['totalAlarms'],result['storedRows']),(2,2,2))
+            self.assertEqual((result['lastImport']['addedRows'],result['lastImport']['duplicateRows']),(0,3))
+            self.assertEqual([(r['jobId'],r['seconds'],r['alarmCount']) for r in list_job_proxy_details(self.db)['rows']],
+                             [('J2',1200,1),('J1',310,1)])
+        with sqlite3.connect(':memory:') as restored:
+            init_schema(restored)
+            restore_tables(self.db,restored,ALARM_TABLES)
+            with stage_import(part2,'part2.xlsx') as staged,restored:
+                self.assertEqual(merge_import(restored,staged,'26540')['lastImport']['addedRows'],0)
+        with self.assertRaisesRegex(MttrImportError,'Alarm SN'):
+            with stage_import(csv_bytes([header,row(site='')]),'blank.csv'):
+                self.fail('missing serial should not be accepted')
+        self.assertEqual(get_dataset(self.db),result)
+
+    def test_replaying_original_serials_migrates_old_fingerprints_and_copies(self):
+        # Site and SN headers differ, but the old fingerprint only covers data cells.
+        original=row(site='SN-42')
+        correction={**original,'I':'0:20:00','AE':'J2'}
+        self.add([original,original,correction,row(site='still-legacy')])
+        self.jobmap([('Job1','A'),('J2','B')])
+        with stage_import(csv_bytes([{**HEADER,'A':'Alarm SN'},original,correction]),'original.csv') as staged,self.db:
+            migrated=merge_import(self.db,staged,'26540')
+        self.assertEqual((migrated['storedRows'],migrated['totalAlarms'],migrated['legacyFingerprintRows']),(2,2,1))
+        self.assertEqual((migrated['lastImport']['addedRows'],migrated['lastImport']['duplicateRows']),(0,2))
+        self.assertEqual(sorted((r['jobId'],r['seconds']) for r in list_job_proxy_details(self.db)['rows']),
+                         [('J2',1200),('Job1',310)])
+
     def test_no_matches_reclassify_without_reimport_and_allowlist_empty_never_all(self):
         self.jobmap([('Job1','Alice')])
         d=self.add([row(alarm='26540.0'),row(alarm='26564',duration='25:15:20')],'99999')
@@ -316,7 +358,7 @@ class AlarmMttrTest(unittest.TestCase):
         # Simulate the earlier V5 archive: only the old AG catalogue and
         # receipt exist. The original alarm rows and per-Job winners survive.
         new=self.jobmap([('Job1','A')])
-        old=dict(new['lastJobImport']);del old['personColumn']
+        old={k:v for k,v in new['lastJobImport'].items() if k not in ('personColumn','existingJobs')}
         self.db.execute('INSERT INTO alarm_mttr_job_owners VALUES(?,?)',('Job1','Old AG'))
         self.db.execute('UPDATE alarm_mttr_job_import SET data=?',(json.dumps(old),))
         with sqlite3.connect(':memory:') as dest:

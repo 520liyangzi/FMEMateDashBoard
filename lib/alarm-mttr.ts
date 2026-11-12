@@ -10,6 +10,7 @@ export interface AlarmMttrImportInfo {
   sourceRows: number;
   missingJobIds: number;
   missingAlarmIds: number;
+  missingAlarmSN?: number;
   invalidDates: number;
   zeroDurations: number;
   invalidDurations: number;
@@ -100,7 +101,7 @@ export function parseJobAlNames(input:string|readonly string[]):string[]{
 
 export interface JobProxyMappingImportInfo {
   filename:string; sheetName:string; importedAt:string; sourceRows:number; missingJobIds:number;
-  missingAssignees:number; validRows:number; duplicateRows:number; mappedJobs:number;
+  missingAssignees:number; validRows:number; duplicateRows:number; mappedJobs:number; existingJobs?:number;
 }
 /** A report-time cap on the final winning alarm per Job. Exclusions follow the saved AL policy
  * and cover all dates/people before period or report-owner selection. Absent means no cap. */
@@ -117,7 +118,7 @@ export interface JobProxyMttrDataset {
   totalJobs:number; totalAlarms:number; storedRows:number;
   earliestDate:string|null; latestDate:string|null; lastImport:AlarmMttrImportInfo|null;
   lastJobImport:JobProxyMappingImportInfo|null; mappedJobs:number; unassignedJobs:number;
-  legacyUnlinkedRows:number; needsAlarmReimport:boolean;
+  legacyUnlinkedRows:number; needsAlarmReimport:boolean; legacyFingerprintRows?:number;
 }
 /** null/undefined = all qualifying named owners; [] = no selection. */
 export type JobProxyScope=readonly string[]|null|undefined;

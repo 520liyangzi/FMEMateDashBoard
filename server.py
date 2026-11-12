@@ -29,7 +29,7 @@ import alarm_mttr
 from mttr_uploads import AlarmJobUploads, AlarmUploads, MttrUploads, MttrUploadError, CHUNK_SIZE, DEFAULT_MAX_FILE_BYTES
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = '2.3.1'
+APP_VERSION = '2.4.0'
 DEFAULT_PRESETS = ['Help me analyze this ticket', 'Which cell is faulty?']
 LOG_FIELDS = ['taskId', 'clientId', 'question', 'time', 'date', 'answer', 'scene']
 IMAGE_NAME = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
@@ -249,9 +249,9 @@ class Store:
         except MttrImportError as exc:
             raise ApiError(400, str(exc), exc.details) from exc
 
-    def clear_alarm_mttr(self):
+    def clear_alarm_mttr(self, source='all'):
         with self.lock, self.connect() as db:
-            return alarm_mttr.clear_alarm(db)
+            return alarm_mttr.clear_alarm(db, source)
 
     def get_mttr(self):
         with self.lock, self.connect() as db:
@@ -1303,8 +1303,9 @@ class Handler(BaseHTTPRequestHandler):
             mapping_upload = re.fullmatch(r'/api/mttr/alarms/job-uploads/([0-9a-f]{32})', url.path)
             if mapping_upload:
                 return self.json(store.alarm_job_uploads.cancel(mapping_upload[1]))
-            if url.path == '/api/mttr/alarms':
-                return self.json(store.clear_alarm_mttr())
+            if url.path in ('/api/mttr/alarms','/api/mttr/alarms/imported-alarms','/api/mttr/alarms/imported-jobs'):
+                source={'imported-alarms':'alarm','imported-jobs':'job'}.get(url.path.rsplit('/',1)[1],'all')
+                return self.json(store.clear_alarm_mttr(source))
             upload = re.fullmatch(r'/api/mttr/uploads/([0-9a-f]{32})',url.path)
             if upload:
                 return self.json(store.mttr_uploads.cancel(upload[1]))

@@ -1,13 +1,14 @@
 import {useEffect,useMemo,useRef,useState} from 'react';
-import {Clock3,FileSpreadsheet,Search,Upload} from 'lucide-react';
+import {Clock3,FileSpreadsheet,Search} from 'lucide-react';
 import {compareJobProxyMttr,type JobDetailFocus,getJobProxyAssignees,getJobAlPolicy,getJobProxyAxis,rankJobProxyMttr,selectJobProxyDays,type JobProxyMttrDataset,type JobAlPolicy} from '../lib/alarm-mttr';
 import {isValidMttrPeriod,previousMttrPeriod,type MttrPeriod} from '../lib/mttr';
-import {createAlarmUploader,type AlarmApi,type AlarmProgress} from './alarm-upload';
+import type {AlarmApi} from './alarm-upload';
 import JobMttrDetails from './JobMttrDetails';
 import MttrCalculationRules from './MttrCalculationRules';
 import JobAlPolicyPanel from './JobAlPolicyPanel';
 import type {JobProxyDetailRow} from '../lib/job-mttr-details';
-import {createJobOwnerBatch} from './job-owner-batch';
+import MttrImportQueue from './MttrImportQueue';
+import type {ImportSource} from './mttr-file-batch';
 import './alarm-mttr.css';
 
 type Translate=(zh:string,en:string)=>string;
@@ -97,110 +98,68 @@ function JobDurationLimit({t,hours,onChange,pending,error,retry,excluded,canAppl
   </section>;
 }
 
-type JobQueueRow={status:'pending'|'upload'|'parse'|'saved'|'failed'|'cancelled';progress?:AlarmProgress;mapped?:number;error?:string};
 function ImportEditor({dataset,t,api,onDatasetChange}:{dataset:JobProxyMttrDataset|null;t:Translate;api:AlarmApi;onDatasetChange:(v:JobProxyMttrDataset)=>void}){
   const listKey=(dataset?.allowlist??[]).join(',');const [list,setList]=useState(listKey);
   useEffect(()=>{setList(listKey)},[listKey]);
-  const [alarm,setAlarm]=useState<File|null>(null),[busy,setBusy]=useState<''|'alarm'|'job'|'list'|'replace'|'al'>('');
-  const [progress,setProgress]=useState<AlarmProgress|null>(null),[error,setError]=useState(''),[message,setMessage]=useState('');
-  const [batch,setBatch]=useState<ReturnType<typeof createJobOwnerBatch>|null>(null),[rows,setRows]=useState<JobQueueRow[]>([]);
-  const [jobRun,setJobRun]=useState<'ready'|'running'|'stopping'|'stopped'|'failed'|'done'>('ready');
-  const alarmInput=useRef<HTMLInputElement|null>(null),jobInput=useRef<HTMLInputElement|null>(null);
-  const abort=useRef<AbortController|null>(null),active=useRef(false);
-  const uploader=useMemo(()=>createAlarmUploader(api),[api]);
+  const [busy,setBusy]=useState<ImportSource|'list'|'al'|''>('');
+  const [error,setError]=useState(''),[message,setMessage]=useState('');
+  const [reset,setReset]=useState({alarm:0,job:0});
+  const active=useRef(false);
   const [open,setOpen]=useState(!dataset?.storedRows||!!dataset?.needsAlarmReimport);
   const allowed=tokens(list),unsaved=allowed.join(',')!==listKey;
-  useEffect(()=>()=>abort.current?.abort(),[]);
-  function clearStatus(){setError('');setMessage('')}
-  async function replaceJobs(files:File[]){
-    if(active.current||!files.length)return;
-    active.current=true;setBusy('replace');clearStatus();
-    try{
-      // Release any incomplete upload for the previous selection; committed mappings are untouched.
-      if(batch)await batch.discard();
-      setBatch(createJobOwnerBatch(api,files));setRows(files.map(()=>({status:'pending'})));setJobRun('ready');
-    }catch(e){setError(e instanceof Error?e.message:String(e))}
-    finally{active.current=false;setBusy('')}
+  function begin(action:Exclude<typeof busy,''>){
+    if(active.current)return false;
+    active.current=true;setBusy(action);setError('');setMessage('');return true;
   }
+  function finish(){active.current=false;setBusy('')}
   async function saveAlPolicy(policy:JobAlPolicy){
-    if(active.current)throw new Error(t('请等待当前操作完成。','Wait for the current operation to finish.'));
-    active.current=true;setBusy('al');
+    if(!begin('al'))throw new Error(t('请等待当前操作完成。','Wait for the current operation to finish.'));
     try{
       const updated:JobProxyMttrDataset=await api('/api/mttr/alarms/al-policy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(policy)});
       const received=getJobAlPolicy(updated);
       if(updated?.source!=='alarm-jobs'||updated.formatVersion!==5||!received||received.mode!==policy.mode||!Array.isArray(received.names)||!received.names.every(n=>typeof n==='string')||!Array.isArray(updated.personDays)||!Array.isArray(updated.days)||!Array.isArray(updated.allowlist))throw new Error(t('服务器未确认名单设置，请刷新后重试。','The server did not confirm the list settings. Refresh and retry.'));
       onDatasetChange(updated);return received;
-    }finally{active.current=false;setBusy('')}
+    }finally{finish()}
   }
-  function updateRow(index:number,row:JobQueueRow){setRows(prior=>prior.map((old,i)=>i===index?row:old))}
-  async function importJobs(){
-    if(active.current||!batch||batch.completed===batch.files.length)return;
-    active.current=true;setBusy('job');setJobRun('running');clearStatus();
-    const controller=new AbortController();abort.current=controller;let fileFailureReported=false;
+  async function saveList(){
+    if(!begin('list'))return;
     try{
-      await batch.run(controller.signal,event=>{
-        switch(event.type){
-          case 'start':updateRow(event.index,{status:'upload'});break;
-          case 'progress':updateRow(event.index,{status:event.progress.phase,progress:event.progress});break;
-          case 'saved':
-            onDatasetChange(event.dataset);
-            updateRow(event.index,{status:'saved',mapped:event.dataset.lastJobImport!.mappedJobs});break;
-          case 'failed':fileFailureReported=true;updateRow(event.index,{status:'failed',error:event.error instanceof Error?event.error.message:String(event.error)});break;
-          case 'cancelled':updateRow(event.index,{status:'cancelled'});break;
-        }
-      });
-      setJobRun('done');
-    }catch(e){
-      setJobRun(controller.signal.aborted?'stopped':'failed');
-      if(!controller.signal.aborted&&!fileFailureReported)setError(e instanceof Error?e.message:String(e));
-    }finally{abort.current=null;active.current=false;setBusy('')}
-  }
-  async function submit(action:'alarm'|'list'){
-    if(active.current||action==='alarm'&&(!alarm||!allowed.length))return;
-    active.current=true;setBusy(action);setProgress(null);clearStatus();
-    try{
-      let updated:JobProxyMttrDataset;
-      if(action==='list')updated=await api('/api/mttr/alarms/allowlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allowlist:list})});
-      else{const controller=new AbortController();abort.current=controller;updated=await uploader.upload(alarm!,list,setProgress,controller.signal);
-        setAlarm(null);if(alarmInput.current)alarmInput.current.value='';}
+      const updated=await api('/api/mttr/alarms/allowlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({allowlist:list})});
       setList(updated.allowlist.join(','));onDatasetChange(updated);
-      setMessage(t(`统计已更新：共 ${count(updated.totalJobs)} 个符合当前 AL 名单的有效工单。`,`Updated: ${count(updated.totalJobs)} eligible Jobs under the current AL list.`));
+      setMessage(t('白名单已保存，统计已更新。','Allowlist saved and statistics updated.'));
     }catch(e){setError(e instanceof Error?e.message:String(e))}
-    finally{abort.current=null;setProgress(null);setBusy('');active.current=false}
+    finally{finish()}
   }
-  const pickLabel=t('Job 人员文件（可多选）','Job ownership files (multiple)');
-  const rowLabel=(r:JobQueueRow):string=>{
-    switch(r.status){
-      case 'saved':return t(`已导入 · ${count(r.mapped??0)} 个工单归属`,`Imported · ${count(r.mapped??0)} Job mappings`);
-      case 'failed':return t('导入失败','Failed');
-      case 'cancelled':return t('已停止，可继续导入','Stopped; ready to retry');
-      case 'parse':return t('正在解析并更新归属…','Processing ownership…');
-      case 'upload':return r.progress?t(`正在上传 ${Math.round(100*r.progress.loaded/r.progress.total)}%`,`Uploading ${Math.round(100*r.progress.loaded/r.progress.total)}%`):t('准备上传…','Starting upload…');
-      default:return t('待导入','Pending');
-    }
-  };
-  const saved=batch?.completed??0,total=batch?.files.length??0,remaining=total-saved;
+  async function clear(source:ImportSource){
+    const alarm=source==='alarm';
+    const prompt=alarm?t('清空全部已导入的 MTTR 告警？Job 人员归属和筛选设置会保留。','Clear all imported MTTR alarms? Job ownership and filter settings will be kept.'):
+      t('清空全部已导入的 Job 人员归属？告警和筛选设置会保留。','Clear all imported Job ownership? Alarms and filter settings will be kept.');
+    if(!window.confirm(prompt)||!begin(source))return;
+    try{
+      const updated=await api('/api/mttr/alarms/'+(alarm?'imported-alarms':'imported-jobs'),{method:'DELETE'});
+      onDatasetChange(updated);setReset(prior=>({...prior,[source]:prior[source]+1}));
+      setMessage(alarm?t('已清空告警，可以重新导入。','Alarms cleared. You can import them again.'):t('已清空 Job 人员归属，可以重新导入。','Job ownership cleared. You can import it again.'));
+    }catch(e){setError(e instanceof Error?e.message:String(e))}
+    finally{finish()}
+  }
+  function queue(source:ImportSource){
+    const alarm=source==='alarm';
+    return <><MttrImportQueue key={source+reset[source]} source={source} api={api} t={t} disabled={!!busy} canImport={!alarm||!!allowed.length} allowlist={list} begin={()=>begin(source)} finish={finish} onDatasetChange={onDatasetChange}/>
+      {!!(alarm?dataset?.storedRows:dataset?.lastJobImport)&&<button type="button" className="text-button" disabled={!!busy} onClick={()=>clear(source)}>{alarm?t('清空已导入告警','Clear imported alarms'):t('清空已导入 Job 归属','Clear imported Job ownership')}</button>}</>;
+  }
   return <><details className="alarm-editor" open={open} onToggle={e=>setOpen(e.currentTarget.open)}><summary><FileSpreadsheet size={15}/>{t('导入告警与 Job 人员表','Import alarm and Job files')}</summary>
     <p className="alarm-note">{t('告警文件与 Job 人员文件可独立更新。每个文件默认读取第一张工作表，第 1 行为表头。','Alarm and Job ownership files can be updated independently. For each file, the first sheet is read with row 1 as its header.')}</p>
     <div className="job-import-sources"><section><h3>{t('告警及白名单','Alarms and allowlist')}</h3>
       <label className="alarm-label">{t('告警 ID 白名单（逗号分隔）','Alarm ID allowlist (comma-separated)')}<input type="text" value={list} disabled={!!busy} placeholder="26540,26564,26568" onChange={e=>setList(e.target.value)}/></label>
-      <button type="button" className="btn" disabled={!!busy||!unsaved} onClick={()=>submit('list')}>{t('保存白名单并重新统计','Save allowlist and recalculate')}</button>
-      <label className="alarm-label alarm-file-line">{t('告警文件','Alarm file')}<input type="file" ref={alarmInput} accept=".xlsx,.csv" disabled={!!busy} onChange={e=>{setAlarm(e.target.files?.[0]??null);clearStatus()}}/></label><p className="alarm-note">{t('B：告警 ID；I：Duration（时:分:秒）；K：发生时间；AE：Job ID。','B: alarm ID; I: duration (h:mm:ss); K: occurrence time; AE: Job ID.')}</p>
-      <button type="button" className="btn primary" disabled={!!busy||!alarm||!allowed.length} onClick={()=>submit('alarm')}><Upload size={15}/>{t('按此白名单导入告警','Import alarms with this allowlist')}</button>
+      <button type="button" className="btn" disabled={!!busy||!unsaved} onClick={saveList}>{t('保存白名单并重新统计','Save allowlist and recalculate')}</button>
+      <p className="alarm-note">{t('A 列 Alarm SN 用于去重，B 为告警 ID，I 为时长，K 为发生时间，AE 为 Job ID。可多选文件。同一 SN 只计一次，以导入顺序中最后一条有效记录为准。','Select one or more files. Column A is the Alarm SN, B the alarm ID, I the duration, K the occurrence time and AE the Job ID. Each SN counts once. The last valid row in import order wins.')}</p>
+      {!!dataset?.legacyFingerprintRows&&<p className="alarm-warning">{t(`有 ${count(dataset.legacyFingerprintRows)} 条历史记录未保存 Alarm SN。若原文件带有 SN，可重传原文件补齐。也可清空告警后重导完整的带 SN 数据。`,`${count(dataset.legacyFingerprintRows)} historical rows have no stored Alarm SN. Reimport the original files if they have SNs, or clear alarms and import a complete set with SNs.`)}</p>}
+      {queue('alarm')}
     </section><section><h3>{t('Job 人员归属','Job ownership')}</h3>
-      <p className="alarm-note">{t('C：Job ID；AL：统计人员姓名。每行的 C 和 AL 均须非空。支持一次选择多个 .xlsx 或 .csv，按下方顺序导入。同一 Job 在多个文件中有不同的 AL 姓名时，以最后成功导入的文件为准。','C: Job ID; AL: reporting person. Both must be nonblank. Select one or more .xlsx or .csv files. Files import in the order shown below. For a Job listed under different AL names across files, the last successfully imported file sets its AL name.')}</p>
-      <input type="file" hidden multiple accept=".xlsx,.csv" aria-label={pickLabel} ref={jobInput} disabled={!!busy} onChange={e=>{const files=Array.from(e.currentTarget.files??[]);e.currentTarget.value='';void replaceJobs(files)}}/>
-      <div className="job-batch-pick"><button type="button" className="btn" disabled={!!busy} onClick={()=>jobInput.current?.click()}><FileSpreadsheet size={15}/>{batch?t('重新选择文件','Replace file selection'):t('选择 Job 人员文件','Choose Job ownership files')}</button>{!!total&&<small>{t(`已选择 ${count(total)} 个文件`,`${count(total)} selected`)}</small>}</div>
-      {batch&&<><ol className="job-batch-queue" aria-label={t('Job 文件导入顺序','Job file import order')}>{batch.files.map((f,i)=>{
-        const row=rows[i]??{status:'pending' as const};
-        return <li key={i} data-status={row.status}><div><strong>{f.name}</strong><small>{rowLabel(row)}</small></div>{row.error&&<p className="job-batch-error" role="alert">{row.error}</p>}{row.progress?.phase==='upload'&&<progress aria-label={t(`${f.name} 上传进度`,`${f.name} upload progress`)} max={row.progress.total} value={row.progress.loaded}/>}</li>;
-      })}</ol>
-      <p className="job-batch-result" role="status">{jobRun==='ready'?t('等待开始导入。','Ready to import.'):jobRun==='stopping'?t('正在停止。已提交解析的文件会先处理完毕。','Stopping. A file already submitted for processing will finish first.'):jobRun==='done'?t(`全部 ${count(total)} 个文件已导入。`,`All ${count(total)} files imported.`):jobRun==='running'?t(`已导入 ${count(saved)} / ${count(total)} 个文件。`,`Imported ${count(saved)} of ${count(total)} files.`):t(`已保留 ${count(saved)} 个已导入文件的结果；还有 ${count(remaining)} 个未完成。可继续导入，或重新选择修正后的文件及后续文件。`,`${count(saved)} successful imports retained; ${count(remaining)} files remain. Retry, or select the corrected file and the remaining files.`)}</p></>}
-      <div className="alarm-actions job-batch-actions"><button type="button" className="btn primary" disabled={!!busy||!remaining} onClick={importJobs}><Upload size={15}/>{jobRun==='failed'||jobRun==='stopped'?t('继续导入未完成文件','Retry remaining files'):t('导入所选 Job 文件','Import selected Job files')}</button>
-      {busy==='job'&&<button type="button" className="btn" disabled={jobRun==='stopping'} onClick={()=>{setJobRun('stopping');abort.current?.abort()}}>{t('停止导入','Stop import')}</button>}</div>
+      <p className="alarm-note">{t('C 列 jb_id 用于去重，AL 为统计人员姓名。可多选文件。同一工单只保留一个归属，以最后成功导入的非空 AL 为准。同一文件中归属冲突时会提示核对。','Select one or more files. Column C (jb_id) identifies each Job, and AL gives its owner. Each Job has one owner. The last successfully imported nonblank AL wins. Conflicting owners in one file require review.')}</p>
+      {queue('job')}
       {dataset?.lastJobImport&&<p className="alarm-note">{t('最近导入','Last import')}: {dataset.lastJobImport.filename}{!('personColumn' in dataset.lastJobImport)&&t('（历史导入，未记录 AL）',' (historical import, no AL captured)')}</p>}
     </section></div>
-    {busy==='alarm'&&<div className="alarm-status" role="status">{progress?.phase==='parse'?t('正在解析并重新统计…','Parsing and recalculating…'):t('正在上传…','Uploading…')}{progress?.phase==='upload'&&<> {Math.round(100*progress.loaded/progress.total)}% <progress aria-label={t('上传进度','Upload progress')} className="alarm-import-progress" max={progress.total} value={progress.loaded}/> <button type="button" className="btn" onClick={()=>abort.current?.abort()}>{t('取消上传','Cancel upload')}</button></>}</div>}
     {busy==='list'&&<div className="alarm-status" role="status">{t('正在重新统计…','Recalculating…')}</div>}{error&&<div className="alarm-status error-text" role="alert">{error}</div>}{message&&!busy&&<div className="alarm-status" role="status">{message}</div>}
   </details><JobAlPolicyPanel data={dataset} t={t} disabled={!!busy} saving={busy==='al'} onSave={saveAlPolicy}/></>;
 }
@@ -279,7 +238,7 @@ export default function AlarmMttrPanel({lang,dataset:input,baseline,current,onBa
       {ranking.length>0?<div className="job-rank-table"><table><thead><tr>{[t('排名','Rank'),person,t('基准期工单数','Baseline Jobs'),t('基准期 MTTR','Baseline MTTR'),t('对比期工单数','Comparison Jobs'),t('对比期 MTTR','Comparison MTTR'),t('提升率','Improvement')].map(h=><th key={h} scope="col">{h}</th>)}</tr></thead><tbody>{ranking.map(r=><tr key={r.assignee}><td>{r.rank??'—'}</td><th scope="row">{legacy?r.assignee:<button type="button" className="job-rank-person" aria-label={t(`查看 ${r.assignee} 的工单明细`,`View Job details for ${r.assignee}`)} onClick={()=>openPersonJobs(r.assignee)}>{r.assignee}</button>}</th><td>{count(r.comparison.baseline.count)}</td><td>{duration(r.comparison.baseline.meanSeconds)}</td><td>{count(r.comparison.current.count)}</td><td>{duration(r.comparison.current.meanSeconds)}</td><td className={r.comparison.reductionRate>0?'positive':''}>{r.comparison.reductionRate===null?<><span>—</span><small>{unavailable(r.comparison.status)}</small></>:`${r.comparison.reductionRate.toFixed(1)}%`}</td></tr>)}</tbody></table></div>:<p className="job-rank-empty">{!names.length||!validDates?emptyNote:t('请选择统计人员，或切换为全部。','Select people for this report, or choose all.')}</p>}
     </section>
     <JobMttrDetails maxDurationHours={maxDurationHours} t={t} data={data} report={detailFocus.comparison} focusPerson={detailFocus.person} availablePeople={detailFocus.availablePeople} onFocusPersonChange={onDetailPersonChange} api={api} offline={readOnly} offlineRows={offlineJobRows} assignees={detailFocus.assignees} formatDuration={duration} onExport={onExportJobDetails}/></>}
-    {alarms&&<details className="alarm-summary"><summary>{t('告警导入明细','Alarm import details')} · {alarms.filename}</summary><p>{alarms.sheetName} · {alarms.importedAt}</p>{counters([[t('读取行数','Source rows'),alarms.sourceRows],[t('缺少 Job ID','Missing Job ID'),alarms.missingJobIds],[t('缺少告警 ID','Missing alarm ID'),alarms.missingAlarmIds],[t('发生时间无效','Invalid occurrence time'),alarms.invalidDates],[t('未清除（零时长）','Uncleared (zero)'),alarms.zeroDurations],[t('时长无效','Invalid duration'),alarms.invalidDurations],[t('可用于白名单筛选','Valid before allowlist'),alarms.validRows],[t('命中导入时白名单','Matched at import'),alarms.matchedRows],[t('新增保存行','New stored rows'),alarms.addedRows],[t('重复行','Duplicate rows'),alarms.duplicateRows]])}</details>}
-    {jobs&&<details className="alarm-summary"><summary>{t('人员归属导入明细','Ownership import details')} · {jobs.filename}</summary><p>{jobs.sheetName} · {jobs.importedAt}</p>{counters([[t('读取行数','Source rows'),jobs.sourceRows],[t('缺少 Job ID','Missing Job ID'),jobs.missingJobIds],[t('导入时姓名为空','Missing name at import'),jobs.missingAssignees],[t('重复 Job ID','Repeated Job IDs'),jobs.duplicateRows],[t('本次导入工单','Jobs in this import'),jobs.mappedJobs]])}</details>}
+    {alarms&&<details className="alarm-summary"><summary>{t('告警导入明细','Alarm import details')} · {alarms.filename}</summary><p>{alarms.sheetName} · {alarms.importedAt}</p>{counters([[t('读取行数','Source rows'),alarms.sourceRows],[t('缺少 Job ID','Missing Job ID'),alarms.missingJobIds],[t('缺少告警 ID','Missing alarm ID'),alarms.missingAlarmIds],[t('Alarm SN 缺失或无效','Missing or invalid Alarm SN'),alarms.missingAlarmSN??0],[t('发生时间无效','Invalid occurrence time'),alarms.invalidDates],[t('未清除（零时长）','Uncleared (zero)'),alarms.zeroDurations],[t('时长无效','Invalid duration'),alarms.invalidDurations],[t('可用于白名单筛选','Valid before allowlist'),alarms.validRows],[t('命中导入时白名单','Matched at import'),alarms.matchedRows],[t('新增保存行','New stored rows'),alarms.addedRows],[t('重复行','Duplicate rows'),alarms.duplicateRows]])}</details>}
+    {jobs&&<details className="alarm-summary"><summary>{t('人员归属导入明细','Ownership import details')} · {jobs.filename}</summary><p>{jobs.sheetName} · {jobs.importedAt}</p>{counters([[t('读取行数','Source rows'),jobs.sourceRows],[t('缺少 Job ID','Missing Job ID'),jobs.missingJobIds],[t('导入时姓名为空','Missing name at import'),jobs.missingAssignees],[t('文件内重复 jb_id','Repeated jb_id in file'),jobs.duplicateRows],[t('已存在的 jb_id','Previously stored jb_id'),jobs.existingJobs??0],[t('本次导入工单','Jobs in this import'),jobs.mappedJobs]])}</details>}
   </section>;
 }

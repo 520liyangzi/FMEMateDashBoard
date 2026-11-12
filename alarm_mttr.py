@@ -4,9 +4,8 @@ Only Jobs with an eligible alarm and a named C -> AL person enter the report.
 Unmatched Jobs stay in the alarm ledger for later mapping. A Job belongs to the
 occurrence date of its longest eligible alarm (earliest such date in a tie).
 
-The maximum observed multiplicity of identical rows makes repeated/overlapping
-exports idempotent while preserving repetitions within a single export. With
-no unique event key, identical events in disjoint files cannot be distinguished.
+Column A (Alarm SN) identifies an occurrence across files. The last valid row
+wins. Historical exports without serial numbers retain their fingerprint keys.
 """
 from contextlib import contextmanager, closing
 from datetime import date, datetime, timedelta, timezone
@@ -212,8 +211,9 @@ def get_dataset(db,max_duration_hours=None):
         jobs+=n;alarms+=k
         people.add(person)
     days=list(days_by_date.values())
-    stored,unlinked=db.execute("""SELECT coalesce(sum(copies),0),
-          coalesce(sum(CASE WHEN l.signature IS NULL THEN copies ELSE 0 END),0)
+    stored,unlinked,legacy=db.execute("""SELECT coalesce(sum(copies),0),
+          coalesce(sum(CASE WHEN l.signature IS NULL THEN copies ELSE 0 END),0),
+          coalesce(sum(CASE WHEN r.signature NOT LIKE 'sn:%' THEN copies ELSE 0 END),0)
           FROM alarm_mttr_rows r LEFT JOIN alarm_mttr_job_links l USING(signature)""").fetchone()
     last=db.execute('SELECT data FROM alarm_mttr_last_import WHERE id=1').fetchone()
     mapping=db.execute('SELECT data FROM alarm_mttr_job_import WHERE id=1').fetchone()
@@ -226,6 +226,7 @@ def get_dataset(db,max_duration_hours=None):
                 alPolicy=policy,alDiagnostics=dict(missingALJobs=unassigned,filteredOutJobs=matched-after_policy),
                 revision=db.execute('SELECT token FROM alarm_mttr_revision WHERE id=1').fetchone()[0],
                 totalAlarms=alarms,totalJobs=jobs,storedRows=stored,unassignedJobs=unassigned,
+                legacyFingerprintRows=legacy,
                 mappedJobs=db.execute('SELECT count(*) FROM alarm_mttr_job_al').fetchone()[0],
                 legacyUnlinkedRows=unlinked,needsAlarmReimport=bool(unlinked),
                 earliestDate=days[0]['date'] if days else None,latestDate=days[-1]['date'] if days else None,
@@ -235,10 +236,15 @@ def get_dataset(db,max_duration_hours=None):
     return report
 
 
-def clear_alarm(db):
-    for table in ('alarm_mttr_job_links','alarm_mttr_rows','alarm_mttr_last_import',
-                  'alarm_mttr_job_owners','alarm_mttr_job_import','alarm_mttr_job_al','alarm_mttr_al_people'):
-        db.execute('DELETE FROM '+table)
+def clear_alarm(db,source='all'):
+    if source not in ('all','alarm','job'):
+        raise MttrImportError('Invalid MTTR import source.')
+    if source in ('all','alarm'):
+        for table in ('alarm_mttr_job_links','alarm_mttr_rows','alarm_mttr_last_import'):
+            db.execute('DELETE FROM '+table)
+    if source in ('all','job'):
+        for table in ('alarm_mttr_job_owners','alarm_mttr_job_import','alarm_mttr_job_al','alarm_mttr_al_people'):
+            db.execute('DELETE FROM '+table)
     _refresh_max(db)
     return get_dataset(db)
 
@@ -359,10 +365,13 @@ def merge_job_import(db,staged):
     stats,incoming=staged
     db.executemany('INSERT OR IGNORE INTO alarm_mttr_al_people VALUES(?,?)',
                    incoming.execute('SELECT person_key,assignee FROM owners ORDER BY rowid'))
+    previous=db.execute('SELECT count(*) FROM alarm_mttr_job_al').fetchone()[0]
     db.executemany("""INSERT INTO alarm_mttr_job_al VALUES(?,?)
             ON CONFLICT(job_id) DO UPDATE SET person_key=excluded.person_key
             WHERE alarm_mttr_job_al.person_key<>excluded.person_key""",
             incoming.execute('SELECT job_id,person_key FROM owners'))
+    added=db.execute('SELECT count(*) FROM alarm_mttr_job_al').fetchone()[0]-previous
+    stats=dict(stats,existingJobs=stats['mappedJobs']-added)
     db.execute('INSERT OR REPLACE INTO alarm_mttr_job_import VALUES(1,?)',(json.dumps(stats,ensure_ascii=False),))
     db.execute(_NEW_REVISION)
     return get_dataset(db)
@@ -451,12 +460,18 @@ def stage_import(content,filename,date_column='K',duration_unit='hh:mm:ss'):
         raise MttrImportError('日期固定为 K 列，时长固定为 I 列时:分:秒 / Use occurrence time K and elapsed duration I (h:mm:ss).')
     with tempfile.TemporaryDirectory(prefix='fmemate-alarm-') as tmp, closing(sqlite3.connect(tmp+'/alarm.db')) as staged:
         staged.execute('CREATE TABLE r (signature TEXT PRIMARY KEY, alarm TEXT, day TEXT, seconds REAL, copies INTEGER, job_id TEXT)')
+        staged.execute('CREATE TABLE fingerprints(signature TEXT PRIMARY KEY, sn_key TEXT NOT NULL)')
+        staged.execute('CREATE TABLE source_counts(alarm TEXT PRIMARY KEY, n INTEGER NOT NULL)')
         with _rows(content,filename) as (name,meta,rows):
             stats=dict.fromkeys(QUALITY,0)
+            stats['missingAlarmSN']=0
+            a_header=''
             stats.update(filename=name,sheetName=meta['sheetName'],dateColumn='K',durationUnit='hh:mm:ss',
                          importedAt=datetime.now(timezone.utc).isoformat())
             for row in rows:
-                if row['_row']==1:continue
+                if row['_row']==1:
+                    a_header=normalized(row.get('A','')).casefold()
+                    continue
                 stats['sourceRows']+=1
                 job=str(row.get('AE','')).strip()
                 if not _valid_value(_job_key(job)):stats['missingJobIds']+=1;continue
@@ -467,16 +482,26 @@ def stage_import(content,filename,date_column='K',duration_unit='hh:mm:ss'):
                 if seconds==0:stats['zeroDurations']+=1;continue
                 dt=_occurrence(row.get('K',''),meta['date1904'])
                 if dt is None:stats['invalidDates']+=1;continue
+                serial=_id(row.get('A',''))
+                # Old exports put a site name in A or leave A entirely unused.
+                legacy=a_header in ('site','site name','站点','站点名称') or (not a_header and not serial)
+                if not legacy and not _valid_value(serial):
+                    stats['missingAlarmSN']+=1
+                    continue
                 stats['validRows']+=1
-                # Float canonicalization makes Excel day fractions and equivalent
-                # clock strings hash identically, down to microsecond precision.
-                sig=_signature(row,alarm,float(seconds),dt,job)
-                staged.execute('INSERT INTO r VALUES(?,?,?,?,1,?) ON CONFLICT(signature) DO UPDATE SET copies=copies+1',
-                               (sig,alarm,dt.date().isoformat(),seconds,_job_key(job)))
+                staged.execute('INSERT INTO source_counts VALUES(?,1) ON CONFLICT(alarm) DO UPDATE SET n=n+1',(alarm,))
+                fingerprint=_signature(row,alarm,float(seconds),dt,job)
+                signature=fingerprint if legacy else 'sn:'+serial
+                if not legacy:
+                    staged.execute('INSERT OR IGNORE INTO fingerprints VALUES(?,?)',(fingerprint,signature))
+                staged.execute("""INSERT INTO r VALUES(?,?,?,?,1,?) ON CONFLICT(signature) DO UPDATE SET
+                               alarm=excluded.alarm,day=excluded.day,seconds=excluded.seconds,job_id=excluded.job_id,
+                               copies=CASE WHEN ? THEN r.copies+1 ELSE 1 END""",
+                               (signature,alarm,dt.date().isoformat(),seconds,_job_key(job),legacy))
         if not stats['validRows']:
             raise MttrImportError(
                 f"没有可导入告警 / No eligible alarm rows (rows {stats['sourceRows']}; empty Job IDs {stats['missingJobIds']}; "
-                f"missing/invalid alarm IDs {stats['missingAlarmIds']}; zero durations {stats['zeroDurations']}; "
+                f"missing/invalid Alarm SN (A) {stats['missingAlarmSN']}; missing/invalid alarm IDs {stats['missingAlarmIds']}; zero durations {stats['zeroDurations']}; "
                 f"invalid durations {stats['invalidDurations']}; invalid occurrence dates {stats['invalidDates']}). Existing data unchanged.",
                 {'source':'alarms','lastImport':stats})
         yield stats,staged
@@ -487,12 +512,28 @@ def merge_import(db,staged,allowlist=None):
     stats=stats.copy()
     if allowlist is not None:_replace_ids(db,allowlist)
     ids={r[0] for r in db.execute('SELECT alarm_id FROM alarm_mttr_allowlist')}
-    stats['matchedRows']=sum(n for alarm,n in incoming.execute('SELECT alarm,sum(copies) FROM r GROUP BY alarm') if alarm in ids)
+    stats['matchedRows']=sum(n for alarm,n in incoming.execute('SELECT alarm,n FROM source_counts') if alarm in ids)
+    # Old ledgers kept a one-way row fingerprint. Replaying each exact original
+    # row gives us its SN and lets us retire every matching historical copy.
+    if db.execute("SELECT 1 FROM alarm_mttr_rows WHERE signature < 'sn:' LIMIT 1").fetchone():
+        db.execute('CREATE TEMP TABLE matched_fingerprints(signature TEXT PRIMARY KEY, sn_key TEXT)')
+        try:
+            db.executemany("""INSERT INTO matched_fingerprints SELECT r.signature,?
+                              FROM alarm_mttr_rows r WHERE r.signature=?""",
+                           incoming.execute('SELECT sn_key,signature FROM fingerprints'))
+            db.execute("""INSERT OR IGNORE INTO alarm_mttr_rows
+                          SELECT m.sn_key,r.alarm_id,r.day,r.seconds,1
+                          FROM matched_fingerprints m JOIN alarm_mttr_rows r USING(signature)""")
+            for table in ('alarm_mttr_job_links','alarm_mttr_rows'):
+                db.execute('DELETE FROM '+table+' WHERE signature IN (SELECT signature FROM matched_fingerprints)')
+        finally:
+            db.execute('DROP TABLE matched_fingerprints')
     before=db.execute('SELECT coalesce(sum(copies),0) FROM alarm_mttr_rows').fetchone()[0]
     db.executemany('''INSERT INTO alarm_mttr_rows VALUES(?,?,?,?,?) ON CONFLICT(signature)
-                   DO UPDATE SET copies=excluded.copies WHERE excluded.copies>alarm_mttr_rows.copies''',
+                   DO UPDATE SET alarm_id=excluded.alarm_id,day=excluded.day,seconds=excluded.seconds,
+                   copies=max(alarm_mttr_rows.copies,excluded.copies)''',
                    incoming.execute('SELECT signature,alarm,day,seconds,copies FROM r'))
-    db.executemany('INSERT OR IGNORE INTO alarm_mttr_job_links VALUES(?,?)',
+    db.executemany('INSERT OR REPLACE INTO alarm_mttr_job_links VALUES(?,?)',
                    incoming.execute('SELECT signature,job_id FROM r'))
     after=db.execute('SELECT sum(copies) FROM alarm_mttr_rows').fetchone()[0]
     stats['addedRows']=after-before
@@ -523,7 +564,10 @@ def restore_tables(source,dest,tables):
     _replace_ids(dest,ids)
     stored=0
     for sig,alarm,day,seconds,copies in source.execute('SELECT signature,alarm_id,day,seconds,copies FROM alarm_mttr_rows'):
-        if not isinstance(sig,str) or not re.fullmatch('[0-9a-f]{64}',sig) or not _valid_id(alarm):invalid()
+        if not isinstance(sig,str) or not _valid_id(alarm):invalid()
+        if sig.startswith('sn:'):
+            if not _valid_value(sig[3:]) or _id(sig[3:])!=sig[3:] or copies!=1:invalid()
+        elif not re.fullmatch('[0-9a-f]{64}',sig):invalid()
         if not isinstance(day,str) or len(day)!=10 or not _occurrence(day,False) or date.fromisoformat(day).isoformat()!=day:invalid()
         if type(seconds) not in (float,int) or not 0<seconds<=MAX_SECONDS or type(copies)!=int or not 1<=copies<=MAX_ROWS:invalid()
         dest.execute('INSERT INTO alarm_mttr_rows VALUES(?,?,?,?,?)',(sig,alarm,day,seconds,copies));stored+=copies
@@ -562,7 +606,8 @@ def restore_tables(source,dest,tables):
             try:
                 q=json.loads(jm[0][1])
                 receipt_fields={'filename','sheetName','importedAt',*JOB_QUALITY}
-                if not isinstance(q,dict) or set(q) not in (receipt_fields,receipt_fields|{'personColumn'}):invalid()
+                if not isinstance(q,dict) or set(q) not in (receipt_fields,receipt_fields|{'personColumn'},receipt_fields|{'personColumn','existingJobs'}):invalid()
+                if 'existingJobs' in q and (type(q['existingJobs'])!=int or not 0<=q['existingJobs']<=q['mappedJobs']):invalid()
                 if 'personColumn' in q and q['personColumn']!='AL':invalid()
                 if any(not isinstance(q[k],str) or not 0<len(q[k])<=v for k,v in [('filename',255),('sheetName',200),('importedAt',64)]):invalid()
                 datetime.fromisoformat(q['importedAt'])
@@ -579,12 +624,15 @@ def restore_tables(source,dest,tables):
     if len(last)!=1 or last[0][0]!=1 or not isinstance(last[0][1],str) or len(last[0][1])>8000:invalid()
     try:
         s=json.loads(last[0][1])
-        if not isinstance(s,dict) or set(s)!=FIELDS or s['dateColumn']!='K' or s['durationUnit']!='hh:mm:ss':invalid()
+        if not isinstance(s,dict) or set(s) not in (FIELDS,FIELDS|{'missingAlarmSN'}) or s['dateColumn']!='K' or s['durationUnit']!='hh:mm:ss':invalid()
         if any(not isinstance(s[k],str) or not 0<len(s[k])<=v for k,v in [('filename',255),('sheetName',200),('importedAt',64)]):invalid()
         datetime.fromisoformat(s['importedAt'])
         if any(type(s[k])!=int or not 0<=s[k]<=MAX_ROWS for k in QUALITY):invalid()
-        if s['validRows']!=s['addedRows']+s['duplicateRows'] or not 0<s['validRows']<=stored or s['matchedRows']>s['validRows']:invalid()
-        if s['sourceRows']!=sum(s[k] for k in ('missingJobIds','missingAlarmIds','invalidDates','zeroDurations','invalidDurations','validRows')):invalid()
+        missing_sn=s.get('missingAlarmSN',0)
+        if type(missing_sn)!=int or not 0<=missing_sn<=MAX_ROWS:invalid()
+        if 'missingAlarmSN' not in s and s['validRows']>stored:invalid()
+        if s['validRows']!=s['addedRows']+s['duplicateRows'] or not 0<s['validRows'] or not stored or s['addedRows']>stored or s['matchedRows']>s['validRows']:invalid()
+        if s['sourceRows']!=missing_sn+sum(s[k] for k in ('missingJobIds','missingAlarmIds','invalidDates','zeroDurations','invalidDurations','validRows')):invalid()
     except (TypeError,ValueError,KeyError):
         invalid()
     dest.execute('INSERT INTO alarm_mttr_last_import VALUES(1,?)',(json.dumps(s,ensure_ascii=False),))
